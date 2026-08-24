@@ -1,0 +1,259 @@
+# 생성 세션 상태머신: 프롬프트 → 코드 생성 → 실행 → 캡처 → 비평 → 반복 → 마무리
+import os
+import re
+import tempfile
+
+import bpy
+
+from .. import preferences
+from ..agents.claude_cli import ClaudeBackend
+from ..agents.codex_cli import CodexBackend
+from ..agents.parsing import parse_agent_reply
+from . import capture, executor, prompts, runner
+
+_current = None  # 동시 세션은 1개만 허용
+
+
+def is_active() -> bool:
+    return _current is not None
+
+
+def start_session(context, variation_of=None, variation_count=3):
+    """UI에서 호출하는 진입점. variation_of가 있으면 변형 생성 세션."""
+    global _current
+    if _current is not None:
+        return "이미 생성 세션이 진행 중입니다"
+    props = context.scene.lp3d
+    request = (props.last_prompt if variation_of else props.prompt).strip()
+    if not request:
+        return "프롬프트를 입력하세요"
+    exe = preferences.resolve_cli_path(props.agent)
+    if not exe:
+        return f"{props.agent} CLI를 찾을 수 없습니다. 환경설정에서 경로를 지정하세요"
+    _current = GenerationSession(
+        scene_name=context.scene.name,
+        request=request,
+        agent=props.agent,
+        exe=exe,
+        max_iterations=props.max_iterations,
+        variation_code=variation_of,
+        variation_count=variation_count,
+    )
+    _current.start()
+    return None
+
+
+def cancel_session():
+    if _current:
+        _current.cancel()
+
+
+def _end_session():
+    global _current
+    _current = None
+    runner.set_keepalive(False)
+
+
+def _slug(text: str) -> str:
+    ascii_part = re.sub(r"[^A-Za-z0-9]+", "_", text)[:24].strip("_")
+    return ascii_part or "Model"
+
+
+class GenerationSession:
+    def __init__(self, scene_name, request, agent, exe, max_iterations,
+                 variation_code=None, variation_count=3):
+        self.scene_name = scene_name
+        self.request = request
+        self.max_iterations = max_iterations
+        self.variation_code = variation_code
+        self.variation_count = variation_count
+        self.workdir = tempfile.mkdtemp(prefix="lp3d_")
+        backend_cls = ClaudeBackend if agent == 'CLAUDE' else CodexBackend
+        self.backend = backend_cls(exe, self.workdir)
+        self.prefs = preferences.get_prefs()
+        # 런타임 상태
+        self.session_id = None
+        self.iteration = 1
+        self.exec_retries = 0
+        self.format_retries = 0
+        self.stateless = False       # resume 실패 시 폴백 모드
+        self.fallback_used = False
+        self.last_code = None
+        base = f"LP3D_{_slug(request)}"
+        name, n = base, 1
+        while bpy.data.collections.get(name):
+            n += 1
+            name = f"{base}.{n:03d}"
+        self.collection_name = name
+
+    # ---------- 상태/로그 ----------
+    def _props(self):
+        scene = bpy.data.scenes.get(self.scene_name)
+        return scene.lp3d if scene else None
+
+    def _set_status(self, status: str, log: str = None):
+        props = self._props()
+        if props:
+            props.status = status
+            props.iteration = self.iteration
+            if log:
+                lines = (props.log + "\n" + log).strip().splitlines()
+                props.log = "\n".join(lines[-30:])
+        if log:
+            print(f"[LP3D] {log}")
+        self._redraw()
+
+    @staticmethod
+    def _redraw():
+        wm = bpy.context.window_manager
+        if not wm:
+            return
+        for window in wm.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+
+    # ---------- 라이프사이클 ----------
+    def start(self):
+        props = self._props()
+        if props:
+            props.is_running = True
+            props.log = ""
+        runner.set_keepalive(True)
+        self.backend.prepare_workdir(prompts.build_system_prompt())
+        if self.variation_code:
+            first = prompts.build_variation_prompt(self.request, self.variation_code,
+                                                   self.variation_count)
+        else:
+            first = prompts.build_initial_prompt(self.request)
+        self._set_status("에이전트 호출 중...", f"세션 시작: {self.request} ({self.backend.name})")
+        self._dispatch(first)
+
+    def cancel(self):
+        runner.cancel()
+        executor.clear_collection(self.collection_name)
+        coll = bpy.data.collections.get(self.collection_name)
+        if coll and not coll.objects:
+            bpy.data.collections.remove(coll)
+        self._finish("취소됨", ok=False)
+
+    def _finish(self, status: str, ok: bool):
+        props = self._props()
+        if props:
+            props.is_running = False
+            if ok:
+                props.last_collection = self.collection_name
+                props.last_code = self.last_code or ""
+                if not self.variation_code:
+                    props.last_prompt = self.request
+        self._set_status(status, f"세션 종료: {status}")
+        _end_session()
+
+    # ---------- 에이전트 왕복 ----------
+    def _dispatch(self, prompt: str, images=None):
+        if images:
+            prompt += self.backend.image_prompt_hint(images)
+        use_resume = self.session_id and not self.stateless
+        if self.stateless and self.last_code:
+            # 폴백: 세션 기억이 없으므로 맥락을 프롬프트에 인라인
+            prompt = (
+                f"(세션 요약) 원 요청: {self.request}\n"
+                f"현재 코드:\n```python\n{self.last_code}\n```\n\n" + prompt
+            )
+        if use_resume:
+            cmd = self.backend.build_resume_command(self.session_id, prompt, images or [])
+        else:
+            cmd = self.backend.build_initial_command(prompt)
+        self._was_resume = use_resume
+        runner.run_cli_async(cmd, self.workdir, self.prefs.timeout, self._on_response)
+
+    def _on_response(self, stdout, error):
+        if error:
+            if "사용자 취소" in error:
+                return  # cancel()이 이미 정리함
+            # resume이 깨졌으면 stateless 폴백으로 1회 재시도
+            if getattr(self, "_was_resume", False) and not self.fallback_used:
+                self.fallback_used = True
+                self.stateless = True
+                self._set_status("세션 이어가기 실패, 폴백 재시도...", f"resume 실패: {error.splitlines()[0]}")
+                self._dispatch("직전 지시를 계속 수행하라. 전체 코드를 다시 작성하라.")
+                return
+            self._finish(f"실패: {error.splitlines()[0]}", ok=False)
+            return
+
+        try:
+            reply = self.backend.parse_response(stdout)
+        except Exception as e:
+            self._finish(f"응답 파싱 실패: {e}", ok=False)
+            return
+        if reply.session_id:
+            self.session_id = reply.session_id
+
+        status, code = parse_agent_reply(reply.text)
+        if code is None:
+            if status == 'DONE':
+                self._finalize()
+                return
+            if self.format_retries < 1:
+                self.format_retries += 1
+                self._set_status("형식 위반, 재요청...", "응답에 코드 블록 없음 — 형식 재요청")
+                self._dispatch(
+                    "출력 형식 위반이다. 첫 줄 `STATUS: REVISE` 또는 `STATUS: DONE`, "
+                    "이어서 python 코드 블록 1개(수정 불필요 시 DONE만)로 다시 답하라."
+                )
+                return
+            self._finish("실패: 에이전트 응답 형식 위반", ok=False)
+            return
+
+        self._execute(code, status)
+
+    # ---------- 실행/비평 ----------
+    def _execute(self, code: str, status):
+        self._set_status(f"코드 실행 중 (반복 {self.iteration}/{self.max_iterations})...")
+        ok, error = executor.execute(code, self.collection_name, seed=self.iteration)
+        if not ok:
+            if self.exec_retries < 2:
+                self.exec_retries += 1
+                self._set_status("실행 오류, 자기수정 요청...",
+                                 f"실행 오류(재시도 {self.exec_retries}/2): {error.splitlines()[-1]}")
+                self._dispatch(prompts.build_error_prompt(error))
+                return
+            self._finish("실패: 코드 실행 오류 반복", ok=False)
+            return
+
+        self.exec_retries = 0
+        self.last_code = code
+        self._set_status(f"반복 {self.iteration} 생성 완료", f"반복 {self.iteration} 실행 성공")
+        if status == 'DONE' or self.iteration >= self.max_iterations:
+            self._finalize()
+        else:
+            self._critique()
+
+    def _critique(self):
+        self._set_status("뷰포트 캡처 중...")
+        images, stats = capture.capture_collection(
+            self.collection_name, self.workdir,
+            count=self.prefs.capture_count, resolution=self.prefs.capture_resolution,
+        )
+        if not images:
+            self._finalize()  # 캡처할 게 없으면 그대로 마무리
+            return
+        self.iteration += 1
+        prompt = prompts.build_critique_prompt(
+            [os.path.basename(p) for p in images], stats,
+            self.iteration, self.max_iterations,
+        )
+        self._set_status(f"에이전트 비평 요청 중 ({self.iteration}/{self.max_iterations})...")
+        self._dispatch(prompt, images=images)
+
+    def _finalize(self):
+        from ..lowpoly.cleanup import collection_tri_count, game_ready
+        coll = bpy.data.collections.get(self.collection_name)
+        if coll:
+            for obj in coll.objects:
+                if obj.type == 'MESH':
+                    game_ready(obj)
+            tris = collection_tri_count(coll)
+            self._finish(f"완료 — {self.collection_name} ({tris} tris)", ok=True)
+        else:
+            self._finish("실패: 생성된 오브젝트 없음", ok=False)

@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+*.blend1
+dist/
+Generate/
+.omc/
+.claude/

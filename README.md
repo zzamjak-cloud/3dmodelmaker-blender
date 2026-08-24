@@ -47,4 +47,5 @@ python3 scripts/spike_cli.py claude   # CLI 계약 검증
 
 1. `blender_manifest.toml`의 `version` 올리기 → main에 push (Validate 워크플로우가 빌드 검증)
 2. GitHub → Actions → **Release** 워크플로우 → Run workflow
-3. 생성된 **드래프트 릴리스**를 확인 후 **Publish** — 이 순간부터 사용자 블렌더가 자동 업데이트를 감지
+3. 생성된 **드래프트 릴리스**를 확인 후 **Publish**
+4. `./scripts/release_index.sh` 실행 — 릴리스 zip 기준으로 `index.json`을 생성해 릴리스에 업로드 (이 순간부터 사용자 블렌더가 자동 업데이트를 감지)

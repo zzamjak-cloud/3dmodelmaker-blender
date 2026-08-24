@@ -4,7 +4,9 @@
 # 위험 모듈 import와 파일/프로세스 조작 빌트인 호출을 거부한다.
 import ast
 import math
+import os
 import random
+import runpy
 import traceback
 
 import bmesh
@@ -75,8 +77,10 @@ def clear_collection(collection_name: str):
             bpy.data.meshes.remove(mesh)
 
 
-def execute(code: str, collection_name: str, seed: int = 0):
-    """에이전트 코드를 실행한다. 성공 시 (True, None), 실패 시 (False, traceback 문자열)."""
+def execute(code: str, collection_name: str, seed: int = 0, workdir: str = None):
+    """에이전트 코드를 실행한다. 성공 시 (True, None), 실패 시 (False, traceback 문자열).
+
+    코드는 workdir(기본: Blender 임시 폴더)에 스크립트 파일로 저장 후 runpy로 실행한다."""
     error = check_code(code)
     if error:
         return False, error
@@ -91,15 +95,17 @@ def execute(code: str, collection_name: str, seed: int = 0):
         pass  # 백그라운드 모드에서는 undo 스택이 없음
     snap = snapshot()
     namespace = {
-        "__builtins__": __builtins__,  # AST 검사로 위험 호출은 이미 차단
         "bpy": bpy,
         "bmesh": bmesh,
         "math": math,
         "random": random.Random(seed),  # 시드 고정으로 재현성 확보
         "lp": lowpoly,
     }
+    script_path = os.path.join(workdir or bpy.app.tempdir, "lp3d_agent_code.py")
+    with open(script_path, "w", encoding="utf-8") as f:
+        f.write(code)
     try:
-        exec(compile(code, "<lp3d_agent>", "exec"), namespace)
+        runpy.run_path(script_path, init_globals=namespace)
         return True, None
     except Exception:
         tb = traceback.format_exc()

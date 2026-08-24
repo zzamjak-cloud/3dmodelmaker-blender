@@ -1,9 +1,12 @@
 # 생성 세션 상태머신: 프롬프트 → 코드 생성 → 실행 → 캡처 → 비평 → 반복 → 마무리
+import logging
 import os
 import re
 import tempfile
 
 import bpy
+
+_log = logging.getLogger(__name__)
 
 from .. import preferences
 from ..agents.claude_cli import ClaudeBackend
@@ -100,7 +103,7 @@ class GenerationSession:
                 lines = (props.log + "\n" + log).strip().splitlines()
                 props.log = "\n".join(lines[-30:])
         if log:
-            print(f"[LP3D] {log}")
+            _log.info(log)
         self._redraw()
 
     @staticmethod
@@ -210,7 +213,8 @@ class GenerationSession:
     # ---------- 실행/비평 ----------
     def _execute(self, code: str, status):
         self._set_status(f"코드 실행 중 (반복 {self.iteration}/{self.max_iterations})...")
-        ok, error = executor.execute(code, self.collection_name, seed=self.iteration)
+        ok, error = executor.execute(code, self.collection_name,
+                                     seed=self.iteration, workdir=self.workdir)
         if not ok:
             if self.exec_retries < 2:
                 self.exec_retries += 1

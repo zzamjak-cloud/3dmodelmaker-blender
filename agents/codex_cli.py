@@ -25,7 +25,8 @@ class CodexBackend(AgentBackend):
         ]
 
     def build_initial_command(self, user_prompt: str) -> list:
-        return [self.exe, "exec", *self._common_flags(), user_prompt]
+        # 프롬프트 인자는 "-" — codex exec가 stdin에서 읽는다 (.cmd 셸림 줄 잘림 회피)
+        return [self.exe, "exec", *self._common_flags(), "-"]
 
     def build_resume_command(self, session_id: str, user_prompt: str, images: list) -> list:
         # resume 서브커맨드는 -s/--cd를 지원하지 않음 (cwd는 subprocess의 workdir 사용)
@@ -36,7 +37,7 @@ class CodexBackend(AgentBackend):
         ]
         for img in images or []:
             cmd += ["-i", img]  # codex는 네이티브 이미지 첨부 지원
-        cmd.append(user_prompt)
+        cmd.append("-")  # 프롬프트는 stdin
         return cmd
 
     def parse_response(self, stdout: str) -> AgentReply:

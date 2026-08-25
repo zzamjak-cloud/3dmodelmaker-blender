@@ -27,6 +27,9 @@ def start_session(context, variation_of=None, variation_count=3):
     if _current is not None:
         return "이미 생성 세션이 진행 중입니다"
     props = context.scene.lp3d
+    if props.is_running:
+        # 세션 객체는 없는데 플래그만 남은 상태 (Dev Reload·파일 다시 열기 등)
+        props.is_running = False
     request = (props.last_prompt if variation_of else props.prompt).strip()
     if not request:
         return "프롬프트를 입력하세요"
@@ -168,9 +171,20 @@ class GenerationSession:
         else:
             cmd = self.backend.build_initial_command(prompt)
         self._was_resume = use_resume
-        runner.run_cli_async(cmd, self.workdir, self.prefs.timeout, self._on_response)
+        # 프롬프트는 stdin으로 — 명령줄 인자는 Windows .cmd 셸림에서 첫 줄만 전달된다
+        runner.run_cli_async(cmd, self.workdir, self.prefs.timeout, self._on_response,
+                             stdin_text=prompt)
 
     def _on_response(self, stdout, error):
+        # 콜백에서 예외가 나면 runner가 로그만 남기고 삼켜서 세션이 영구히 진행 중으로
+        # 남는다(취소/생성 모두 잠김). 여기서 반드시 세션을 종료시킨다.
+        try:
+            self._handle_response(stdout, error)
+        except Exception as e:
+            _log.exception("LP3D 세션 처리 오류")
+            self._finish(f"실패: 내부 오류 {type(e).__name__}: {e}", ok=False)
+
+    def _handle_response(self, stdout, error):
         if error:
             if "사용자 취소" in error:
                 return  # cancel()이 이미 정리함

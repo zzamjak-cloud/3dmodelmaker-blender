@@ -1,6 +1,8 @@
 # 3D 뷰포트 사이드바 패널
 import bpy
 
+from ..core import session
+
 
 class LP3D_PT_main(bpy.types.Panel):
     bl_label = "AI 모델 생성"
@@ -19,7 +21,11 @@ class LP3D_PT_main(bpy.types.Panel):
         col.prop(props, "max_iterations")
 
         col.separator()
-        if props.is_running:
+        # 진행 여부의 기준은 씬 프로퍼티가 아니라 실제 세션 객체다.
+        # is_running은 Dev Reload·파일 다시 열기로 세션이 사라져도 True로 남아
+        # 취소/생성 버튼이 모두 잠기는 교착을 만든다 (draw에서는 수정 불가).
+        running = session.is_active()
+        if running:
             col.operator("lp3d.cancel", icon='CANCEL')
         else:
             col.operator("lp3d.generate", icon='PLAY')
@@ -27,7 +33,7 @@ class LP3D_PT_main(bpy.types.Panel):
         # 진행 상태
         box = layout.box()
         box.label(text=f"상태: {props.status}", icon='INFO')
-        if props.is_running:
+        if running:
             box.label(text=f"반복: {props.iteration}/{props.max_iterations}")
 
 

@@ -14,7 +14,7 @@ class LP3D_OT_generate(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return not context.scene.lp3d.is_running
+        return not session.is_active()
 
     def execute(self, context):
         error = session.start_session(context)
@@ -31,7 +31,7 @@ class LP3D_OT_cancel(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.scene.lp3d.is_running
+        return session.is_active()
 
     def execute(self, context):
         session.cancel_session()
@@ -47,8 +47,7 @@ class LP3D_OT_variation(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        props = context.scene.lp3d
-        return not props.is_running and bool(props.last_code)
+        return not session.is_active() and bool(context.scene.lp3d.last_code)
 
     def execute(self, context):
         props = context.scene.lp3d
@@ -125,6 +124,9 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 
     def execute(self, context):
         import importlib
+        # 리로드하면 세션 모듈의 전역 상태가 초기화되므로, 진행 중인 세션은 먼저 정리한다
+        # (안 하면 CLI 프로세스와 타이머 펌프가 구 모듈에 남아 떠돈다)
+        session.cancel_session()
         root = importlib.import_module(__package__.rsplit(".", 1)[0])
         root.dev_reload()
         self.report({'INFO'}, "리로드 완료")

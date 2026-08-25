@@ -22,8 +22,9 @@ class ClaudeBackend(AgentBackend):
         ]
 
     def build_initial_command(self, user_prompt: str) -> list:
+        # 프롬프트 인자를 생략하면 claude -p가 stdin에서 읽는다 (.cmd 셸림 줄 잘림 회피)
         return [
-            self.exe, "-p", user_prompt,
+            self.exe, "-p",
             "--append-system-prompt-file", os.path.join(self.workdir, _SYS_FILENAME),
             *self._common_flags(),
         ]
@@ -31,7 +32,7 @@ class ClaudeBackend(AgentBackend):
     def build_resume_command(self, session_id: str, user_prompt: str, images: list) -> list:
         # 이미지는 workdir 상대경로를 프롬프트에 명시하고 Read 도구로 읽게 한다
         return [
-            self.exe, "-p", user_prompt,
+            self.exe, "-p",
             "--resume", session_id,
             *self._common_flags(),
         ]

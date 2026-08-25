@@ -44,7 +44,11 @@ def check_code(code: str):
 
 
 def snapshot():
-    return {kind: set(getattr(bpy.data, kind).keys()) for kind in _DATA_KINDS}
+    from ..lowpoly import palette
+    snap = {kind: set(getattr(bpy.data, kind).keys()) for kind in _DATA_KINDS}
+    # 팔레트 색 매핑은 데이터블록이 아니라 이미지 프로퍼티라 별도로 보존한다
+    snap["_palette"] = palette.snapshot_state()
+    return snap
 
 
 def rollback(snap):
@@ -63,6 +67,9 @@ def rollback(snap):
             block = data.get(name)
             if block and block.users == 0:
                 data.remove(block)
+    # 실패한 실행이 소비한 팔레트 셀 되돌리기 (누적되면 팔레트가 고갈된다)
+    from ..lowpoly import palette
+    palette.restore_state(snap.get("_palette"))
 
 
 def clear_collection(collection_name: str):

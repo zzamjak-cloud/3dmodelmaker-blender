@@ -18,8 +18,11 @@ _PUMP_INTERVAL = 0.25
 _job_counter = 0
 
 
-def run_cli_async(cmd: list, cwd: str, timeout: int, on_done):
-    """CLI를 논블로킹으로 실행하고 완료 시 메인 스레드에서 on_done(stdout, error)를 호출한다."""
+def run_cli_async(cmd: list, cwd: str, timeout: int, on_done, stdin_text: str = None):
+    """CLI를 논블로킹으로 실행하고 완료 시 메인 스레드에서 on_done(stdout, error)를 호출한다.
+
+    stdin_text가 주어지면 파일로 저장해 stdin으로 넘긴다. 프롬프트를 명령줄 인자로
+    넘기면 Windows의 .cmd 셸림(npm 설치본)이 첫 줄에서 잘라버리기 때문이다."""
     global _job_counter
     _job_counter += 1
     out_path = os.path.join(cwd, f"cli_stdout_{_job_counter}.log")
@@ -32,9 +35,16 @@ def run_cli_async(cmd: list, cwd: str, timeout: int, on_done):
     try:
         job["out_file"] = open(out_path, "w", encoding="utf-8")
         job["err_file"] = open(err_path, "w", encoding="utf-8")
+        if stdin_text is None:
+            stdin = subprocess.DEVNULL  # CLI가 stdin을 기다리지 않도록
+        else:
+            in_path = os.path.join(cwd, f"cli_stdin_{_job_counter}.txt")
+            with open(in_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(stdin_text)
+            job["in_file"] = stdin = open(in_path, "rb")
         job["proc"] = subprocess.Popen(
             cmd, cwd=cwd,
-            stdin=subprocess.DEVNULL,  # CLI가 stdin을 기다리지 않도록
+            stdin=stdin,
             stdout=job["out_file"], stderr=job["err_file"],
         )
     except FileNotFoundError:
@@ -65,7 +75,7 @@ def set_keepalive(active: bool):
 
 
 def _close_job_files(job):
-    for key in ("out_file", "err_file"):
+    for key in ("out_file", "err_file", "in_file"):
         f = job.get(key)
         if f and not f.closed:
             f.close()

@@ -240,13 +240,14 @@ def _union_solids(solids) -> bpy.types.Mesh:
     return mesh
 
 
-def join(objects, name="Joined", mode='union') -> bpy.types.Object:
+def join(objects, name="Joined", mode='fast') -> bpy.types.Object:
     """여러 오브젝트를 하나의 메시로 합친다(트랜스폼 적용됨). 합쳐진 오브젝트를 반환.
 
-    mode='union'(기본): 닫힌 메시들을 불리언 유니온으로 병합해 파트가 겹친 내부의
-    숨은 면을 제거한다. 파트는 접촉면을 억지로 맞추지 말고 자신 있게 겹쳐 파묻어라.
-    열린 메시(plane 등)나 유니온 실패 파트는 자동으로 단순 병합된다.
-    mode='fast': 기하 변경 없이 단순 병합만 한다."""
+    mode='fast'(기본): 기하 변경 없이 단순 병합한다 — 각 파트가 느슨한 덩어리로
+    보존되어 후편집이 쉽다. 파트가 겹쳐 완전히 가려진 면은 시스템이 마무리
+    단계에서 자동 삭제하므로 자신 있게 겹쳐 파묻어라.
+    mode='union': 닫힌 메시들을 불리언 유니온으로 병합(교차선에서 면이 잘려
+    면 수가 늘 수 있음 — 수밀 단일 셸이 꼭 필요한 경우에만)."""
     objects = list(objects)
     # 방금 설정한 location/rotation이 matrix_world에 반영되도록 depsgraph 갱신
     bpy.context.view_layer.update()

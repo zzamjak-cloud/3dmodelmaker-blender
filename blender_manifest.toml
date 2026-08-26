@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "lp3d_modelmaker"
-version = "0.3.0"
+version = "0.3.1"
 name = "AI LowPoly ModelMaker"
 tagline = "Claude/Codex agent generates game-ready low-poly models"
 maintainer = "Woody <jinpyoung@loadcomplete.com>"

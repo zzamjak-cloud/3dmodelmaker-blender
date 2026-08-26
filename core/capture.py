@@ -133,13 +133,15 @@ def capture_collection(collection_name: str, out_dir: str, count: int = 4, resol
         bpy.data.objects.remove(cam_obj)
         bpy.data.cameras.remove(cam_data)
 
-    from ..lowpoly.cleanup import collection_tri_count, count_hidden_faces, nonmanifold_edge_count
+    from ..lowpoly.cleanup import (collection_tri_count, count_hidden_faces,
+                                   floating_part_count, nonmanifold_edge_count)
     mesh_objs = [o for o in coll.objects if o.type == 'MESH']
     stats = {
         "트라이앵글 수": collection_tri_count(coll),
         "오브젝트 수": len(mesh_objs),
         "바운딩 박스 크기(m)": f"{radius * 2:.2f}",
-        "완전히 가려진 은면 수": count_hidden_faces(mesh_objs),
+        "공중에 뜬 파트 수": floating_part_count(mesh_objs),
         "논매니폴드 엣지 수": nonmanifold_edge_count(mesh_objs),
+        "겹침 은면 수(마무리 때 자동 삭제됨)": count_hidden_faces(mesh_objs),
     }
     return paths, stats

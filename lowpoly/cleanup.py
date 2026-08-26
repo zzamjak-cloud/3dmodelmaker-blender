@@ -101,6 +101,66 @@ def cull_hidden_faces(objs) -> int:
     return removed
 
 
+def _island_bounds(objs):
+    """모든 메시 오브젝트의 연결 요소(느슨한 파트)별 월드 AABB 목록을 반환."""
+    boxes = []
+    for obj in objs:
+        if obj.type != 'MESH' or not len(obj.data.vertices):
+            continue
+        mesh = obj.data
+        mw = obj.matrix_world
+        parent = list(range(len(mesh.vertices)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]  # 경로 압축
+                i = parent[i]
+            return i
+
+        for edge in mesh.edges:
+            a, b = edge.vertices
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+        groups = {}
+        for vi, v in enumerate(mesh.vertices):
+            co = mw @ v.co
+            root = find(vi)
+            box = groups.get(root)
+            if box is None:
+                groups[root] = [Vector(co), Vector(co)]
+            else:
+                box[0].x = min(box[0].x, co.x); box[0].y = min(box[0].y, co.y); box[0].z = min(box[0].z, co.z)
+                box[1].x = max(box[1].x, co.x); box[1].y = max(box[1].y, co.y); box[1].z = max(box[1].z, co.z)
+        boxes.extend(groups.values())
+    return boxes
+
+
+def _aabb_touch(a, b, tol):
+    return all(a[0][i] - tol <= b[1][i] and b[0][i] - tol <= a[1][i] for i in range(3))
+
+
+def floating_part_count(objs, tol=0.02) -> int:
+    """바닥이나 다른 파트와 접촉 사슬로 이어지지 않고 공중에 뜬 파트 수.
+
+    파트 = 느슨한 연결 요소. 모델 최저점에 닿은 파트를 뿌리로 AABB 접촉 그래프를
+    탐색해, 도달 불가능한 파트를 '떠 있음'으로 센다 (굴뚝이 지붕에서 분리된 경우 등)."""
+    bpy.context.view_layer.update()  # 방금 배치한 트랜스폼을 matrix_world에 반영
+    boxes = _island_bounds(objs)
+    if len(boxes) <= 1:
+        return 0
+    ground_z = min(box[0].z for box in boxes)
+    reached = set(i for i, box in enumerate(boxes) if box[0].z <= ground_z + tol)
+    queue = list(reached)
+    while queue:
+        cur = queue.pop()
+        for i, box in enumerate(boxes):
+            if i not in reached and _aabb_touch(boxes[cur], box, tol):
+                reached.add(i)
+                queue.append(i)
+    return len(boxes) - len(reached)
+
+
 def nonmanifold_edge_count(objs) -> int:
     """3개 이상 면이 공유하는 엣지 수 — 파트 관통·내부 벽 잔재의 결함 지표."""
     total = 0

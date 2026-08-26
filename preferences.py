@@ -43,6 +43,16 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         subtype='FILE_PATH',
         default="",
     )
+    gen_model: StringProperty(
+        name="생성 모델",
+        description="초기 코드 생성 모델 (비우면 CLI 기본). 예: Claude는 sonnet/opus, Codex는 gpt-5 계열",
+        default="",
+    )
+    critique_model: StringProperty(
+        name="비평 모델",
+        description="이미지 비평 턴 전용 빠른 모델 — 생성 속도에 직결 (비우면 생성 모델과 동일, Claude 전용)",
+        default="",
+    )
     timeout: IntProperty(
         name="CLI 타임아웃(초)",
         description="에이전트 호출 1회당 최대 대기 시간",
@@ -50,8 +60,8 @@ class LP3DPreferences(bpy.types.AddonPreferences):
     )
     capture_count: IntProperty(
         name="캡처 앵글 수",
-        description="피드백 루프에서 에이전트에게 보여줄 뷰포트 캡처 장수",
-        default=4, min=1, max=6,
+        description="비평 턴에 보여줄 컬러 캡처 장수 (실루엣 1장은 별도) — 적을수록 비평이 빠르다",
+        default=2, min=1, max=6,
     )
     capture_resolution: IntProperty(
         name="캡처 해상도",
@@ -68,6 +78,8 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col = self.layout.column()
         col.prop(self, "claude_path")
         col.prop(self, "codex_path")
+        col.prop(self, "gen_model")
+        col.prop(self, "critique_model")
         col.prop(self, "timeout")
         col.prop(self, "capture_count")
         col.prop(self, "capture_resolution")
@@ -78,8 +90,10 @@ class _Defaults:
     """애드온으로 활성화되지 않은 상태(테스트 등)에서 쓰는 기본값."""
     claude_path = ""
     codex_path = ""
+    gen_model = ""
+    critique_model = ""
     timeout = 300
-    capture_count = 4
+    capture_count = 2
     capture_resolution = 512
     asset_library_path = ""
 

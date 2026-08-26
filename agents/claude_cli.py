@@ -21,11 +21,17 @@ class ClaudeBackend(AgentBackend):
             "--max-turns", "8",
         ]
 
+    def _model_flags(self, for_critique=False) -> list:
+        # 비평 턴은 빠른 모델로 분리 가능 (--resume에도 --model이 적용됨)
+        model = (self.critique_model if for_critique else "") or self.model
+        return ["--model", model] if model else []
+
     def build_initial_command(self, user_prompt: str) -> list:
         # 프롬프트 인자를 생략하면 claude -p가 stdin에서 읽는다 (.cmd 셸림 줄 잘림 회피)
         return [
             self.exe, "-p",
             "--append-system-prompt-file", os.path.join(self.workdir, _SYS_FILENAME),
+            *self._model_flags(),
             *self._common_flags(),
         ]
 
@@ -34,6 +40,7 @@ class ClaudeBackend(AgentBackend):
         return [
             self.exe, "-p",
             "--resume", session_id,
+            *self._model_flags(for_critique=bool(images)),
             *self._common_flags(),
         ]
 

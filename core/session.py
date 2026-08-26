@@ -77,6 +77,8 @@ class GenerationSession:
         backend_cls = ClaudeBackend if agent == 'CLAUDE' else CodexBackend
         self.backend = backend_cls(exe, self.workdir)
         self.prefs = preferences.get_prefs()
+        self.backend.model = self.prefs.gen_model.strip()
+        self.backend.critique_model = self.prefs.critique_model.strip()
         # 런타임 상태
         self.session_id = None
         self.iteration = 1
@@ -252,6 +254,7 @@ class GenerationSession:
         images, stats = capture.capture_collection(
             self.collection_name, self.workdir,
             count=self.prefs.capture_count, resolution=self.prefs.capture_resolution,
+            silhouettes=1,  # 비평 속도를 위해 실루엣은 1장만 (iso)
         )
         if not images:
             self._finalize()  # 캡처할 게 없으면 그대로 마무리

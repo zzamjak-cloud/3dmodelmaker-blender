@@ -27,6 +27,9 @@ class AgentBackend(ABC):
     def __init__(self, exe_path: str, workdir: str):
         self.exe = exe_path
         self.workdir = workdir
+        # 세션이 환경설정에서 주입 — 비우면 CLI 기본 모델 사용
+        self.model = ""           # 초기 코드 생성용
+        self.critique_model = ""  # 이미지 비평 턴용 (빠른 모델 권장)
 
     @abstractmethod
     def prepare_workdir(self, system_prompt: str):

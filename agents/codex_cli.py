@@ -26,7 +26,9 @@ class CodexBackend(AgentBackend):
 
     def build_initial_command(self, user_prompt: str) -> list:
         # 프롬프트 인자는 "-" — codex exec가 stdin에서 읽는다 (.cmd 셸림 줄 잘림 회피)
-        return [self.exe, "exec", *self._common_flags(), "-"]
+        # 모델 지정은 초기 세션에만 적용 (resume 서브커맨드는 -m 미지원, 세션 모델 유지)
+        model = ["-m", self.model] if self.model else []
+        return [self.exe, "exec", *model, *self._common_flags(), "-"]
 
     def build_resume_command(self, session_id: str, user_prompt: str, images: list) -> list:
         # resume 서브커맨드는 -s/--cd를 지원하지 않음 (cwd는 subprocess의 workdir 사용)

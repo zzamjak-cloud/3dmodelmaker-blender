@@ -265,13 +265,15 @@ class GenerationSession:
         self._dispatch(prompt, images=images)
 
     def _finalize(self):
-        from ..lowpoly.cleanup import collection_tri_count, game_ready
+        from ..lowpoly.cleanup import collection_tri_count, cull_hidden_faces, game_ready
         coll = bpy.data.collections.get(self.collection_name)
         if coll:
-            for obj in coll.objects:
-                if obj.type == 'MESH':
-                    game_ready(obj)
+            mesh_objs = [o for o in coll.objects if o.type == 'MESH']
+            removed = cull_hidden_faces(mesh_objs)  # join(union)을 안 거친 잔여 은면 제거
+            for obj in mesh_objs:
+                game_ready(obj)
             tris = collection_tri_count(coll)
-            self._finish(f"완료 — {self.collection_name} ({tris} tris)", ok=True)
+            note = f", 은면 {removed}개 제거" if removed else ""
+            self._finish(f"완료 — {self.collection_name} ({tris} tris{note})", ok=True)
         else:
             self._finish("실패: 생성된 오브젝트 없음", ok=False)

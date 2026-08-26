@@ -105,6 +105,93 @@ def taper(obj, factor=0.5, axis='Z'):
     return obj
 
 
+def _z_range(bm):
+    zs = [v.co.z for v in bm.verts]
+    lo = min(zs)
+    return lo, (max(zs) - lo) or 1.0
+
+
+def bend(obj, angle=30.0, axis='X'):
+    """Z 높이에 따라 점진적으로 axis 축 둘레로 회전시켜 활처럼 구부린다.
+
+    휘어진 나무줄기·기울어진 굴뚝·바람에 눕는 풀 같은 만화적 동세의 핵심.
+    angle은 도 단위로 꼭대기가 받는 회전량(바닥은 0도). axis='X'면 Y방향으로 눕는다.
+    예: lp.bend(trunk, angle=20)  # 살짝 휜 나무줄기"""
+    bm = _edit_bmesh(obj)
+    lo, span = _z_range(bm)
+    pivot = Vector((0.0, 0.0, lo))
+    for v in bm.verts:
+        t = (v.co.z - lo) / span
+        rot = Matrix.Rotation(math.radians(angle) * t, 4, axis)
+        v.co = rot @ (v.co - pivot) + pivot
+    _write_back(bm, obj)
+    return obj
+
+
+def bulge(obj, amount=0.3, center=0.5, width=0.5):
+    """Z 정규화 높이(0=바닥, 1=꼭대기)의 center 주변 폭(XY)을 불룩하게/잘록하게 한다.
+
+    amount=0.3이면 최대 지점 폭이 130%(음수면 잘록). width는 영향 범위(정규화).
+    배럴의 배, 항아리 허리, 통통한 몸통 등 곡률 실루엣을 한 줄로 만든다.
+    예: lp.bulge(body, amount=0.35, center=0.45)  # 배가 불룩한 몸통"""
+    bm = _edit_bmesh(obj)
+    lo, span = _z_range(bm)
+    for v in bm.verts:
+        t = (v.co.z - lo) / span
+        d = abs(t - center) / max(width, 1e-4)
+        if d < 1.0:
+            s = 1.0 + amount * 0.5 * (1.0 + math.cos(math.pi * d))
+            v.co.x *= s
+            v.co.y *= s
+    _write_back(bm, obj)
+    return obj
+
+
+def shear(obj, offset=0.3, axis='X'):
+    """꼭대기로 갈수록 axis 방향으로 밀어 기울인다(전단 변형). offset은 꼭대기 이동량(m).
+
+    바람 맞은 나무·비스듬한 텐트·달리는 듯한 동세 등 만화적 기울기에 사용.
+    예: lp.shear(tree_top, offset=0.4)  # 바람에 쏠린 잎덩어리"""
+    bm = _edit_bmesh(obj)
+    lo, span = _z_range(bm)
+    idx = {'X': 0, 'Y': 1}[axis]
+    for v in bm.verts:
+        v.co[idx] += offset * (v.co.z - lo) / span
+    _write_back(bm, obj)
+    return obj
+
+
+def stretch_at(obj, z_min, z_max, scale=1.3):
+    """z_min~z_max(m) 높이 구간의 폭(XY)만 scale배 한다 — 부분 과장의 핵심 도구.
+
+    높이는 오브젝트 로컬 좌표 기준이다 (location으로 배치하기 전의 형상 기준).
+    "지붕만 넓게", "밑동만 굵게", "머리만 크게" 같은 데포르메를 한 줄로.
+    구간 경계에 단차가 생기지 않도록 한 파트 전체를 감싸는 구간을 주는 것이 좋다.
+    예: lp.stretch_at(house, z_min=1.2, z_max=2.2, scale=1.25)  # 지붕부만 과장"""
+    bm = _edit_bmesh(obj)
+    for v in bm.verts:
+        if z_min <= v.co.z <= z_max:
+            v.co.x *= scale
+            v.co.y *= scale
+    _write_back(bm, obj)
+    return obj
+
+
+def jitter(obj, amount=0.05, seed=0):
+    """정점을 무작위로 흔들어 유기적인 울퉁불퉁함을 만든다(시드 고정, 재현 가능).
+
+    바위·통나무·흙더미·빵 등 유기물 표면에 사용. amount는 최대 변위(m) —
+    아이코스피어 바위는 반지름의 15~25% 권장.
+    예: rock = lp.jitter(lp.sphere("Rock", radius=0.4), amount=0.08, seed=3)"""
+    import random as _random
+    rng = _random.Random(seed)
+    bm = _edit_bmesh(obj)
+    for v in bm.verts:
+        v.co += Vector((rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1))) * amount
+    _write_back(bm, obj)
+    return obj
+
+
 def shade_flat(obj):
     """플랫 셰이딩 적용 (로우폴리 기본). game_ready가 자동 호출하므로 보통 불필요."""
     for poly in obj.data.polygons:

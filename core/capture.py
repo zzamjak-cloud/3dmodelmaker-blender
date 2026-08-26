@@ -15,6 +15,12 @@ _ANGLES = [
     ("iso_left", Vector((-1, -1, 0.8))),
 ]
 
+# 실루엣 캡처 앵글: 형태(윤곽) 판독용 — 낮은 높이의 3/4·옆모습
+_SILHOUETTE_ANGLES = [
+    ("silhouette_iso", Vector((1, -1, 0.5))),
+    ("silhouette_side", Vector((1, 0, 0.1))),
+]
+
 # 원상복구할 렌더/디스플레이 설정 키
 _RENDER_KEYS = ("engine", "resolution_x", "resolution_y", "resolution_percentage",
                 "filepath", "film_transparent")
@@ -37,8 +43,12 @@ def _collection_bounds(coll):
     return center, radius
 
 
-def capture_collection(collection_name: str, out_dir: str, count: int = 4, resolution: int = 512):
-    """세션 컬렉션을 여러 앵글로 렌더해 PNG 경로 리스트와 통계를 반환한다."""
+def capture_collection(collection_name: str, out_dir: str, count: int = 4, resolution: int = 512,
+                       silhouettes: int = 2):
+    """세션 컬렉션을 여러 앵글로 렌더해 PNG 경로 리스트와 통계를 반환한다.
+
+    컬러 캡처 count장에 더해 실루엣(검정 단색·흰 배경) silhouettes장을 캡처한다 —
+    비평 턴에서 형태감(윤곽 판독성)을 평가하는 용도."""
     scene = bpy.context.scene
     coll = bpy.data.collections.get(collection_name)
     if not coll or not any(o.type == 'MESH' for o in coll.objects):
@@ -59,7 +69,11 @@ def capture_collection(collection_name: str, out_dir: str, count: int = 4, resol
     saved_render = {k: getattr(scene.render, k) for k in _RENDER_KEYS}
     saved_camera = scene.camera
     shading = scene.display.shading
-    saved_shading = (shading.light, shading.color_type, shading.show_object_outline)
+    saved_shading = (shading.light, shading.color_type, shading.show_object_outline,
+                     tuple(shading.single_color), shading.background_type,
+                     tuple(shading.background_color))
+    # AgX 등 뷰 트랜스폼이 팔레트 색을 물빠지게 하므로 캡처 동안 Standard로 고정
+    saved_view = (scene.view_settings.view_transform, scene.view_settings.look)
     # 세션 컬렉션 외 오브젝트는 렌더에서 숨긴다 (씬의 기존 오브젝트가 찍히지 않도록)
     session_objects = set(coll.objects)
     saved_hidden = [(obj, obj.hide_render) for obj in scene.collection.all_objects]
@@ -67,6 +81,8 @@ def capture_collection(collection_name: str, out_dir: str, count: int = 4, resol
         for obj, _ in saved_hidden:
             if obj not in session_objects:
                 obj.hide_render = True
+        scene.view_settings.view_transform = 'Standard'
+        scene.view_settings.look = 'None'
         scene.render.engine = 'BLENDER_WORKBENCH'
         scene.render.resolution_x = resolution
         scene.render.resolution_y = resolution
@@ -77,8 +93,7 @@ def capture_collection(collection_name: str, out_dir: str, count: int = 4, resol
         shading.show_object_outline = True  # 실루엣 파악에 도움
         scene.camera = cam_obj
 
-        paths = []
-        for name, direction in _ANGLES[:count]:
+        def _render(name, direction):
             d = direction.normalized()
             cam_obj.location = center + d * distance
             look = center - cam_obj.location
@@ -86,7 +101,21 @@ def capture_collection(collection_name: str, out_dir: str, count: int = 4, resol
             path = os.path.join(out_dir, f"capture_{name}.png")
             scene.render.filepath = path
             bpy.ops.render.render(write_still=True)
-            paths.append(path)
+            return path
+
+        paths = []
+        for name, direction in _ANGLES[:count]:
+            paths.append(_render(name, direction))
+
+        # 실루엣 패스: 검정 단색 + 플랫 라이트 + 흰 배경 — 윤곽 판독용
+        shading.light = 'FLAT'
+        shading.color_type = 'SINGLE'
+        shading.single_color = (0.0, 0.0, 0.0)
+        shading.show_object_outline = False
+        shading.background_type = 'VIEWPORT'
+        shading.background_color = (1.0, 1.0, 1.0)
+        for name, direction in _SILHOUETTE_ANGLES[:silhouettes]:
+            paths.append(_render(name, direction))
     finally:
         # 원상복구
         for obj, hidden in saved_hidden:
@@ -97,14 +126,20 @@ def capture_collection(collection_name: str, out_dir: str, count: int = 4, resol
         for k, v in saved_render.items():
             setattr(scene.render, k, v)
         scene.camera = saved_camera
-        shading.light, shading.color_type, shading.show_object_outline = saved_shading
+        scene.view_settings.view_transform, scene.view_settings.look = saved_view
+        (shading.light, shading.color_type, shading.show_object_outline,
+         shading.single_color, shading.background_type,
+         shading.background_color) = saved_shading
         bpy.data.objects.remove(cam_obj)
         bpy.data.cameras.remove(cam_data)
 
-    from ..lowpoly.cleanup import collection_tri_count
+    from ..lowpoly.cleanup import collection_tri_count, count_hidden_faces, nonmanifold_edge_count
+    mesh_objs = [o for o in coll.objects if o.type == 'MESH']
     stats = {
         "트라이앵글 수": collection_tri_count(coll),
-        "오브젝트 수": len([o for o in coll.objects if o.type == 'MESH']),
+        "오브젝트 수": len(mesh_objs),
         "바운딩 박스 크기(m)": f"{radius * 2:.2f}",
+        "완전히 가려진 은면 수": count_hidden_faces(mesh_objs),
+        "논매니폴드 엣지 수": nonmanifold_edge_count(mesh_objs),
     }
     return paths, stats

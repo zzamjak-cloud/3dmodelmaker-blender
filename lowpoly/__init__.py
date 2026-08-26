@@ -4,14 +4,16 @@
 # 자동 추출된다 (core/prompts.py). 독스트링 첫 단락을 에이전트가 그대로 읽는다.
 import bpy
 
-from .primitives import box, cylinder, cone, sphere, plane, lathe, join
-from .modeling import bevel, mirror_x, array, scatter, taper, shade_flat
+from .primitives import box, cylinder, cone, sphere, plane, lathe, prism, tube, join
+from .modeling import (bevel, mirror_x, array, scatter, taper, shade_flat,
+                       bend, bulge, shear, stretch_at, jitter)
 from .palette import set_color
 from .cleanup import game_ready
 
 __all__ = [
-    "root", "box", "cylinder", "cone", "sphere", "plane", "lathe", "join",
-    "bevel", "mirror_x", "array", "scatter", "taper", "shade_flat",
+    "root", "box", "cylinder", "cone", "sphere", "plane", "lathe", "prism", "tube", "join",
+    "bevel", "mirror_x", "array", "scatter", "taper", "bend", "bulge", "shear",
+    "stretch_at", "jitter", "shade_flat",
     "set_color", "game_ready",
 ]
 

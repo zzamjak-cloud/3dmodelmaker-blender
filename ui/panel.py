@@ -30,6 +30,15 @@ class LP3D_PT_main(bpy.types.Panel):
         else:
             col.operator("lp3d.generate", icon='PLAY')
 
+        # 개선 사이클: 결과가 마음에 안 들면 [개선하기]를 필요한 만큼, 만족하면 [개선 종료]
+        if not running and props.improve_open and props.last_code:
+            box = layout.box()
+            box.label(text=f"개선: {props.last_collection}", icon='MODIFIER')
+            box.prop(props, "improve_feedback", text="")
+            row = box.row(align=True)
+            row.operator("lp3d.improve", icon='FILE_REFRESH')
+            row.operator("lp3d.improve_done", icon='CHECKMARK')
+
         # 진행 상태
         box = layout.box()
         box.label(text=f"상태: {props.status}", icon='INFO')

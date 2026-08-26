@@ -18,10 +18,16 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
         default='CLAUDE',
     )
     max_iterations: IntProperty(
-        name="개선 반복",
-        description="시각 피드백 루프 최대 반복 횟수 (1이면 원샷 생성)",
-        default=3, min=1, max=8,
+        name="자동 반복",
+        description="자동 시각 피드백 루프 최대 반복 횟수 (기본 1=원샷 — 결과가 아쉬우면 개선하기 버튼으로 필요한 만큼만 반복)",
+        default=1, min=1, max=8,
     )
+    improve_feedback: StringProperty(
+        name="개선 요청",
+        description="어디가 마음에 안 드는지 설명 (선택 — 비워두면 자동 비평만으로 개선)",
+        default="",
+    )
+    improve_open: BoolProperty(default=False)  # 생성 성공 후 개선 UI 노출 여부
     # --- 이하 런타임 상태 (UI 표시용) ---
     is_running: BoolProperty(default=False)
     status: StringProperty(default="대기 중")

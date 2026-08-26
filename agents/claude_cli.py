@@ -26,8 +26,9 @@ class ClaudeBackend(AgentBackend):
         model = (self.critique_model if for_critique else "") or self.model
         return ["--model", model] if model else []
 
-    def build_initial_command(self, user_prompt: str) -> list:
+    def build_initial_command(self, user_prompt: str, images: list = None) -> list:
         # 프롬프트 인자를 생략하면 claude -p가 stdin에서 읽는다 (.cmd 셸림 줄 잘림 회피)
+        # 이미지는 image_prompt_hint + Read 도구로 전달되므로 플래그 불필요
         return [
             self.exe, "-p",
             "--append-system-prompt-file", os.path.join(self.workdir, _SYS_FILENAME),

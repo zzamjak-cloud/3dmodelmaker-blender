@@ -59,6 +59,43 @@ class LP3D_OT_variation(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LP3D_OT_improve(bpy.types.Operator):
+    bl_idname = "lp3d.improve"
+    bl_label = "개선하기"
+    bl_description = "마지막 결과를 캡처해 한 단계 개선 (개선 요청 텍스트가 있으면 최우선 반영)"
+
+    @classmethod
+    def poll(cls, context):
+        return not session.is_active() and bool(context.scene.lp3d.last_code)
+
+    def execute(self, context):
+        error = session.start_session(context, improve=True)
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class LP3D_OT_improve_done(bpy.types.Operator):
+    bl_idname = "lp3d.improve_done"
+    bl_label = "개선 종료"
+    bl_description = "현재 결과를 확정하고 패널을 새 모델 생성을 위한 초기 상태로 되돌림 (모델·익스포트 기능은 유지)"
+
+    @classmethod
+    def poll(cls, context):
+        return not session.is_active()
+
+    def execute(self, context):
+        props = context.scene.lp3d
+        props.improve_open = False
+        props.prompt = ""
+        props.improve_feedback = ""
+        props.status = "대기 중"
+        props.iteration = 0
+        props.log = ""
+        return {'FINISHED'}
+
+
 class LP3D_OT_export(bpy.types.Operator):
     bl_idname = "lp3d.export"
     bl_label = "익스포트"
@@ -135,6 +172,7 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 
 _CLASSES = (
     LP3D_OT_generate, LP3D_OT_cancel, LP3D_OT_variation,
+    LP3D_OT_improve, LP3D_OT_improve_done,
     LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,
 )
 

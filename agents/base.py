@@ -36,8 +36,8 @@ class AgentBackend(ABC):
         """시스템 프롬프트를 백엔드 방식에 맞게 workdir에 배치."""
 
     @abstractmethod
-    def build_initial_command(self, user_prompt: str) -> list:
-        ...
+    def build_initial_command(self, user_prompt: str, images: list = None) -> list:
+        """새 세션 시작 명령. images가 있으면 첫 턴부터 이미지 첨부 (개선 세션용)."""
 
     @abstractmethod
     def build_resume_command(self, session_id: str, user_prompt: str, images: list) -> list:

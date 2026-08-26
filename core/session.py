@@ -21,8 +21,8 @@ def is_active() -> bool:
     return _current is not None
 
 
-def start_session(context, variation_of=None, variation_count=3):
-    """UI에서 호출하는 진입점. variation_of가 있으면 변형 생성 세션."""
+def start_session(context, variation_of=None, variation_count=3, improve=False):
+    """UI에서 호출하는 진입점. variation_of는 변형 생성, improve는 개선 세션."""
     global _current
     if _current is not None:
         return "이미 생성 세션이 진행 중입니다"
@@ -30,7 +30,15 @@ def start_session(context, variation_of=None, variation_count=3):
     if props.is_running:
         # 세션 객체는 없는데 플래그만 남은 상태 (Dev Reload·파일 다시 열기 등)
         props.is_running = False
-    request = (props.last_prompt if variation_of else props.prompt).strip()
+    if improve:
+        if not props.last_code or not props.last_collection:
+            return "개선할 결과가 없습니다 — 먼저 모델을 생성하세요"
+        coll = bpy.data.collections.get(props.last_collection)
+        if not coll or not any(o.type == 'MESH' for o in coll.objects):
+            return "개선할 모델 컬렉션을 찾을 수 없습니다"
+        request = props.last_prompt.strip() or props.prompt.strip()
+    else:
+        request = (props.last_prompt if variation_of else props.prompt).strip()
     if not request:
         return "프롬프트를 입력하세요"
     exe = preferences.resolve_cli_path(props.agent)
@@ -41,9 +49,12 @@ def start_session(context, variation_of=None, variation_count=3):
         request=request,
         agent=props.agent,
         exe=exe,
-        max_iterations=props.max_iterations,
+        max_iterations=1 if improve else props.max_iterations,
         variation_code=variation_of,
         variation_count=variation_count,
+        improve_code=props.last_code if improve else None,
+        improve_feedback=props.improve_feedback.strip() if improve else "",
+        improve_collection=props.last_collection if improve else None,
     )
     _current.start()
     return None
@@ -67,12 +78,16 @@ def _slug(text: str) -> str:
 
 class GenerationSession:
     def __init__(self, scene_name, request, agent, exe, max_iterations,
-                 variation_code=None, variation_count=3):
+                 variation_code=None, variation_count=3,
+                 improve_code=None, improve_feedback="", improve_collection=None):
         self.scene_name = scene_name
         self.request = request
         self.max_iterations = max_iterations
         self.variation_code = variation_code
         self.variation_count = variation_count
+        self.improve_code = improve_code
+        self.improve_feedback = improve_feedback
+        self.improve_collection = improve_collection
         self.workdir = tempfile.mkdtemp(prefix="lp3d_")
         backend_cls = ClaudeBackend if agent == 'CLAUDE' else CodexBackend
         self.backend = backend_cls(exe, self.workdir)
@@ -87,12 +102,15 @@ class GenerationSession:
         self.stateless = False       # resume 실패 시 폴백 모드
         self.fallback_used = False
         self.last_code = None
-        base = f"LP3D_{_slug(request)}"
-        name, n = base, 1
-        while bpy.data.collections.get(name):
-            n += 1
-            name = f"{base}.{n:03d}"
-        self.collection_name = name
+        if improve_collection:
+            self.collection_name = improve_collection  # 기존 결과를 제자리에서 개선
+        else:
+            base = f"LP3D_{_slug(request)}"
+            name, n = base, 1
+            while bpy.data.collections.get(name):
+                n += 1
+                name = f"{base}.{n:03d}"
+            self.collection_name = name
 
     # ---------- 상태/로그 ----------
     def _props(self):
@@ -129,6 +147,26 @@ class GenerationSession:
             props.log = ""
         runner.set_keepalive(True)
         self.backend.prepare_workdir(prompts.build_system_prompt())
+        if self.improve_code:
+            # 개선 세션: 현재 모델을 캡처해 첫 턴부터 이미지+코드+피드백으로 개선 요청
+            self._set_status("개선 준비: 현재 모델 캡처 중...")
+            images, stats = capture.capture_collection(
+                self.collection_name, self.workdir,
+                count=self.prefs.capture_count, resolution=self.prefs.capture_resolution,
+                silhouettes=1,
+            )
+            if not images:
+                self._finish("실패: 개선할 모델 캡처 불가", ok=False)
+                return
+            first = prompts.build_improve_prompt(
+                self.request, self.improve_code, self.improve_feedback,
+                [os.path.basename(p) for p in images], stats,
+            )
+            self._set_status("에이전트 개선 요청 중...",
+                             f"개선 세션 시작: {self.request}"
+                             + (f" / 피드백: {self.improve_feedback}" if self.improve_feedback else ""))
+            self._dispatch(first, images=images)
+            return
         if self.variation_code:
             first = prompts.build_variation_prompt(self.request, self.variation_code,
                                                    self.variation_count)
@@ -146,14 +184,26 @@ class GenerationSession:
         self._finish("취소됨", ok=False)
 
     def _finish(self, status: str, ok: bool):
+        # 개선 실패로 기존 모델까지 사라졌으면 이전 코드로 복원한다
+        if not ok and self.improve_code:
+            coll = bpy.data.collections.get(self.collection_name)
+            if not coll or not any(o.type == 'MESH' for o in coll.objects):
+                restored, _ = executor.execute(self.improve_code, self.collection_name,
+                                               seed=1, workdir=self.workdir)
+                if restored:
+                    status += " — 이전 결과 복원됨"
         props = self._props()
         if props:
             props.is_running = False
             if ok:
                 props.last_collection = self.collection_name
-                props.last_code = self.last_code or ""
+                # 개선 세션이 코드 없이 DONE으로 끝나면 이전 코드를 유지
+                props.last_code = self.last_code or self.improve_code or ""
                 if not self.variation_code:
                     props.last_prompt = self.request
+                props.improve_open = True  # 개선 UI 노출
+                if self.improve_code:
+                    props.improve_feedback = ""  # 반영된 피드백은 비움
         self._set_status(status, f"세션 종료: {status}")
         _end_session()
 
@@ -171,7 +221,7 @@ class GenerationSession:
         if use_resume:
             cmd = self.backend.build_resume_command(self.session_id, prompt, images or [])
         else:
-            cmd = self.backend.build_initial_command(prompt)
+            cmd = self.backend.build_initial_command(prompt, images or [])
         self._was_resume = use_resume
         # 프롬프트는 stdin으로 — 명령줄 인자는 Windows .cmd 셸림에서 첫 줄만 전달된다
         runner.run_cli_async(cmd, self.workdir, self.prefs.timeout, self._on_response,

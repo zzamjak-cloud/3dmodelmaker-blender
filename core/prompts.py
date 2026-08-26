@@ -59,6 +59,21 @@ def build_critique_prompt(image_names: list, stats: dict, iteration: int, max_it
     )
 
 
+def build_improve_prompt(original_request: str, current_code: str, feedback: str,
+                         image_names: list, stats: dict) -> str:
+    stats_text = "\n".join(f"- {k}: {v}" for k, v in stats.items())
+    fb = f"\n\n**사용자 피드백 (최우선으로 반영하라)**: {feedback}" if feedback else ""
+    return (
+        f"이전에 다음 요청으로 로우폴리 모델을 만들었다: {original_request}\n\n"
+        f"현재 모델의 전체 코드:\n```python\n{current_code}\n```\n\n"
+        f"현재 모델을 여러 앵글로 캡처했다: {', '.join(image_names)}\n"
+        f"통계:\n{stats_text}{fb}\n\n"
+        "캡처 이미지를 확인하고 완성도 규칙 기준으로 한 단계 개선한 **전체 코드**를 작성하라. "
+        "잘된 부분은 유지하고 문제 부분만 고쳐라 (전면 재설계 금지). "
+        "출력 형식: 첫 줄 `STATUS: REVISE` + python 코드 블록 1개."
+    )
+
+
 def build_variation_prompt(original_request: str, final_code: str, count: int) -> str:
     return (
         f"이전에 다음 요청으로 모델을 만들었다: {original_request}\n\n"

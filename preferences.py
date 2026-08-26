@@ -3,7 +3,7 @@ import os
 import shutil
 
 import bpy
-from bpy.props import IntProperty, StringProperty
+from bpy.props import EnumProperty, IntProperty, StringProperty
 
 # macOS Finder로 실행한 Blender는 사용자 PATH를 상속하지 않으므로 흔한 설치 경로를 직접 탐색
 _EXTRA_PATHS = (
@@ -43,15 +43,23 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         subtype='FILE_PATH',
         default="",
     )
-    gen_model: StringProperty(
+    _MODEL_ITEMS = [
+        ('DEFAULT', "CLI 기본", "claude CLI에 설정된 기본 모델 사용"),
+        ('opus', "Opus (고품질)", "가장 정교한 결과, 느림"),
+        ('sonnet', "Sonnet (균형)", "품질과 속도의 균형"),
+        ('haiku', "Haiku (빠름)", "가장 빠름, 단순한 작업에 적합"),
+    ]
+    gen_model: EnumProperty(
         name="생성 모델",
-        description="초기 코드 생성 모델 (비우면 CLI 기본). 예: Claude는 sonnet/opus, Codex는 gpt-5 계열",
-        default="",
+        description="초기 코드 생성 모델 (Claude 전용 — Codex는 CLI 기본 설정 사용)",
+        items=_MODEL_ITEMS,
+        default='DEFAULT',
     )
-    critique_model: StringProperty(
+    critique_model: EnumProperty(
         name="비평 모델",
-        description="이미지 비평 턴 전용 빠른 모델 — 생성 속도에 직결 (비우면 생성 모델과 동일, Claude 전용)",
-        default="",
+        description="이미지 비평·개선 턴 전용 모델 — 빠른 모델일수록 개선이 빨라짐 (Claude 전용)",
+        items=_MODEL_ITEMS,
+        default='DEFAULT',
     )
     timeout: IntProperty(
         name="CLI 타임아웃(초)",
@@ -90,8 +98,8 @@ class _Defaults:
     """애드온으로 활성화되지 않은 상태(테스트 등)에서 쓰는 기본값."""
     claude_path = ""
     codex_path = ""
-    gen_model = ""
-    critique_model = ""
+    gen_model = 'DEFAULT'
+    critique_model = 'DEFAULT'
     timeout = 300
     capture_count = 2
     capture_resolution = 512

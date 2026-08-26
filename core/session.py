@@ -92,8 +92,11 @@ class GenerationSession:
         backend_cls = ClaudeBackend if agent == 'CLAUDE' else CodexBackend
         self.backend = backend_cls(exe, self.workdir)
         self.prefs = preferences.get_prefs()
-        self.backend.model = self.prefs.gen_model.strip()
-        self.backend.critique_model = self.prefs.critique_model.strip()
+        # 모델 드롭다운은 Claude 별칭 기준 — Codex는 CLI 기본 설정을 따른다
+        if agent == 'CLAUDE':
+            self.backend.model = "" if self.prefs.gen_model == 'DEFAULT' else self.prefs.gen_model
+            self.backend.critique_model = ("" if self.prefs.critique_model == 'DEFAULT'
+                                           else self.prefs.critique_model)
         # 런타임 상태
         self.session_id = None
         self.iteration = 1

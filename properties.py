@@ -1,6 +1,7 @@
 # 씬 단위 상태: 프롬프트, 에이전트 선택, 진행 상태, 로그
 import bpy
-from bpy.props import BoolProperty, EnumProperty, IntProperty, PointerProperty, StringProperty
+from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
+                       PointerProperty, StringProperty)
 
 
 class LP3DSceneProps(bpy.types.PropertyGroup):
@@ -19,8 +20,8 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
     )
     max_iterations: IntProperty(
         name="자동 반복",
-        description="자동 시각 피드백 루프 최대 반복 횟수 (기본 1=원샷 — 결과가 아쉬우면 개선하기 버튼으로 필요한 만큼만 반복)",
-        default=1, min=1, max=8,
+        description="자동 시각 피드백 루프 최대 반복 횟수 — 이후에도 개선하기 버튼으로 추가 반복 가능",
+        default=3, min=1, max=8,
     )
     improve_feedback: StringProperty(
         name="개선 요청",
@@ -31,6 +32,8 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
     # --- 이하 런타임 상태 (UI 표시용) ---
     is_running: BoolProperty(default=False)
     status: StringProperty(default="대기 중")
+    phase: StringProperty(default="")        # 현재 단계 식별자 (GEN/EXEC/CAPTURE/CRITIQUE/FINAL)
+    started_at: FloatProperty(default=0.0)   # 세션 시작 시각 (경과 시간 표시용)
     iteration: IntProperty(default=0)
     log: StringProperty(default="")
     # 마지막 성공 세션의 결과 (variation/익스포트/에셋 등록에 사용)

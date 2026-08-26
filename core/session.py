@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 
 import bpy
 
@@ -120,17 +121,23 @@ class GenerationSession:
         scene = bpy.data.scenes.get(self.scene_name)
         return scene.lp3d if scene else None
 
-    def _set_status(self, status: str, log: str = None):
+    def _set_status(self, status: str, log: str = None, phase: str = None):
         props = self._props()
         if props:
             props.status = status
             props.iteration = self.iteration
+            if phase is not None:
+                props.phase = phase
             if log:
                 lines = (props.log + "\n" + log).strip().splitlines()
                 props.log = "\n".join(lines[-30:])
         if log:
             _log.info(log)
         self._redraw()
+
+    def _model_label(self, critique=False):
+        m = (self.backend.critique_model if critique else "") or self.backend.model
+        return m.capitalize() if m else "기본 모델"
 
     @staticmethod
     def _redraw():
@@ -148,11 +155,13 @@ class GenerationSession:
         if props:
             props.is_running = True
             props.log = ""
+            props.started_at = time.time()
+            props.phase = ""
         runner.set_keepalive(True)
         self.backend.prepare_workdir(prompts.build_system_prompt())
         if self.improve_code:
             # 개선 세션: 현재 모델을 캡처해 첫 턴부터 이미지+코드+피드백으로 개선 요청
-            self._set_status("개선 준비: 현재 모델 캡처 중...")
+            self._set_status("현재 모델 캡처중...", phase='CAPTURE')
             images, stats = capture.capture_collection(
                 self.collection_name, self.workdir,
                 count=self.prefs.capture_count, resolution=self.prefs.capture_resolution,
@@ -165,9 +174,10 @@ class GenerationSession:
                 self.request, self.improve_code, self.improve_feedback,
                 [os.path.basename(p) for p in images], stats,
             )
-            self._set_status("에이전트 개선 요청 중...",
+            self._set_status(f"스크린샷 분석·개선 — {self._model_label(critique=True)} 호출중...",
                              f"개선 세션 시작: {self.request}"
-                             + (f" / 피드백: {self.improve_feedback}" if self.improve_feedback else ""))
+                             + (f" / 피드백: {self.improve_feedback}" if self.improve_feedback else ""),
+                             phase='CRITIQUE')
             self._dispatch(first, images=images)
             return
         if self.variation_code:
@@ -175,7 +185,8 @@ class GenerationSession:
                                                    self.variation_count)
         else:
             first = prompts.build_initial_prompt(self.request)
-        self._set_status("에이전트 호출 중...", f"세션 시작: {self.request} ({self.backend.name})")
+        self._set_status(f"코드 생성 — {self._model_label()} 호출중...",
+                         f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')
         self._dispatch(first)
 
     def cancel(self):
@@ -207,7 +218,7 @@ class GenerationSession:
                 props.improve_open = True  # 개선 UI 노출
                 if self.improve_code:
                     props.improve_feedback = ""  # 반영된 피드백은 비움
-        self._set_status(status, f"세션 종료: {status}")
+        self._set_status(status, f"세션 종료: {status}", phase="")
         _end_session()
 
     # ---------- 에이전트 왕복 ----------
@@ -247,7 +258,7 @@ class GenerationSession:
             if getattr(self, "_was_resume", False) and not self.fallback_used:
                 self.fallback_used = True
                 self.stateless = True
-                self._set_status("세션 이어가기 실패, 폴백 재시도...", f"resume 실패: {error.splitlines()[0]}")
+                self._set_status("세션 이어가기 실패, 폴백 재시도...", f"resume 실패: {error.splitlines()[0]}", phase='GEN')
                 self._dispatch("직전 지시를 계속 수행하라. 전체 코드를 다시 작성하라.")
                 return
             self._finish(f"실패: {error.splitlines()[0]}", ok=False)
@@ -268,7 +279,7 @@ class GenerationSession:
                 return
             if self.format_retries < 1:
                 self.format_retries += 1
-                self._set_status("형식 위반, 재요청...", "응답에 코드 블록 없음 — 형식 재요청")
+                self._set_status("형식 위반, 재요청...", "응답에 코드 블록 없음 — 형식 재요청", phase='GEN')
                 self._dispatch(
                     "출력 형식 위반이다. 첫 줄 `STATUS: REVISE` 또는 `STATUS: DONE`, "
                     "이어서 python 코드 블록 1개(수정 불필요 시 DONE만)로 다시 답하라."
@@ -281,14 +292,15 @@ class GenerationSession:
 
     # ---------- 실행/비평 ----------
     def _execute(self, code: str, status):
-        self._set_status(f"코드 실행 중 (반복 {self.iteration}/{self.max_iterations})...")
+        self._set_status(f"Blender 코드 실행중 (반복 {self.iteration}/{self.max_iterations})...", phase='EXEC')
         ok, error = executor.execute(code, self.collection_name,
                                      seed=self.iteration, workdir=self.workdir)
         if not ok:
             if self.exec_retries < 2:
                 self.exec_retries += 1
-                self._set_status("실행 오류, 자기수정 요청...",
-                                 f"실행 오류(재시도 {self.exec_retries}/2): {error.splitlines()[-1]}")
+                self._set_status(f"실행 오류 — {self._model_label()} 자기수정 호출중...",
+                                 f"실행 오류(재시도 {self.exec_retries}/2): {error.splitlines()[-1]}",
+                                 phase='GEN')
                 self._dispatch(prompts.build_error_prompt(error))
                 return
             self._finish("실패: 코드 실행 오류 반복", ok=False)
@@ -303,7 +315,7 @@ class GenerationSession:
             self._critique()
 
     def _critique(self):
-        self._set_status("뷰포트 캡처 중...")
+        self._set_status("뷰포트 캡처중...", phase='CAPTURE')
         images, stats = capture.capture_collection(
             self.collection_name, self.workdir,
             count=self.prefs.capture_count, resolution=self.prefs.capture_resolution,
@@ -317,11 +329,12 @@ class GenerationSession:
             [os.path.basename(p) for p in images], stats,
             self.iteration, self.max_iterations,
         )
-        self._set_status(f"에이전트 비평 요청 중 ({self.iteration}/{self.max_iterations})...")
+        self._set_status(f"스크린샷 분석 — {self._model_label(critique=True)} 호출중 ({self.iteration}/{self.max_iterations})...", phase='CRITIQUE')
         self._dispatch(prompt, images=images)
 
     def _finalize(self):
         from ..lowpoly.cleanup import collection_tri_count, cull_hidden_faces, game_ready
+        self._set_status("마무리 정리중 (은면 제거·게임레디)...", phase='FINAL')
         coll = bpy.data.collections.get(self.collection_name)
         if coll:
             mesh_objs = [o for o in coll.objects if o.type == 'MESH']

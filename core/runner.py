@@ -13,8 +13,9 @@ import bpy
 log = logging.getLogger(__name__)
 
 _jobs = []  # 진행 중인 작업 목록 (동시 1개가 일반적이지만 리스트로 안전하게)
-_state = {"keepalive": False, "pump_on": False}
+_state = {"keepalive": False, "pump_on": False, "last_redraw": 0.0}
 _PUMP_INTERVAL = 0.25
+_REDRAW_INTERVAL = 1.0  # 경과 시간 표시 갱신 주기
 _job_counter = 0
 
 
@@ -133,6 +134,21 @@ def _pump():
         except Exception:
             log.exception("LP3D 콜백 오류")
     if _state["keepalive"] or _jobs:
+        # 세션 진행 중에는 주기적으로 패널을 갱신 (경과 시간 실시간 표시)
+        now = time.monotonic()
+        if now - _state["last_redraw"] >= _REDRAW_INTERVAL:
+            _state["last_redraw"] = now
+            _redraw_view3d()
         return _PUMP_INTERVAL
     _state["pump_on"] = False
     return None  # 펌프 종료
+
+
+def _redraw_view3d():
+    wm = bpy.context.window_manager
+    if not wm:
+        return
+    for window in wm.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()

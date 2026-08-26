@@ -28,6 +28,12 @@ def find_cli(name: str) -> str:
     return ""
 
 
+def _persist_cb(self, context):
+    # 변경 즉시 JSON에 저장 — 애드온 업데이트/스키마 변경에도 설정 유지
+    from .core import persist
+    persist.on_prefs_changed(self)
+
+
 class LP3DPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
@@ -36,12 +42,14 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         description="claude 실행 파일 절대경로 (비우면 자동 탐지)",
         subtype='FILE_PATH',
         default="",
+        update=_persist_cb,
     )
     codex_path: StringProperty(
         name="Codex CLI 경로",
         description="codex 실행 파일 절대경로 (비우면 자동 탐지)",
         subtype='FILE_PATH',
         default="",
+        update=_persist_cb,
     )
     _MODEL_ITEMS = [
         ('DEFAULT', "CLI 기본", "claude CLI에 설정된 기본 모델 사용"),
@@ -54,32 +62,38 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         description="초기 코드 생성 모델 (Claude 전용 — Codex는 CLI 기본 설정 사용)",
         items=_MODEL_ITEMS,
         default='DEFAULT',
+        update=_persist_cb,
     )
     critique_model: EnumProperty(
         name="비평 모델",
         description="이미지 비평·개선 턴 전용 모델 — 빠른 모델일수록 개선이 빨라짐 (Claude 전용)",
         items=_MODEL_ITEMS,
         default='DEFAULT',
+        update=_persist_cb,
     )
     timeout: IntProperty(
         name="CLI 타임아웃(초)",
         description="에이전트 호출 1회당 최대 대기 시간",
         default=300, min=30, max=1800,
+        update=_persist_cb,
     )
     capture_count: IntProperty(
         name="캡처 앵글 수",
         description="비평 턴에 보여줄 컬러 캡처 장수 (실루엣 1장은 별도) — 적을수록 비평이 빠르다",
         default=2, min=1, max=6,
+        update=_persist_cb,
     )
     capture_resolution: IntProperty(
         name="캡처 해상도",
         default=512, min=256, max=1024,
+        update=_persist_cb,
     )
     asset_library_path: StringProperty(
         name="에셋 라이브러리 경로",
         description="Asset Browser 라이브러리 루트 (카탈로그 파일 위치)",
         subtype='DIR_PATH',
         default="",
+        update=_persist_cb,
     )
 
     def draw(self, context):
@@ -122,8 +136,18 @@ def resolve_cli_path(agent: str) -> str:
     return prefs.codex_path or find_cli("codex")
 
 
+def _restore_deferred():
+    # 애드온 활성화가 끝난 뒤 저장된 설정을 복원한다
+    addon = bpy.context.preferences.addons.get(__package__)
+    if addon:
+        from .core import persist
+        persist.apply_prefs(addon.preferences)
+    return None
+
+
 def register():
     bpy.utils.register_class(LP3DPreferences)
+    bpy.app.timers.register(_restore_deferred, first_interval=0.2)
 
 
 def unregister():

@@ -1,7 +1,14 @@
 # 씬 단위 상태: 프롬프트, 에이전트 선택, 진행 상태, 로그
 import bpy
+from bpy.app.handlers import persistent
 from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
                        PointerProperty, StringProperty)
+
+
+def _persist_cb(self, context):
+    # 에이전트·반복 수·익스포트 폴더는 파일이 바뀌어도 유지되도록 JSON에 저장
+    from .core import persist
+    persist.on_scene_changed(self)
 
 
 class LP3DSceneProps(bpy.types.PropertyGroup):
@@ -17,11 +24,13 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
             ('CODEX', "Codex", "codex exec 서브프로세스 사용"),
         ],
         default='CLAUDE',
+        update=_persist_cb,
     )
     max_iterations: IntProperty(
         name="자동 반복",
         description="자동 시각 피드백 루프 최대 반복 횟수 — 이후에도 개선하기 버튼으로 추가 반복 가능",
         default=3, min=1, max=8,
+        update=_persist_cb,
     )
     improve_feedback: StringProperty(
         name="개선 요청",
@@ -44,14 +53,39 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
         name="익스포트 폴더",
         subtype='DIR_PATH',
         default="//exports/",
+        update=_persist_cb,
     )
+
+
+def _apply_saved(scene=None):
+    """저장된 씬 설정(agent/반복/익스포트 폴더)을 복원한다."""
+    from .core import persist
+    scenes = [scene] if scene else bpy.data.scenes
+    for sc in scenes:
+        if getattr(sc, "lp3d", None):
+            persist.apply_scene(sc.lp3d)
+
+
+@persistent
+def _on_load_post(_filepath):
+    # 새 파일/기존 파일을 열 때마다 사용자 설정을 이어받는다
+    _apply_saved()
+
+
+def _restore_deferred():
+    _apply_saved()
+    return None
 
 
 def register():
     bpy.utils.register_class(LP3DSceneProps)
     bpy.types.Scene.lp3d = PointerProperty(type=LP3DSceneProps)
+    bpy.app.handlers.load_post.append(_on_load_post)
+    bpy.app.timers.register(_restore_deferred, first_interval=0.2)
 
 
 def unregister():
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
     del bpy.types.Scene.lp3d
     bpy.utils.unregister_class(LP3DSceneProps)

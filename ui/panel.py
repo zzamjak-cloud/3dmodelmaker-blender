@@ -31,10 +31,11 @@ class LP3D_PT_main(bpy.types.Panel):
         props = context.scene.lp3d
 
         col = layout.column()
-        col.label(text="프롬프트:")
-        row = col.row()
-        row.scale_y = 1.5  # 입력 필드를 크게
+        col.label(text="프롬프트 (한글이 깨지면 메모장에서 복사 후 붙여넣기 버튼):")
+        # 주의: 입력 필드에 scale을 주면 macOS IME(한글 조합)가 더 불안정해져 원복함
+        row = col.row(align=True)
         row.prop(props, "prompt", text="")
+        row.operator("lp3d.paste", text="", icon='PASTEDOWN').target = 'PROMPT'
         row = col.row(align=True)
         row.prop(props, "agent", expand=True)
         col.prop(props, "max_iterations")
@@ -53,9 +54,9 @@ class LP3D_PT_main(bpy.types.Panel):
         if not running and props.improve_open and props.last_code:
             box = layout.box()
             box.label(text=f"개선: {props.last_collection}", icon='MODIFIER')
-            row = box.row()
-            row.scale_y = 1.3
+            row = box.row(align=True)
             row.prop(props, "improve_feedback", text="")
+            row.operator("lp3d.paste", text="", icon='PASTEDOWN').target = 'FEEDBACK'
             row = box.row(align=True)
             row.operator("lp3d.improve", icon='FILE_REFRESH')
             row.operator("lp3d.improve_done", icon='CHECKMARK')

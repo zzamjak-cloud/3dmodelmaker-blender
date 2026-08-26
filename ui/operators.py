@@ -59,6 +59,30 @@ class LP3D_OT_variation(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LP3D_OT_paste(bpy.types.Operator):
+    bl_idname = "lp3d.paste"
+    bl_label = "클립보드 붙여넣기"
+    bl_description = ("클립보드의 텍스트를 붙여넣는다 — Blender 텍스트 필드의 "
+                      "한글(IME) 입력 문제를 우회할 때 사용")
+
+    target: EnumProperty(
+        items=[('PROMPT', "프롬프트", ""), ('FEEDBACK', "개선 요청", "")],
+        default='PROMPT',
+    )
+
+    def execute(self, context):
+        text = (context.window_manager.clipboard or "").strip()
+        if not text:
+            self.report({'WARNING'}, "클립보드가 비어 있습니다")
+            return {'CANCELLED'}
+        props = context.scene.lp3d
+        if self.target == 'PROMPT':
+            props.prompt = text
+        else:
+            props.improve_feedback = text
+        return {'FINISHED'}
+
+
 class LP3D_OT_improve(bpy.types.Operator):
     bl_idname = "lp3d.improve"
     bl_label = "개선하기"
@@ -172,7 +196,7 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 
 _CLASSES = (
     LP3D_OT_generate, LP3D_OT_cancel, LP3D_OT_variation,
-    LP3D_OT_improve, LP3D_OT_improve_done,
+    LP3D_OT_paste, LP3D_OT_improve, LP3D_OT_improve_done,
     LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,
 )
 

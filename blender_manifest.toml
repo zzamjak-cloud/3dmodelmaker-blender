@@ -35,6 +35,7 @@ paths_exclude_pattern = [
   "*.blend",
   "/.claude/",
   "/.omc/",
+  "/.superpowers/",
   # 기타
   "*.py[cod]",
   ".DS_Store",

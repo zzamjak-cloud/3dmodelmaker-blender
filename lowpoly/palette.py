@@ -28,9 +28,9 @@ _LEGACY_PROPS = ("lp3d_colors", "lp3d_grid")
 def _expected_pixels() -> list:
     """고정 팔레트의 픽셀 버퍼(선형 float RGBA 평면 리스트)를 만든다.
 
-    Blender의 이미지 픽셀은 선형이지만, 이미지 컬러스페이스를 sRGB로 두면
-    파일에서 로드한 것과 동일하게 해석된다. 이 함수는 PNG를 로드할 수 없는
-    예외 상황의 대비책으로만 쓴다."""
+    구버전 팔레트가 남아 있는 이미지 데이터블록을 제거하지 않고 덮어쓰기 위해
+    쓴다. Blender의 이미지 픽셀은 선형이므로 sRGB 정수값을 선형으로 변환해
+    채운다(이미지 컬러스페이스는 sRGB로 설정되어 있다)."""
     from .colorsnap import _srgb_to_linear
     grid = SIZE // 8
     buffer = [0.0] * (SIZE * SIZE * 4)

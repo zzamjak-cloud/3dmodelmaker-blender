@@ -130,5 +130,45 @@ class TestPaletteArtifacts(unittest.TestCase):
             self.assertEqual(pixels[y * data.SIZE + x], expected, "셀 %d 불일치" % cell)
 
 
+class TestColorSnap(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # colorsnap의 임포트 폴백이 sys.modules의 palette_data를 찾으므로
+        # 반드시 palette_data를 먼저 로드해야 한다
+        cls.data = _load("palette_data", "lowpoly/palette_data.py")
+        cls.snap = _load("colorsnap", "lowpoly/colorsnap.py")
+
+    # 팔레트에 있는 색은 반드시 자기 자신으로 스냅되어야 한다
+    def test_palette_colors_snap_to_themselves(self):
+        for cell, rgb in enumerate(self.data.CELLS):
+            got = self.snap.snap_cell(tuple(c / 255 for c in rgb))
+            self.assertEqual(self.data.CELLS[got], rgb, "셀 %d가 다른 색으로 스냅됨" % cell)
+
+    # 기존 실사용 색의 스냅 오차가 지각 한계 안에 들어와야 한다 (품질 회귀 방지)
+    def test_legacy_colors_snap_within_tolerance(self):
+        import json
+        import math
+        path = os.path.join(_ROOT, "tests", "fixtures", "legacy_colors.json")
+        with open(path, encoding="utf-8") as handle:
+            legacy = json.load(handle)
+        self.assertEqual(len(legacy), 181)
+        worst = 0.0
+        for rgb in legacy:
+            normalized = tuple(c / 255 for c in rgb)
+            cell = self.snap.snap_cell(normalized)
+            target = self.snap.srgb_to_oklab(normalized)
+            picked = self.snap.srgb_to_oklab(tuple(c / 255 for c in self.data.CELLS[cell]))
+            worst = max(worst, math.dist(target, picked))
+        # 측정된 최대 오차는 0.036. 0.04를 넘으면 팔레트 품질이 나빠진 것이다
+        self.assertLess(worst, 0.04, "최대 스냅 오차 %.4f" % worst)
+
+    # UV는 셀 중앙을 가리켜야 필터링 번짐이 없다
+    def test_cell_uv_is_cell_center(self):
+        self.assertAlmostEqual(self.snap.cell_uv(0)[0], 0.5 / 32)
+        self.assertAlmostEqual(self.snap.cell_uv(0)[1], 0.5 / 32)
+        self.assertAlmostEqual(self.snap.cell_uv(1023)[0], 31.5 / 32)
+        self.assertAlmostEqual(self.snap.cell_uv(1023)[1], 31.5 / 32)
+
+
 if __name__ == "__main__":
     unittest.main()

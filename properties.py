@@ -26,10 +26,12 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
         default='CLAUDE',
         update=_persist_cb,
     )
-    max_iterations: IntProperty(
+    # 구버전 max_iterations(턴 단위)에서 이름을 바꿨다 — 사이클 단위라 저장값을
+    # 그대로 이어받으면 3이 9턴으로 부풀기 때문에 키 교체로 마이그레이션한다
+    auto_cycles: IntProperty(
         name="자동 반복",
-        description="자동 시각 피드백 루프 최대 반복 횟수 — 이후에도 개선하기 버튼으로 추가 반복 가능",
-        default=3, min=1, max=8,
+        description="자동 시각 피드백 루프 반복 횟수 — 1회 = 3턴(생성 1 + 비평·개선 2). 이후에도 개선하기 버튼으로 추가 반복 가능",
+        default=1, min=1, max=3,
         update=_persist_cb,
     )
     improve_feedback: StringProperty(
@@ -44,6 +46,7 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
     phase: StringProperty(default="")        # 현재 단계 식별자 (GEN/EXEC/CAPTURE/CRITIQUE/FINAL)
     started_at: FloatProperty(default=0.0)   # 세션 시작 시각 (경과 시간 표시용)
     iteration: IntProperty(default=0)
+    total_turns: IntProperty(default=0)      # 진행 표시용 총 턴 수 (세션 시작 시 설정)
     log: StringProperty(default="")
     # 마지막 성공 세션의 결과 (variation/익스포트/에셋 등록에 사용)
     last_collection: StringProperty(default="")

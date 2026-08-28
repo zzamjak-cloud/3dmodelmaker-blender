@@ -13,7 +13,7 @@ from .. import preferences
 from ..agents.claude_cli import ClaudeBackend
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import capture, executor, prompts, runner
+from . import capture, executor, loop, prompts, runner
 
 _current = None  # 동시 세션은 1개만 허용
 
@@ -50,7 +50,7 @@ def start_session(context, variation_of=None, variation_count=3, improve=False):
         request=request,
         agent=props.agent,
         exe=exe,
-        max_iterations=1 if improve else props.max_iterations,
+        max_iterations=1 if improve else loop.total_turns(props.auto_cycles),
         variation_code=variation_of,
         variation_count=variation_count,
         improve_code=props.last_code if improve else None,
@@ -126,6 +126,7 @@ class GenerationSession:
         if props:
             props.status = status
             props.iteration = self.iteration
+            props.total_turns = self.max_iterations
             if phase is not None:
                 props.phase = phase
             if log:
@@ -275,7 +276,13 @@ class GenerationSession:
         status, code = parse_agent_reply(reply.text)
         if code is None:
             if status == 'DONE':
-                self._finalize()
+                # 최소 턴 전의 DONE은 근거 없는 조기 종료 — 무시하고 계속 비평한다
+                # (self.last_code가 없으면 비평할 모델 자체가 없으므로 그대로 마무리)
+                if loop.allow_done(self.iteration, self.max_iterations) or not self.last_code:
+                    self._finalize()
+                else:
+                    self._set_status("이른 DONE 무시 — 계속 개선", "최소 턴 전 DONE 선언 무시")
+                    self._critique()
                 return
             if self.format_retries < 1:
                 self.format_retries += 1
@@ -292,7 +299,7 @@ class GenerationSession:
 
     # ---------- 실행/비평 ----------
     def _execute(self, code: str, status):
-        self._set_status(f"Blender 코드 실행중 (반복 {self.iteration}/{self.max_iterations})...", phase='EXEC')
+        self._set_status(f"Blender 코드 실행중 (턴 {self.iteration}/{self.max_iterations})...", phase='EXEC')
         ok, error = executor.execute(code, self.collection_name,
                                      seed=self.iteration, workdir=self.workdir)
         if not ok:
@@ -308,8 +315,8 @@ class GenerationSession:
 
         self.exec_retries = 0
         self.last_code = code
-        self._set_status(f"반복 {self.iteration} 생성 완료", f"반복 {self.iteration} 실행 성공")
-        if status == 'DONE' or self.iteration >= self.max_iterations:
+        self._set_status(f"턴 {self.iteration} 생성 완료", f"턴 {self.iteration} 실행 성공")
+        if loop.should_finalize(status, self.iteration, self.max_iterations):
             self._finalize()
         else:
             self._critique()
@@ -328,6 +335,7 @@ class GenerationSession:
         prompt = prompts.build_critique_prompt(
             [os.path.basename(p) for p in images], stats,
             self.iteration, self.max_iterations,
+            allow_done=loop.allow_done(self.iteration, self.max_iterations),
         )
         self._set_status(f"스크린샷 분석 — {self._model_label(critique=True)} 호출중 ({self.iteration}/{self.max_iterations})...", phase='CRITIQUE')
         self._dispatch(prompt, images=images)

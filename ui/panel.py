@@ -37,7 +37,7 @@ class LP3D_PT_main(bpy.types.Panel):
         col.prop(props, "prompt", text="")
         row = col.row(align=True)
         row.prop(props, "agent", expand=True)
-        col.prop(props, "max_iterations")
+        col.prop(props, "auto_cycles")
 
         col.separator()
         # 진행 여부의 기준은 씬 프로퍼티가 아니라 실제 세션 객체다.
@@ -63,7 +63,7 @@ class LP3D_PT_main(bpy.types.Panel):
         box.label(text=f"상태: {props.status}", icon='INFO')
         if running:
             elapsed = int(time.time() - props.started_at) if props.started_at else 0
-            box.label(text=f"경과 {elapsed // 60}:{elapsed % 60:02d} · 반복 {props.iteration}/{props.max_iterations}",
+            box.label(text=f"경과 {elapsed // 60}:{elapsed % 60:02d} · 턴 {props.iteration}/{props.total_turns}",
                       icon='TIME')
             gen_label, crit_label = _model_labels(props)
             steps = (

@@ -11,7 +11,8 @@ import bpy
 
 _PREF_KEYS = ("claude_path", "codex_path", "gen_model", "critique_model",
               "timeout", "capture_count", "capture_resolution", "asset_library_path")
-_SCENE_KEYS = ("agent", "max_iterations", "export_dir")
+# max_iterations(턴 단위) -> auto_cycles(사이클 단위) 키 교체 — 구버전 저장값은 무시된다
+_SCENE_KEYS = ("agent", "auto_cycles", "export_dir")
 
 _suspended = False  # 복원 중 update 콜백의 재저장 방지
 

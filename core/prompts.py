@@ -48,7 +48,21 @@ def build_error_prompt(traceback_text: str) -> str:
     )
 
 
-def build_critique_prompt(image_names: list, stats: dict, iteration: int, max_iterations: int) -> str:
+# 비평 턴의 종료 선언 규칙 — allow_done 여부에 따라 갈린다
+_DONE_ALLOWED = (
+    "고칠 점이 있으면 첫 줄 `STATUS: REVISE` + 개선한 **전체 코드**를,\n"
+    "에셋 스토어 수준이면 첫 줄 `STATUS: DONE`만 반환하라.\n"
+    "단, 치명 결함(뜬 파트·요청 누락·뚫린 면)이 없고 남은 개선이 사소하면 DONE을 선언하라 — 반복은 비용이다."
+)
+_DONE_FORBIDDEN = (
+    "아직 최소 개선 턴에 도달하지 않았다 — `STATUS: DONE`을 선언하지 마라.\n"
+    "남은 결함이 없어 보여도 실루엣 과장·2톤 배색·디테일 밀도에서 개선점을 찾아\n"
+    "첫 줄 `STATUS: REVISE` + 개선한 **전체 코드**로 답하라."
+)
+
+
+def build_critique_prompt(image_names: list, stats: dict, iteration: int, max_iterations: int,
+                          allow_done: bool = True) -> str:
     template = _read("critique.md")
     stats_text = "\n".join(f"- {k}: {v}" for k, v in stats.items())
     return template.format(
@@ -56,6 +70,7 @@ def build_critique_prompt(image_names: list, stats: dict, iteration: int, max_it
         stats=stats_text,
         iteration=iteration,
         max_iterations=max_iterations,
+        done_rule=_DONE_ALLOWED if allow_done else _DONE_FORBIDDEN,
     )
 
 

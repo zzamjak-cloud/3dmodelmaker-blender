@@ -63,3 +63,31 @@ python3 scripts/spike_cli.py claude   # CLI 계약 검증
 
 두 아티팩트는 직접 수정하지 않는다. 팔레트 공식을 바꾸면 기존에 만든 모든
 에셋의 색이 바뀌므로 파괴적 변경으로 취급한다.
+
+## 개발 환경 (Windows)
+
+`scripts/dev_link.sh`는 macOS 전용이다. Windows에서는 `scripts/dev_run.ps1`을 쓴다.
+
+포터블 Blender를 받아 압축을 푼 뒤(기본 경로 `D:\Tools\Blender-5.2`), 소스를
+디렉터리 정션으로 연결하고 개발 전용 프로필로 실행한다. 설치된 릴리스 버전과
+완전히 분리되므로 매번 확장을 켜고 끌 필요가 없다.
+
+```powershell
+.\scripts\dev_run.ps1                 # 개발용 Blender 실행 (GUI)
+.\scripts\dev_run.ps1 -LinkOnly       # 연결만
+.\scripts\dev_run.ps1 -BlenderDir "E:\Blender-5.2"
+```
+
+포터블 Blender는 <https://download.blender.org/release/> 에서 받는다.
+심링크가 아니라 정션을 쓰므로 관리자 권한이 필요 없다.
+
+### 실제 Blender에서 팔레트 검증
+
+`bpy`가 필요해 일반 유닛 테스트로는 닿지 않는 부분(이미지 pack, 구버전 `.blend`
+업그레이드, 텍셀 색 일치)을 헤들리스로 검증한다.
+
+```powershell
+.\scripts\dev_run.ps1 -Background -PythonFile tests\verify_palette_in_blender.py
+```
+
+`RESULT: ALL PASS`가 나와야 한다.

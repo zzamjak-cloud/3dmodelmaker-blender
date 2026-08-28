@@ -49,3 +49,17 @@ python3 scripts/spike_cli.py claude   # CLI 계약 검증
 2. GitHub → Actions → **Release** 워크플로우 → Run workflow
 3. 생성된 **드래프트 릴리스**를 확인 후 **Publish**
 4. `./scripts/release_index.sh` 실행 — 릴리스 zip 기준으로 `index.json`을 생성해 릴리스에 업로드 (이 순간부터 사용자 블렌더가 자동 업데이트를 감지)
+
+## 팔레트 텍스처
+
+모든 생성 모델은 고정된 256x256 팔레트 텍스처 하나를 공유한다. 색은 Oklab
+좌표에서 공식으로 결정되므로 생성 순서와 무관하게 항상 동일하다 — 덕분에
+에셋 라이브러리에서 머티리얼만 교체해도 색이 그대로 유지된다.
+
+- 텍스처: `lowpoly/LP3D_Palette.png` (자동 생성, 커밋됨)
+- 색 데이터: `lowpoly/palette_data.py` (자동 생성, 커밋됨)
+- 재생성: `python scripts/gen_palette.py`
+- 검증: `python -m unittest tests.test_palette -v`
+
+두 아티팩트는 직접 수정하지 않는다. 팔레트 공식을 바꾸면 기존에 만든 모든
+에셋의 색이 바뀌므로 파괴적 변경으로 취급한다.

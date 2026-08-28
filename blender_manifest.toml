@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "lp3d_modelmaker"
-version = "0.4.4"
+version = "0.5.0"
 name = "AI LowPoly ModelMaker"
 tagline = "Claude/Codex agent generates game-ready low-poly models"
 maintainer = "Woody <jinpyoung@loadcomplete.com>"
@@ -29,6 +29,7 @@ paths_exclude_pattern = [
   # 개발 도구 (애드온 실행에 불필요)
   "/scripts/",
   "/tests/",
+  "/docs/",
   "/dist/",
   "/Generate/",   # 생성 결과물 작업 폴더
   "*.blend",

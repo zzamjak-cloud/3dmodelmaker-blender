@@ -11,12 +11,12 @@ _MODULES = (preferences, properties, operators, panel)
 def _submodules():
     # Dev Reload 시 하위 모듈까지 의존성 순서대로 갱신
     from . import lowpoly
-    from .lowpoly import primitives, modeling, palette, cleanup
+    from .lowpoly import palette_data, colorsnap, primitives, modeling, palette, cleanup
     from .agents import parsing, base, claude_cli, codex_cli
     from .core import prompts, executor, capture, runner, session, persist
     from .pipeline import export, assets
     return (
-        lowpoly.primitives, lowpoly.modeling, lowpoly.palette, lowpoly.cleanup, lowpoly,
+        lowpoly.palette_data, lowpoly.colorsnap, lowpoly.primitives, lowpoly.modeling, lowpoly.palette, lowpoly.cleanup, lowpoly,
         parsing, base, claude_cli, codex_cli,
         prompts, executor, capture, runner, session, persist,
         export, assets,

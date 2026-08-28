@@ -24,11 +24,16 @@ def _submodules():
 
 
 def dev_reload():
-    # 코드 수정 후 Blender 재시작 없이 리로드
+    # 코드 수정 후 Blender 재시작 없이 리로드.
+    # importlib.reload만으로는 이미 등록된 클래스(PropertyGroup/Operator/Panel)가
+    # 구버전으로 남으므로, 등록 해제 → 리로드 → 재등록까지 해야
+    # 프로퍼티 정의 변경(이름·기본값 등)이 반영된다.
+    unregister()
     for mod in _submodules():
         importlib.reload(mod)
     for mod in _MODULES:
         importlib.reload(mod)
+    register()
 
 
 def register():

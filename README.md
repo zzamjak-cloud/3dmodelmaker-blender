@@ -72,10 +72,19 @@ python3 scripts/spike_cli.py claude   # CLI 계약 검증
 디렉터리 정션으로 연결하고 개발 전용 프로필로 실행한다. 설치된 릴리스 버전과
 완전히 분리되므로 매번 확장을 켜고 끌 필요가 없다.
 
+PowerShell 창에서:
+
 ```powershell
 .\scripts\dev_run.ps1                 # 개발용 Blender 실행 (GUI)
 .\scripts\dev_run.ps1 -LinkOnly       # 연결만
 .\scripts\dev_run.ps1 -BlenderDir "E:\Blender-5.2"
+```
+
+cmd 창에서는 `.ps1`을 직접 실행할 수 없으므로 `.bat` 래퍼를 쓴다(인자는 동일):
+
+```
+scripts\dev_run.bat
+scripts\dev_run.bat -LinkOnly
 ```
 
 포터블 Blender는 <https://download.blender.org/release/> 에서 받는다.

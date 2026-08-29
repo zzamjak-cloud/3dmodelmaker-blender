@@ -33,11 +33,13 @@ class LP3D_PT_main(bpy.types.Panel):
         col = layout.column()
         col.label(text="프롬프트:")
         # 주의: 입력 필드에 scale을 주면 macOS IME(한글 조합)가 더 불안정해짐.
-        # 한글 입력이 깨지면 외부에서 작성 후 Cmd+V로 붙여넣으면 된다.
+        # 한글은 필드 직접 입력 대신 [프롬프트 입력] 버튼의 OS 네이티브 팝업을 쓴다.
         col.prop(props, "prompt", text="")
+        col.operator("lp3d.edit_prompt", text="프롬프트 입력", icon='TEXT').target = 'prompt'
+        col.prop(props, "ref_image_path", text="참조 이미지")
         row = col.row(align=True)
         row.prop(props, "agent", expand=True)
-        col.prop(props, "auto_cycles")
+        col.prop(props, "auto_turns")
 
         col.separator()
         # 진행 여부의 기준은 씬 프로퍼티가 아니라 실제 세션 객체다.
@@ -54,6 +56,7 @@ class LP3D_PT_main(bpy.types.Panel):
             box = layout.box()
             box.label(text=f"개선: {props.last_collection}", icon='MODIFIER')
             box.prop(props, "improve_feedback", text="")
+            box.operator("lp3d.edit_prompt", text="개선 프롬프트 입력", icon='TEXT').target = 'improve_feedback'
             row = box.row(align=True)
             row.operator("lp3d.improve", icon='FILE_REFRESH')
             row.operator("lp3d.improve_done", icon='CHECKMARK')

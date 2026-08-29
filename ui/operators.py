@@ -4,7 +4,43 @@ import os
 import bpy
 from bpy.props import EnumProperty, IntProperty
 
-from ..core import session
+from ..core import native_input, session
+
+
+class LP3D_OT_edit_prompt(bpy.types.Operator):
+    bl_idname = "lp3d.edit_prompt"
+    bl_label = "프롬프트 입력"
+    bl_description = "OS 네이티브 입력 창을 열어 한글 입력 문제 없이 작성 (입력완료 시 필드에 반영)"
+
+    # 프롬프트/개선 요청 두 필드를 하나의 오퍼레이터로 처리 — 값은 프로퍼티 이름과 일치
+    target: EnumProperty(
+        items=[('prompt', "프롬프트", ""), ('improve_feedback', "개선 요청", "")],
+        default='prompt', options={'HIDDEN'},
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return not native_input.is_open()
+
+    def execute(self, context):
+        props = context.scene.lp3d
+        target = self.target
+        title = "프롬프트 입력" if target == 'prompt' else "개선 프롬프트 입력"
+        scene_name = context.scene.name
+
+        def on_done(text):
+            if text is None:
+                return  # 취소 — 기존 값 유지
+            # 다이얼로그가 떠 있는 동안 씬이 바뀌었을 수 있으므로 이름으로 다시 찾는다
+            scene = bpy.data.scenes.get(scene_name)
+            if scene and getattr(scene, "lp3d", None):
+                setattr(scene.lp3d, target, native_input.to_single_line(text))
+
+        error = native_input.open_dialog(title, getattr(props, target, ""), on_done)
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        return {'FINISHED'}
 
 
 class LP3D_OT_generate(bpy.types.Operator):
@@ -160,17 +196,27 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
     bl_description = "애드온 모듈을 다시 로드 (개발용)"
 
     def execute(self, context):
-        import importlib
         # 리로드하면 세션 모듈의 전역 상태가 초기화되므로, 진행 중인 세션은 먼저 정리한다
         # (안 하면 CLI 프로세스와 타이머 펌프가 구 모듈에 남아 떠돈다)
         session.cancel_session()
-        root = importlib.import_module(__package__.rsplit(".", 1)[0])
-        root.dev_reload()
-        self.report({'INFO'}, "리로드 완료")
+        pkg = __package__.rsplit(".", 1)[0]
+
+        # 실제 리로드는 타이머로 미룬다 — 오퍼레이터 실행 스택 안에서 자기 클래스를
+        # 등록 해제·재등록하면 self의 RNA가 해제된 채 접근되어 크래시한다 (macOS GUI).
+        def _do_reload():
+            import importlib
+            root = importlib.import_module(pkg)
+            root.dev_reload()
+            print("LP3D Dev Reload 완료")
+            return None
+
+        bpy.app.timers.register(_do_reload, first_interval=0.1)
+        self.report({'INFO'}, "리로드 예약됨")
         return {'FINISHED'}
 
 
 _CLASSES = (
+    LP3D_OT_edit_prompt,
     LP3D_OT_generate, LP3D_OT_cancel, LP3D_OT_variation,
     LP3D_OT_improve, LP3D_OT_improve_done,
     LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,

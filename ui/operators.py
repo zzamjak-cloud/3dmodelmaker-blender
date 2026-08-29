@@ -4,7 +4,71 @@ import os
 import bpy
 from bpy.props import EnumProperty, IntProperty
 
-from ..core import library, native_input, session
+from ..core import library, native_input, session, snapshots
+
+
+class LP3D_OT_show_multiview(bpy.types.Operator):
+    bl_idname = "lp3d.show_multiview"
+    bl_label = "멀티뷰 보기"
+    bl_description = "AI가 만든 정면/측면/상면/쿼터 참조 시트를 이미지 에디터 창으로 연다"
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.lp3d.multiview_path)
+
+    def execute(self, context):
+        path = context.scene.lp3d.multiview_path
+        if not os.path.isfile(path):
+            self.report({'ERROR'}, f"파일을 찾을 수 없습니다: {path}")
+            return {'CANCELLED'}
+        img = next((i for i in bpy.data.images if i.filepath == path), None)
+        if img is None:
+            img = bpy.data.images.load(path)
+        # 기존 이미지 에디터가 있으면 재사용하고, 없으면 새 창을 띄운다
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'IMAGE_EDITOR':
+                    area.spaces.active.image = img
+                    return {'FINISHED'}
+        bpy.ops.wm.window_new()
+        area = context.window_manager.windows[-1].screen.areas[0]
+        area.type = 'IMAGE_EDITOR'
+        area.spaces.active.image = img
+        return {'FINISHED'}
+
+
+class LP3D_OT_use_multiview_as_ref(bpy.types.Operator):
+    bl_idname = "lp3d.use_multiview_as_ref"
+    bl_label = "참조로 사용"
+    bl_description = "이 멀티뷰 시트를 참조 이미지로 지정해 다음 생성에 사용한다"
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.lp3d.multiview_path)
+
+    def execute(self, context):
+        props = context.scene.lp3d
+        if not os.path.isfile(props.multiview_path):
+            self.report({'ERROR'}, "멀티뷰 파일을 찾을 수 없습니다 (.blend 저장 후 다시 생성하세요)")
+            return {'CANCELLED'}
+        props.ref_image_path = props.multiview_path
+        self.report({'INFO'}, "참조 이미지로 지정됨")
+        return {'FINISHED'}
+
+
+class LP3D_OT_clear_snapshots(bpy.types.Operator):
+    bl_idname = "lp3d.clear_snapshots"
+    bl_label = "단계 스냅샷 정리"
+    bl_description = "옆에 남겨둔 턴별 중간 결과를 모두 삭제한다 (최종 모델은 유지)"
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.lp3d.last_collection)
+
+    def execute(self, context):
+        removed = snapshots.clear_all(context.scene.lp3d.last_collection)
+        self.report({'INFO'}, f"스냅샷 {removed}개 정리됨" if removed else "정리할 스냅샷이 없습니다")
+        return {'FINISHED'}
 
 
 class LP3D_OT_rate(bpy.types.Operator):
@@ -261,6 +325,7 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 
 _CLASSES = (
     LP3D_OT_edit_prompt, LP3D_OT_rate, LP3D_OT_library_discard,
+    LP3D_OT_show_multiview, LP3D_OT_use_multiview_as_ref, LP3D_OT_clear_snapshots,
     LP3D_OT_generate, LP3D_OT_cancel, LP3D_OT_variation,
     LP3D_OT_improve, LP3D_OT_improve_done,
     LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,

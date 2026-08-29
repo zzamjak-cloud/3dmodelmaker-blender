@@ -22,6 +22,42 @@ def is_available() -> bool:
     return bool(preferences.resolve_cli_path('CODEX'))
 
 
+def _slug(text: str, limit: int = 30) -> str:
+    """파일명에 쓸 수 있게 정리한다 — 한글은 그대로 두고 경로 구분자만 제거."""
+    keep = [c for c in (text or "").strip() if c.isalnum() or c in " _-가-힣"]
+    return ("".join(keep).strip().replace(" ", "_")[:limit]) or "model"
+
+
+def unique_path(directory: str, base: str) -> str:
+    """directory/base.png — 이미 있으면 _001, _002로 비켜간다 (기존 참조를 덮지 않도록)."""
+    path = os.path.join(directory, base + ".png")
+    n = 1
+    while os.path.exists(path):
+        path = os.path.join(directory, f"{base}_{n:03d}.png")
+        n += 1
+    return path
+
+
+def archive_dir() -> str:
+    """멀티뷰 시트를 남길 폴더 — 열려 있는 .blend 파일 옆. 저장 전 파일이면 빈 문자열."""
+    import bpy
+    return os.path.dirname(bpy.data.filepath) if bpy.data.filepath else ""
+
+
+def archive(src: str, request: str) -> str:
+    """생성한 시트를 .blend 옆에 보관한다. 저장 경로를 반환(불가하면 빈 문자열)."""
+    directory = archive_dir()
+    if not directory or not src or not os.path.isfile(src):
+        return ""
+    try:
+        dest = unique_path(directory, f"LP3D_multiview_{_slug(request)}")
+        shutil.copy(src, dest)
+        return dest
+    except OSError:
+        log.exception("멀티뷰 시트 보관 실패")
+        return ""
+
+
 def build_command(exe: str, work_dir: str, ref_image: str = None) -> list:
     cmd = [
         exe, "exec",

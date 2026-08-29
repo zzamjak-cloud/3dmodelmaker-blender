@@ -1,10 +1,11 @@
 # 3D 뷰포트 사이드바 패널
+import os
 import time
 
 import bpy
 
 from .. import preferences
-from ..core import session
+from ..core import session, snapshots
 
 # 진행 단계 정의 (session.py의 phase 식별자와 일치)
 _PHASES = ('GEN', 'EXEC', 'CAPTURE', 'CRITIQUE', 'FINAL')
@@ -37,6 +38,13 @@ class LP3D_PT_main(bpy.types.Panel):
         col.prop(props, "prompt", text="")
         col.operator("lp3d.edit_prompt", text="프롬프트 입력", icon='TEXT').target = 'prompt'
         col.prop(props, "ref_image_path", text="참조 이미지")
+        # AI가 만든 멀티뷰 시트 — 나중에 참조 이미지로 다시 쓸 수 있게 경로와 보기 버튼을 노출
+        if props.multiview_path:
+            mv = col.box()
+            mv.label(text=f"멀티뷰: {os.path.basename(props.multiview_path)}", icon='IMAGE_DATA')
+            row = mv.row(align=True)
+            row.operator("lp3d.show_multiview", text="크게 보기", icon='ZOOM_IN')
+            row.operator("lp3d.use_multiview_as_ref", text="참조로 사용", icon='FILE_REFRESH')
         row = col.row(align=True)
         row.prop(props, "agent", expand=True)
         col.prop(props, "auto_turns")
@@ -60,6 +68,11 @@ class LP3D_PT_main(bpy.types.Panel):
             row = box.row(align=True)
             row.operator("lp3d.improve", icon='FILE_REFRESH')
             row.operator("lp3d.improve_done", icon='CHECKMARK')
+            # 턴별 중간 결과를 옆에 남겨뒀다면 비교가 끝난 뒤 정리할 수 있게 한다
+            snaps = snapshots.count(props.last_collection) if props.last_collection else 0
+            if snaps:
+                box.operator("lp3d.clear_snapshots",
+                             text=f"단계 스냅샷 {snaps}개 정리", icon='TRASH')
             # 라이브러리 축적: 잘 나온 결과를 우수로 표시하면 다음 생성의 예시로 우선 쓰인다
             if props.last_entry_id:
                 rate = box.row(align=True)

@@ -94,6 +94,12 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=True,
         update=_persist_cb,
     )
+    keep_turn_snapshots: BoolProperty(
+        name="단계별 결과 보존",
+        description="각 턴의 결과를 옆으로 복제해 남긴다 — 1·2·3단계가 어떻게 바뀌었는지 나란히 비교할 수 있다 (최종 결과는 원점 유지)",
+        default=True,
+        update=_persist_cb,
+    )
     use_library: BoolProperty(
         name="생성 라이브러리 사용",
         description="성공한 생성 결과(프롬프트·코드·캡처)를 쌓아두고, 비슷한 요청이 오면 과거 합격 코드를 예시로 참고해 품질을 높인다",
@@ -118,6 +124,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col.prop(self, "capture_count")
         col.prop(self, "capture_resolution")
         col.prop(self, "use_multiview")
+        col.prop(self, "keep_turn_snapshots")
         col.prop(self, "use_library")
         from .core import library
         try:
@@ -138,6 +145,7 @@ class _Defaults:
     capture_count = 2
     capture_resolution = 512
     use_multiview = True
+    keep_turn_snapshots = True
     use_library = True
     asset_library_path = ""
 

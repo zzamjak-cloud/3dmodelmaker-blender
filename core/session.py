@@ -14,7 +14,7 @@ from .. import preferences
 from ..agents.claude_cli import ClaudeBackend
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import capture, executor, library, loop, multiview, prompts, runner
+from . import capture, executor, library, loop, multiview, prompts, runner, snapshots
 
 _current = None  # 동시 세션은 1개만 허용
 
@@ -228,7 +228,17 @@ class GenerationSession:
     def _on_multiview(self, path):
         if path:
             self.multiview = path
-            self._set_status("멀티뷰 참조 생성 완료", "멀티뷰 참조 시트 생성 완료")
+            # .blend 옆에 남겨 나중에 참조 이미지로 다시 쓸 수 있게 한다
+            saved = multiview.archive(path, self.request)
+            props = self._props()
+            if props:
+                props.multiview_path = saved or path
+            if saved:
+                self._set_status("멀티뷰 참조 생성 완료",
+                                 f"멀티뷰 시트 저장: {os.path.basename(saved)}")
+            else:
+                self._set_status("멀티뷰 참조 생성 완료",
+                                 "멀티뷰 시트 생성 완료 (.blend 저장 전이라 파일로 남기지 못함)")
         else:
             self._set_status("멀티뷰 생성 실패 — 참조 없이 진행", "멀티뷰 생성 실패/불가 — 스킵")
         self._start_generation()
@@ -251,6 +261,7 @@ class GenerationSession:
 
     def cancel(self):
         runner.cancel()
+        snapshots.clear_all(self.collection_name)  # 취소된 세션의 중간 단계는 남기지 않는다
         executor.clear_collection(self.collection_name)
         coll = bpy.data.collections.get(self.collection_name)
         if coll and not coll.objects:
@@ -392,7 +403,19 @@ class GenerationSession:
         self.exec_retries = 0
         self.last_code = code
         self._set_status(f"턴 {self.iteration} 생성 완료", f"턴 {self.iteration} 실행 성공")
-        if loop.should_finalize(status, self.iteration, self.max_iterations):
+        finalize = loop.should_finalize(status, self.iteration, self.max_iterations)
+        # 다음 턴이 컬렉션을 비우기 전에 이번 턴 결과를 옆으로 복제해 남긴다.
+        # 마지막 턴은 그 결과가 곧 최종본(원점)이므로 복제하지 않는다.
+        if (not finalize and getattr(self.prefs, "keep_turn_snapshots", True)
+                and not self.improve_code):
+            try:
+                if snapshots.capture_turn(self.collection_name, self.iteration,
+                                          self.max_iterations):
+                    self._set_status(f"턴 {self.iteration} 생성 완료",
+                                     f"턴 {self.iteration} 스냅샷 보관")
+            except Exception:
+                _log.exception("턴 스냅샷 실패")  # 스냅샷 문제로 생성을 막지 않는다
+        if finalize:
             self._finalize()
         else:
             self._critique()

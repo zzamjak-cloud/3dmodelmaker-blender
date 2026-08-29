@@ -35,12 +35,22 @@ def bevel(obj, width=0.02, segments=1, angle_limit=60.0):
 
 
 def mirror_x(obj, merge_threshold=0.001):
-    """X=0 평면 기준으로 대칭 복제해 메시에 굽는다. 좌우 대칭 모델에 사용."""
+    """월드 X=0 평면 기준으로 대칭 복제해 메시에 굽는다. 좌우 대칭 모델에 사용.
+
+    오브젝트가 x≠0에 배치되어 있어도 반대편에 짝이 생긴다 —
+    예: `lp.box("Mirror", location=(0.95, 1.3, 1.5))` 후 `lp.mirror_x(mirror)`이면
+    x=-0.95에도 백미러가 생긴다. (로컬 원점 기준으로 미러하면 제자리에 겹쳐
+    병합돼 버려 한쪽만 남는다.)"""
+    bpy.context.view_layer.update()  # location 변경을 matrix_world에 반영
+    mw = obj.matrix_world.copy()
     bm = _edit_bmesh(obj)
     geom = bm.verts[:] + bm.edges[:] + bm.faces[:]
-    mirrored = bmesh.ops.mirror(bm, geom=geom, axis='X',
-                                merge_dist=merge_threshold,
-                                matrix=Matrix.Identity(4))
+    dup = bmesh.ops.duplicate(bm, geom=geom)
+    verts = [e for e in dup["geom"] if isinstance(e, bmesh.types.BMVert)]
+    # 로컬 → 월드 → X 반전 → 로컬 (오브젝트 트랜스폼을 존중한 월드 기준 미러)
+    xform = mw.inverted() @ Matrix.Diagonal((-1.0, 1.0, 1.0, 1.0)) @ mw
+    bmesh.ops.transform(bm, matrix=xform, verts=verts)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=merge_threshold)
     # 미러된 페이스는 노멀이 뒤집히므로 재계산
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     _write_back(bm, obj)

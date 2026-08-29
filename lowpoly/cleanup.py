@@ -174,6 +174,72 @@ def nonmanifold_edge_count(objs) -> int:
     return total
 
 
+def _world_points(objs):
+    """모든 메시 정점의 월드 좌표 목록."""
+    pts = []
+    for obj in objs:
+        if obj.type != 'MESH':
+            continue
+        mw = obj.matrix_world
+        pts.extend(mw @ v.co for v in obj.data.vertices)
+    return pts
+
+
+def symmetry_score(objs, axis=None, tol=0.03) -> float:
+    """좌우 대칭도 0~1. 1이면 완전 대칭.
+
+    모델 중심을 기준으로 정점을 축 방향으로 뒤집어, 짝이 되는 정점이 tol 안에
+    있는 비율을 센다. 차량·캐릭터·가구처럼 대칭이 당연한 대상에서 미러 누락
+    (백미러 한쪽만 있는 경우 등)을 잡는 지표다.
+
+    axis=None이면 X/Y 중 점수가 높은 쪽을 쓴다 — 모델의 '좌우'가 어느 축인지는
+    대상마다 다르므로(자동차는 길이가 X면 좌우는 Y) 축을 고정하면 정상 모델도
+    낮게 나온다. 비대칭이 의도인 대상도 있으므로 낮다고 무조건 결함은 아니다."""
+    bpy.context.view_layer.update()
+    pts = _world_points(objs)
+    if len(pts) < 8:
+        return 1.0
+    if axis is None:
+        return max(symmetry_score(objs, a, tol) for a in ('X', 'Y'))
+    i = {'X': 0, 'Y': 1, 'Z': 2}[axis]
+    # 공간 해싱: 정점이 많아도 선형 시간으로 짝을 찾는다
+    cell = max(tol, 1e-6)
+    grid = {}
+    for p in pts:
+        key = (round(p.x / cell), round(p.y / cell), round(p.z / cell))
+        grid.setdefault(key, []).append(p)
+
+    def matched_ratio(center):
+        matched = 0
+        for p in pts:
+            m = p.copy()
+            m[i] = 2 * center - p[i]
+            bk = (round(m.x / cell), round(m.y / cell), round(m.z / cell))
+            found = False
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        for q in grid.get((bk[0] + dx, bk[1] + dy, bk[2] + dz), ()):
+                            if (q - m).length <= tol:
+                                found = True
+                                break
+                        if found:
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+            if found:
+                matched += 1
+        return matched / len(pts)
+
+    # 중심 후보를 둘 다 시도해 더 나은 쪽을 쓴다. 정점 평균만 쓰면 비대칭 파트
+    # 하나가 중심을 끌어당겨 나머지 정점까지 짝을 잃고 점수가 0에 가까워진다.
+    coords = [p[i] for p in pts]
+    candidates = {(min(coords) + max(coords)) / 2, sum(coords) / len(coords)}
+    return round(max(matched_ratio(c) for c in candidates), 3)
+
+
 def game_ready(obj, origin='BOTTOM'):
     """오브젝트를 게임엔진 임포트에 적합하게 정리한다. 시스템이 자동 호출한다.
 

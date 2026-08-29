@@ -2,6 +2,7 @@
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
 
@@ -13,7 +14,7 @@ from .. import preferences
 from ..agents.claude_cli import ClaudeBackend
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import capture, executor, loop, prompts, runner
+from . import capture, executor, loop, multiview, prompts, runner
 
 _current = None  # 동시 세션은 1개만 허용
 
@@ -45,17 +46,25 @@ def start_session(context, variation_of=None, variation_count=3, improve=False):
     exe = preferences.resolve_cli_path(props.agent)
     if not exe:
         return f"{props.agent} CLI를 찾을 수 없습니다. 환경설정에서 경로를 지정하세요"
+    ref_image = None
+    if props.ref_image_path.strip():
+        ref_image = bpy.path.abspath(props.ref_image_path.strip())
+        if not os.path.isfile(ref_image):
+            return f"참조 이미지를 찾을 수 없습니다: {props.ref_image_path}"
+        if os.path.splitext(ref_image)[1].lower() not in ('.png', '.jpg', '.jpeg', '.webp'):
+            return "참조 이미지는 PNG/JPG/WEBP만 지원합니다"
     _current = GenerationSession(
         scene_name=context.scene.name,
         request=request,
         agent=props.agent,
         exe=exe,
-        max_iterations=1 if improve else loop.total_turns(props.auto_cycles),
+        max_iterations=1 if improve else loop.total_turns(props.auto_turns),
         variation_code=variation_of,
         variation_count=variation_count,
         improve_code=props.last_code if improve else None,
         improve_feedback=props.improve_feedback.strip() if improve else "",
         improve_collection=props.last_collection if improve else None,
+        ref_image=ref_image,
     )
     _current.start()
     return None
@@ -80,7 +89,8 @@ def _slug(text: str) -> str:
 class GenerationSession:
     def __init__(self, scene_name, request, agent, exe, max_iterations,
                  variation_code=None, variation_count=3,
-                 improve_code=None, improve_feedback="", improve_collection=None):
+                 improve_code=None, improve_feedback="", improve_collection=None,
+                 ref_image=None):
         self.scene_name = scene_name
         self.request = request
         self.max_iterations = max_iterations
@@ -90,6 +100,13 @@ class GenerationSession:
         self.improve_feedback = improve_feedback
         self.improve_collection = improve_collection
         self.workdir = tempfile.mkdtemp(prefix="lp3d_")
+        # 참조 이미지는 workdir로 복사 — 에이전트가 상대경로(Read/-i)로 접근한다
+        self.ref_image = None
+        if ref_image:
+            dest = os.path.join(self.workdir, "reference" + os.path.splitext(ref_image)[1].lower())
+            shutil.copy(ref_image, dest)
+            self.ref_image = dest
+        self.multiview = None  # codex image_gen으로 생성한 멀티뷰 참조 시트 경로
         backend_cls = ClaudeBackend if agent == 'CLAUDE' else CodexBackend
         self.backend = backend_cls(exe, self.workdir)
         self.prefs = preferences.get_prefs()
@@ -115,6 +132,12 @@ class GenerationSession:
                 n += 1
                 name = f"{base}.{n:03d}"
             self.collection_name = name
+
+    def _ref_name(self):
+        return os.path.basename(self.ref_image) if self.ref_image else None
+
+    def _mv_name(self):
+        return os.path.basename(self.multiview) if self.multiview else None
 
     # ---------- 상태/로그 ----------
     def _props(self):
@@ -174,7 +197,10 @@ class GenerationSession:
             first = prompts.build_improve_prompt(
                 self.request, self.improve_code, self.improve_feedback,
                 [os.path.basename(p) for p in images], stats,
+                ref_image=self._ref_name(),
             )
+            if self.ref_image:
+                images = images + [self.ref_image]
             self._set_status(f"스크린샷 분석·개선 — {self._model_label(critique=True)} 호출중...",
                              f"개선 세션 시작: {self.request}"
                              + (f" / 피드백: {self.improve_feedback}" if self.improve_feedback else ""),
@@ -184,11 +210,35 @@ class GenerationSession:
         if self.variation_code:
             first = prompts.build_variation_prompt(self.request, self.variation_code,
                                                    self.variation_count)
+            # 변형은 기존 코드 스타일을 따르므로 참조 이미지·멀티뷰 불필요
+            self._set_status(f"코드 생성 — {self._model_label()} 호출중...",
+                             f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')
+            self._dispatch(first)
+            return
+        # 신규 생성: 멀티뷰 참조 시트를 먼저 생성 (codex image_gen — 없으면 스킵)
+        if getattr(self.prefs, "use_multiview", True) and multiview.is_available():
+            self._set_status("멀티뷰 참조 생성중 (codex image_gen)...",
+                             "멀티뷰 참조 시트 생성 시작", phase='GEN')
+            multiview.generate(self.request, self.workdir, self.prefs.timeout,
+                               self._on_multiview, ref_image=self.ref_image)
+            return
+        self._start_generation()
+
+    def _on_multiview(self, path):
+        if path:
+            self.multiview = path
+            self._set_status("멀티뷰 참조 생성 완료", "멀티뷰 참조 시트 생성 완료")
         else:
-            first = prompts.build_initial_prompt(self.request)
+            self._set_status("멀티뷰 생성 실패 — 참조 없이 진행", "멀티뷰 생성 실패/불가 — 스킵")
+        self._start_generation()
+
+    def _start_generation(self):
+        first = prompts.build_initial_prompt(self.request, ref_image=self._ref_name(),
+                                             multiview=self._mv_name())
+        init_images = [p for p in (self.ref_image, self.multiview) if p] or None
         self._set_status(f"코드 생성 — {self._model_label()} 호출중...",
                          f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')
-        self._dispatch(first)
+        self._dispatch(first, images=init_images)
 
     def cancel(self):
         runner.cancel()
@@ -336,7 +386,11 @@ class GenerationSession:
             [os.path.basename(p) for p in images], stats,
             self.iteration, self.max_iterations,
             allow_done=loop.allow_done(self.iteration, self.max_iterations),
+            ref_image=self._ref_name(),
+            multiview=self._mv_name(),
         )
+        # 비평 턴마다 참조·멀티뷰 시트와 비교하도록 함께 전달
+        images = images + [p for p in (self.ref_image, self.multiview) if p]
         self._set_status(f"스크린샷 분석 — {self._model_label(critique=True)} 호출중 ({self.iteration}/{self.max_iterations})...", phase='CRITIQUE')
         self._dispatch(prompt, images=images)
 

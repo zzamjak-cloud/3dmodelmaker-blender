@@ -21,11 +21,12 @@ prompts = _load("prompts", "core/prompts.py")
 
 
 class TestLoopPolicy(unittest.TestCase):
-    # 자동 반복 1 = 3턴 사이클
-    def test_total_turns_per_cycle(self):
-        self.assertEqual(loop.total_turns(1), 3)
-        self.assertEqual(loop.total_turns(2), 6)
-        self.assertEqual(loop.total_turns(3), 9)
+    # 자동 반복 값 = 턴 수 1:1 (최소 1)
+    def test_total_turns_identity(self):
+        self.assertEqual(loop.total_turns(1), 1)
+        self.assertEqual(loop.total_turns(3), 3)
+        self.assertEqual(loop.total_turns(9), 9)
+        self.assertEqual(loop.total_turns(0), 1)
 
     # 최소 3턴 전에는 DONE을 인정하지 않는다
     def test_done_ignored_before_min_turns(self):

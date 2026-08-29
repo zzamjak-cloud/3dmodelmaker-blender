@@ -26,13 +26,19 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
         default='CLAUDE',
         update=_persist_cb,
     )
-    # 구버전 max_iterations(턴 단위)에서 이름을 바꿨다 — 사이클 단위라 저장값을
-    # 그대로 이어받으면 3이 9턴으로 부풀기 때문에 키 교체로 마이그레이션한다
-    auto_cycles: IntProperty(
-        name="자동 반복",
-        description="자동 시각 피드백 루프 반복 횟수 — 1회 = 3턴(생성 1 + 비평·개선 2). 이후에도 개선하기 버튼으로 추가 반복 가능",
-        default=1, min=1, max=3,
+    # 구버전 auto_cycles(사이클 단위, 1회=3턴)에서 턴 단위 1:1로 바꿨다 —
+    # 저장값을 그대로 이어받으면 의미가 3배로 어긋나므로 키 교체로 마이그레이션한다
+    auto_turns: IntProperty(
+        name="자동 반복(턴)",
+        description="자동 시각 피드백 루프의 총 턴 수 — 값 그대로가 턴 수 (권장 3: 생성 1 + 비평·개선 2). 이후에도 개선하기 버튼으로 추가 반복 가능",
+        default=3, min=1, max=9,
         update=_persist_cb,
+    )
+    ref_image_path: StringProperty(
+        name="참조 이미지",
+        description="모델링 시 참고할 이미지 (선택) — 형태·비율·색 구성을 이 이미지에 맞춰 생성·개선",
+        subtype='FILE_PATH',
+        default="",
     )
     improve_feedback: StringProperty(
         name="개선 요청",

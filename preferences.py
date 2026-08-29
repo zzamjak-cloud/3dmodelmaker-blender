@@ -94,6 +94,12 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=True,
         update=_persist_cb,
     )
+    use_library: BoolProperty(
+        name="생성 라이브러리 사용",
+        description="성공한 생성 결과(프롬프트·코드·캡처)를 쌓아두고, 비슷한 요청이 오면 과거 합격 코드를 예시로 참고해 품질을 높인다",
+        default=True,
+        update=_persist_cb,
+    )
     asset_library_path: StringProperty(
         name="에셋 라이브러리 경로",
         description="Asset Browser 라이브러리 루트 (카탈로그 파일 위치)",
@@ -112,6 +118,13 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col.prop(self, "capture_count")
         col.prop(self, "capture_resolution")
         col.prop(self, "use_multiview")
+        col.prop(self, "use_library")
+        from .core import library
+        try:
+            info = library.stats()
+            col.label(text=f"라이브러리: {info['count']}개 축적 ({info['rated']}개 평가됨)", icon='ASSET_MANAGER')
+        except Exception:
+            pass
         col.prop(self, "asset_library_path")
 
 
@@ -125,6 +138,7 @@ class _Defaults:
     capture_count = 2
     capture_resolution = 512
     use_multiview = True
+    use_library = True
     asset_library_path = ""
 
 

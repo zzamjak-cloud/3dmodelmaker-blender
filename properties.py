@@ -58,6 +58,7 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
     last_collection: StringProperty(default="")
     last_code: StringProperty(default="")
     last_prompt: StringProperty(default="")
+    last_entry_id: StringProperty(default="")  # 라이브러리에 축적된 마지막 결과의 id
     export_dir: StringProperty(
         name="익스포트 폴더",
         subtype='DIR_PATH',

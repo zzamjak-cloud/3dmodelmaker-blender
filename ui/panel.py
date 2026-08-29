@@ -60,6 +60,11 @@ class LP3D_PT_main(bpy.types.Panel):
             row = box.row(align=True)
             row.operator("lp3d.improve", icon='FILE_REFRESH')
             row.operator("lp3d.improve_done", icon='CHECKMARK')
+            # 라이브러리 축적: 잘 나온 결과를 우수로 표시하면 다음 생성의 예시로 우선 쓰인다
+            if props.last_entry_id:
+                rate = box.row(align=True)
+                rate.operator("lp3d.rate", text="우수", icon='SOLO_ON').rating = 2
+                rate.operator("lp3d.library_discard", text="제외", icon='TRASH')
 
         # 진행 상태: 현재 작업 + 경과 시간 + 단계 목록
         box = layout.box()

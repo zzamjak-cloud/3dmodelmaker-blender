@@ -4,7 +4,48 @@ import os
 import bpy
 from bpy.props import EnumProperty, IntProperty
 
-from ..core import native_input, session
+from ..core import library, native_input, session
+
+
+class LP3D_OT_rate(bpy.types.Operator):
+    bl_idname = "lp3d.rate"
+    bl_label = "평가"
+    bl_description = "이 결과를 라이브러리에서 평가 — 우수로 표시하면 다음 생성의 예시로 우선 사용된다"
+
+    # 0=평가 취소, 1=합격, 2=우수
+    rating: IntProperty(default=2, options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.lp3d.last_entry_id)
+
+    def execute(self, context):
+        entry_id = context.scene.lp3d.last_entry_id
+        if not library.set_rating(entry_id, self.rating):
+            self.report({'WARNING'}, "라이브러리에서 항목을 찾을 수 없습니다")
+            return {'CANCELLED'}
+        labels = {0: "평가 해제", 1: "합격", 2: "우수"}
+        self.report({'INFO'}, f"평가: {labels.get(self.rating, self.rating)}")
+        return {'FINISHED'}
+
+
+class LP3D_OT_library_discard(bpy.types.Operator):
+    bl_idname = "lp3d.library_discard"
+    bl_label = "라이브러리에서 제외"
+    bl_description = "이 결과를 라이브러리에서 삭제 — 품질이 낮아 예시로 쓰고 싶지 않을 때"
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.lp3d.last_entry_id)
+
+    def execute(self, context):
+        props = context.scene.lp3d
+        if library.delete_entry(props.last_entry_id):
+            props.last_entry_id = ""
+            self.report({'INFO'}, "라이브러리에서 제외됨")
+            return {'FINISHED'}
+        self.report({'WARNING'}, "라이브러리에서 항목을 찾을 수 없습니다")
+        return {'CANCELLED'}
 
 
 class LP3D_OT_edit_prompt(bpy.types.Operator):
@@ -123,6 +164,9 @@ class LP3D_OT_improve_done(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.lp3d
+        # 개선을 끝냈다는 건 결과를 받아들였다는 뜻 — 라이브러리에서 합격으로 표시한다
+        if props.last_entry_id:
+            library.set_rating(props.last_entry_id, 1)
         props.improve_open = False
         props.prompt = ""
         props.improve_feedback = ""
@@ -216,7 +260,7 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 
 
 _CLASSES = (
-    LP3D_OT_edit_prompt,
+    LP3D_OT_edit_prompt, LP3D_OT_rate, LP3D_OT_library_discard,
     LP3D_OT_generate, LP3D_OT_cancel, LP3D_OT_variation,
     LP3D_OT_improve, LP3D_OT_improve_done,
     LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,

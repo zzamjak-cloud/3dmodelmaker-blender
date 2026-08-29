@@ -48,12 +48,26 @@ def _multiview_note(multiview: str) -> str:
     )
 
 
-def build_initial_prompt(user_request: str, ref_image: str = None, multiview: str = None) -> str:
+def _fewshot_note(examples: list) -> str:
+    """과거 합격 결과를 스타일 참고용 예시로 붙인다 (그대로 베끼지 않도록 명시)."""
+    parts = ["\n\n## 참고: 이 프로젝트에서 이미 합격한 유사 모델의 코드"]
+    for request, code in examples:
+        parts.append(f"\n요청: {request}\n```python\n{code}\n```")
+    parts.append(
+        "\n위 코드는 스타일·구조(질량 위계, 헬퍼 사용법, 배색 방식) 참고용이다. "
+        "그대로 베끼지 말고 이번 요청에 맞는 형태를 새로 설계하되, 검증된 패턴은 적극 활용하라."
+    )
+    return "\n".join(parts)
+
+
+def build_initial_prompt(user_request: str, ref_image: str = None, multiview: str = None,
+                         fewshot: list = None) -> str:
     return (
         f"다음 로우폴리 모델을 만들어라: {user_request}\n\n"
         "시스템 지침의 출력 형식(STATUS 헤더 + python 코드 블록 1개)을 반드시 지켜라."
     ) + (_ref_note(ref_image) if ref_image else "") \
-      + (_multiview_note(multiview) if multiview else "")
+      + (_multiview_note(multiview) if multiview else "") \
+      + (_fewshot_note(fewshot) if fewshot else "")
 
 
 def build_error_prompt(traceback_text: str) -> str:

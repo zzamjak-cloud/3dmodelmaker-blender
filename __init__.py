@@ -13,12 +13,12 @@ def _submodules():
     from . import lowpoly
     from .lowpoly import palette_data, colorsnap, primitives, modeling, palette, cleanup
     from .agents import parsing, base, claude_cli, codex_cli
-    from .core import loop, prompts, executor, capture, runner, session, persist, native_input, multiview
+    from .core import loop, prompts, executor, capture, runner, session, persist, native_input, multiview, library
     from .pipeline import export, assets
     return (
         lowpoly.palette_data, lowpoly.colorsnap, lowpoly.primitives, lowpoly.modeling, lowpoly.palette, lowpoly.cleanup, lowpoly,
         parsing, base, claude_cli, codex_cli,
-        loop, prompts, executor, capture, runner, multiview, session, persist, native_input,
+        loop, prompts, executor, capture, runner, multiview, library, session, persist, native_input,
         export, assets,
     )
 

@@ -46,8 +46,10 @@ class TestRefImage(unittest.TestCase):
 
     def test_budget_is_10k(self):
         # 시스템/비평 프롬프트의 버짓이 10000으로 일치해야 한다
-        sys_md = open(os.path.join(_ROOT, "prompts", "system_lowpoly.md"), encoding="utf-8").read()
-        crit_md = open(os.path.join(_ROOT, "prompts", "critique.md"), encoding="utf-8").read()
+        with open(os.path.join(_ROOT, "prompts", "system_lowpoly.md"), encoding="utf-8") as f:
+            sys_md = f.read()
+        with open(os.path.join(_ROOT, "prompts", "critique.md"), encoding="utf-8") as f:
+            crit_md = f.read()
         self.assertIn("10000", sys_md)
         self.assertIn("10000", crit_md)
         for old in ("≤ 1500", "≤ 5000", "프랍 1500"):

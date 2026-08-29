@@ -14,7 +14,7 @@ from .. import preferences
 from ..agents.claude_cli import ClaudeBackend
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import capture, executor, loop, multiview, prompts, runner
+from . import capture, executor, library, loop, multiview, prompts, runner
 
 _current = None  # 동시 세션은 1개만 허용
 
@@ -107,6 +107,7 @@ class GenerationSession:
             shutil.copy(ref_image, dest)
             self.ref_image = dest
         self.multiview = None  # codex image_gen으로 생성한 멀티뷰 참조 시트 경로
+        self.last_images = []  # 마지막 캡처 (라이브러리 썸네일용)
         backend_cls = ClaudeBackend if agent == 'CLAUDE' else CodexBackend
         self.backend = backend_cls(exe, self.workdir)
         self.prefs = preferences.get_prefs()
@@ -233,8 +234,16 @@ class GenerationSession:
         self._start_generation()
 
     def _start_generation(self):
+        fewshot = []
+        if getattr(self.prefs, "use_library", True):
+            try:
+                fewshot = library.fewshot_examples(self.request, limit=1)
+            except Exception:
+                _log.exception("few-shot 예시 조회 실패")  # 라이브러리 문제로 생성을 막지 않는다
+            if fewshot:
+                self._set_status("과거 합격 예시 참고", f"라이브러리 예시 {len(fewshot)}개 주입")
         first = prompts.build_initial_prompt(self.request, ref_image=self._ref_name(),
-                                             multiview=self._mv_name())
+                                             multiview=self._mv_name(), fewshot=fewshot)
         init_images = [p for p in (self.ref_image, self.multiview) if p] or None
         self._set_status(f"코드 생성 — {self._model_label()} 호출중...",
                          f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')
@@ -269,8 +278,25 @@ class GenerationSession:
                 props.improve_open = True  # 개선 UI 노출
                 if self.improve_code:
                     props.improve_feedback = ""  # 반영된 피드백은 비움
+                props.last_entry_id = self._archive(props.last_code)
         self._set_status(status, f"세션 종료: {status}", phase="")
         _end_session()
+
+    def _archive(self, code: str) -> str:
+        """성공 결과를 라이브러리에 축적한다 — 실패해도 세션 결과에는 영향을 주지 않는다."""
+        if self.variation_code or not getattr(self.prefs, "use_library", True):
+            return ""
+        try:
+            from ..lowpoly.cleanup import collection_tri_count
+            coll = bpy.data.collections.get(self.collection_name)
+            tris = collection_tri_count(coll) if coll else 0
+            thumb = self.last_images[0] if self.last_images else None
+            return library.save_entry(self.request, code, stats={"tris": tris},
+                                      thumbnail=thumb, multiview=self.multiview,
+                                      agent=self.backend.name)
+        except Exception:
+            _log.exception("라이브러리 저장 실패")
+            return ""
 
     # ---------- 에이전트 왕복 ----------
     def _dispatch(self, prompt: str, images=None):
@@ -381,6 +407,7 @@ class GenerationSession:
         if not images:
             self._finalize()  # 캡처할 게 없으면 그대로 마무리
             return
+        self.last_images = list(images)
         self.iteration += 1
         prompt = prompts.build_critique_prompt(
             [os.path.basename(p) for p in images], stats,

@@ -4,7 +4,40 @@ import os
 import bpy
 from bpy.props import EnumProperty, IntProperty
 
-from ..core import library, native_input, session, snapshots
+import tempfile
+
+from ..core import clipboard_image, library, multiview, native_input, session, snapshots
+
+
+class LP3D_OT_paste_ref_image(bpy.types.Operator):
+    bl_idname = "lp3d.paste_ref_image"
+    bl_label = "클립보드에서 붙여넣기"
+    bl_description = "브라우저 등에서 복사한 이미지를 참조 이미지로 붙여넣는다 (.blend 옆에 PNG로 저장)"
+
+    @classmethod
+    def poll(cls, context):
+        return clipboard_image.is_supported()
+
+    def execute(self, context):
+        # .blend 옆에 두면 다음에도 참조로 재사용할 수 있다. 저장 전 파일이면 임시 폴더.
+        directory = multiview.archive_dir() or tempfile.mkdtemp(prefix="lp3d_ref_")
+        path, error = clipboard_image.paste_to(directory)
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        context.scene.lp3d.ref_image_path = path
+        self.report({'INFO'}, f"참조 이미지로 붙여넣음: {os.path.basename(path)}")
+        return {'FINISHED'}
+
+
+class LP3D_OT_clear_ref_image(bpy.types.Operator):
+    bl_idname = "lp3d.clear_ref_image"
+    bl_label = "참조 이미지 해제"
+    bl_description = "참조 이미지 지정을 해제한다 (파일은 지우지 않는다)"
+
+    def execute(self, context):
+        context.scene.lp3d.ref_image_path = ""
+        return {'FINISHED'}
 
 
 class LP3D_OT_show_multiview(bpy.types.Operator):
@@ -326,6 +359,7 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 _CLASSES = (
     LP3D_OT_edit_prompt, LP3D_OT_rate, LP3D_OT_library_discard,
     LP3D_OT_show_multiview, LP3D_OT_use_multiview_as_ref, LP3D_OT_clear_snapshots,
+    LP3D_OT_paste_ref_image, LP3D_OT_clear_ref_image,
     LP3D_OT_generate, LP3D_OT_cancel, LP3D_OT_variation,
     LP3D_OT_improve, LP3D_OT_improve_done,
     LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,

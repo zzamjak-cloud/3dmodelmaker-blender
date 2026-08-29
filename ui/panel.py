@@ -38,6 +38,10 @@ class LP3D_PT_main(bpy.types.Panel):
         col.prop(props, "prompt", text="")
         col.operator("lp3d.edit_prompt", text="프롬프트 입력", icon='TEXT').target = 'prompt'
         col.prop(props, "ref_image_path", text="참조 이미지")
+        ref_row = col.row(align=True)
+        ref_row.operator("lp3d.paste_ref_image", text="클립보드에서 붙여넣기", icon='PASTEDOWN')
+        if props.ref_image_path:
+            ref_row.operator("lp3d.clear_ref_image", text="", icon='X')
         # AI가 만든 멀티뷰 시트 — 나중에 참조 이미지로 다시 쓸 수 있게 경로와 보기 버튼을 노출
         if props.multiview_path:
             mv = col.box()

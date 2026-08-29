@@ -4,8 +4,6 @@ import os
 import bpy
 from bpy.props import EnumProperty, IntProperty
 
-import tempfile
-
 from ..core import clipboard_image, library, multiview, native_input, session, snapshots
 
 
@@ -19,9 +17,8 @@ class LP3D_OT_paste_ref_image(bpy.types.Operator):
         return clipboard_image.is_supported()
 
     def execute(self, context):
-        # .blend 옆에 두면 다음에도 참조로 재사용할 수 있다. 저장 전 파일이면 임시 폴더.
-        directory = multiview.archive_dir() or tempfile.mkdtemp(prefix="lp3d_ref_")
-        path, error = clipboard_image.paste_to(directory)
+        # .blend 옆(저장 전이면 다운로드 폴더)에 남겨 다음에도 참조로 재사용할 수 있게 한다
+        path, error = clipboard_image.paste_to(multiview.archive_dir())
         if error:
             self.report({'ERROR'}, error)
             return {'CANCELLED'}
@@ -67,6 +64,24 @@ class LP3D_OT_show_multiview(bpy.types.Operator):
         area = context.window_manager.windows[-1].screen.areas[0]
         area.type = 'IMAGE_EDITOR'
         area.spaces.active.image = img
+        return {'FINISHED'}
+
+
+class LP3D_OT_open_multiview_folder(bpy.types.Operator):
+    bl_idname = "lp3d.open_multiview_folder"
+    bl_label = "저장 폴더 열기"
+    bl_description = "멀티뷰 시트가 저장된 폴더를 파일 탐색기로 연다"
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.scene.lp3d.multiview_path)
+
+    def execute(self, context):
+        folder = os.path.dirname(context.scene.lp3d.multiview_path)
+        if not os.path.isdir(folder):
+            self.report({'ERROR'}, f"폴더를 찾을 수 없습니다: {folder}")
+            return {'CANCELLED'}
+        bpy.ops.wm.path_open(filepath=folder)
         return {'FINISHED'}
 
 
@@ -358,7 +373,8 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 
 _CLASSES = (
     LP3D_OT_edit_prompt, LP3D_OT_rate, LP3D_OT_library_discard,
-    LP3D_OT_show_multiview, LP3D_OT_use_multiview_as_ref, LP3D_OT_clear_snapshots,
+    LP3D_OT_show_multiview, LP3D_OT_use_multiview_as_ref, LP3D_OT_open_multiview_folder,
+    LP3D_OT_clear_snapshots,
     LP3D_OT_paste_ref_image, LP3D_OT_clear_ref_image,
     LP3D_OT_generate, LP3D_OT_cancel, LP3D_OT_variation,
     LP3D_OT_improve, LP3D_OT_improve_done,

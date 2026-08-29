@@ -49,6 +49,7 @@ class LP3D_PT_main(bpy.types.Panel):
             row = mv.row(align=True)
             row.operator("lp3d.show_multiview", text="크게 보기", icon='ZOOM_IN')
             row.operator("lp3d.use_multiview_as_ref", text="참조로 사용", icon='FILE_REFRESH')
+            row.operator("lp3d.open_multiview_folder", text="", icon='FILEBROWSER')
         row = col.row(align=True)
         row.prop(props, "agent", expand=True)
         col.prop(props, "auto_turns")

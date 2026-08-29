@@ -82,5 +82,23 @@ class TestMultiviewArchive(unittest.TestCase):
         self.assertEqual(multiview._slug("///"), "model")
 
 
+class TestFallbackDir(unittest.TestCase):
+    # .blend를 저장하지 않아도 시트를 잃지 않도록 항상 쓸 수 있는 경로여야 한다
+    def test_uses_downloads_blender(self):
+        d = multiview.fallback_dir()
+        self.assertTrue(os.path.isdir(d), f"보관 폴더가 만들어지지 않음: {d}")
+        self.assertEqual(os.path.basename(d), "blender")
+
+    def test_under_home(self):
+        self.assertTrue(multiview.fallback_dir().startswith(os.path.expanduser("~")))
+
+    def test_writable(self):
+        probe = os.path.join(multiview.fallback_dir(), ".lp3d_write_probe")
+        with open(probe, "w") as f:
+            f.write("ok")
+        self.assertTrue(os.path.isfile(probe))
+        os.remove(probe)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -235,10 +235,10 @@ class GenerationSession:
                 props.multiview_path = saved or path
             if saved:
                 self._set_status("멀티뷰 참조 생성 완료",
-                                 f"멀티뷰 시트 저장: {os.path.basename(saved)}")
+                                 f"멀티뷰 시트 저장: {saved}")
             else:
                 self._set_status("멀티뷰 참조 생성 완료",
-                                 "멀티뷰 시트 생성 완료 (.blend 저장 전이라 파일로 남기지 못함)")
+                                 "멀티뷰 시트 생성 완료 (파일 보관 실패 — 세션 중에만 사용)")
         else:
             self._set_status("멀티뷰 생성 실패 — 참조 없이 진행", "멀티뷰 생성 실패/불가 — 스킵")
         self._start_generation()

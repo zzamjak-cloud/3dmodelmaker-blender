@@ -38,14 +38,32 @@ def unique_path(directory: str, base: str) -> str:
     return path
 
 
+def fallback_dir() -> str:
+    """.blend를 저장하지 않았을 때 쓰는 보관 폴더 — OS 다운로드 폴더 아래 blender/.
+
+    새 씬에서 바로 생성하는 경우가 흔한데 그때 시트를 잃지 않도록,
+    어느 OS에서나 존재가 보장되는 경로에 남긴다."""
+    home = os.path.expanduser("~")
+    base = os.path.join(home, "Downloads")
+    if not os.path.isdir(base):
+        base = home  # 다운로드 폴더가 없는 환경(원격 세션 등)에서는 홈으로
+    path = os.path.join(base, "blender")
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        log.exception("보관 폴더 생성 실패")
+        return base
+    return path
+
+
 def archive_dir() -> str:
-    """멀티뷰 시트를 남길 폴더 — 열려 있는 .blend 파일 옆. 저장 전 파일이면 빈 문자열."""
+    """멀티뷰 시트를 남길 폴더 — 열려 있는 .blend 옆, 저장 전이면 다운로드 폴더."""
     import bpy
-    return os.path.dirname(bpy.data.filepath) if bpy.data.filepath else ""
+    return os.path.dirname(bpy.data.filepath) if bpy.data.filepath else fallback_dir()
 
 
 def archive(src: str, request: str) -> str:
-    """생성한 시트를 .blend 옆에 보관한다. 저장 경로를 반환(불가하면 빈 문자열)."""
+    """생성한 시트를 보관 폴더에 남긴다. 저장 경로를 반환(불가하면 빈 문자열)."""
     directory = archive_dir()
     if not directory or not src or not os.path.isfile(src):
         return ""

@@ -1,8 +1,11 @@
 # 오퍼레이터: 생성/취소/익스포트/에셋 등록/변형/개발 리로드
+import logging
 import os
 
 import bpy
 from bpy.props import EnumProperty, IntProperty
+
+_log = logging.getLogger(__name__)
 
 from ..core import clipboard_image, library, multiview, native_input, session, snapshots
 
@@ -359,11 +362,23 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 
         # 실제 리로드는 타이머로 미룬다 — 오퍼레이터 실행 스택 안에서 자기 클래스를
         # 등록 해제·재등록하면 self의 RNA가 해제된 채 접근되어 크래시한다 (macOS GUI).
+        scene_name = context.scene.name
+
         def _do_reload():
             import importlib
-            root = importlib.import_module(pkg)
-            root.dev_reload()
-            print("LP3D Dev Reload 완료")
+            try:
+                root = importlib.import_module(pkg)
+                root.dev_reload()
+                message = "Dev Reload 완료"
+            except Exception as e:
+                # 타이머 안에서는 report를 쓸 수 없으므로 상태 줄과 콘솔로 알린다.
+                # 조용히 실패하면 구버전 모듈이 섞인 채로 계속 쓰게 된다.
+                message = f"Dev Reload 실패: {e}"
+                _log.exception("Dev Reload 실패")
+            print(f"LP3D {message}")
+            scene = bpy.data.scenes.get(scene_name)
+            if scene and getattr(scene, "lp3d", None):
+                scene.lp3d.status = message
             return None
 
         bpy.app.timers.register(_do_reload, first_interval=0.1)

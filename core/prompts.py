@@ -32,11 +32,28 @@ def build_system_prompt() -> str:
     return _read("system_lowpoly.md") + "\n\n## lp 헬퍼 API 레퍼런스\n\n" + _api_reference()
 
 
-def build_initial_prompt(user_request: str) -> str:
+def _ref_note(ref_image: str) -> str:
+    return (
+        f"\n\n사용자가 참조 이미지를 제공했다: {ref_image}\n"
+        "코드를 쓰기 전에 참조 이미지를 반드시 확인하고, 형태·비율·실루엣·색 구성을 "
+        "참조에 최대한 가깝게 만들어라. 로우폴리로 단순화하되 참조의 시그니처 요소와 비율은 유지하라."
+    )
+
+
+def _multiview_note(multiview: str) -> str:
+    return (
+        f"\n\n{multiview} 는 이 대상의 멀티뷰 참조 시트다 "
+        "(좌상=정면, 우상=측면, 좌하=상면, 우하=3/4뷰). "
+        "코드를 쓰기 전에 반드시 확인하고, 각 뷰의 실루엣·비율·색을 그대로 따라 모델링하라."
+    )
+
+
+def build_initial_prompt(user_request: str, ref_image: str = None, multiview: str = None) -> str:
     return (
         f"다음 로우폴리 모델을 만들어라: {user_request}\n\n"
         "시스템 지침의 출력 형식(STATUS 헤더 + python 코드 블록 1개)을 반드시 지켜라."
-    )
+    ) + (_ref_note(ref_image) if ref_image else "") \
+      + (_multiview_note(multiview) if multiview else "")
 
 
 def build_error_prompt(traceback_text: str) -> str:
@@ -62,22 +79,38 @@ _DONE_FORBIDDEN = (
 
 
 def build_critique_prompt(image_names: list, stats: dict, iteration: int, max_iterations: int,
-                          allow_done: bool = True) -> str:
+                          allow_done: bool = True, ref_image: str = None,
+                          multiview: str = None) -> str:
     template = _read("critique.md")
     stats_text = "\n".join(f"- {k}: {v}" for k, v in stats.items())
-    return template.format(
+    out = template.format(
         images=", ".join(image_names),
         stats=stats_text,
         iteration=iteration,
         max_iterations=max_iterations,
         done_rule=_DONE_ALLOWED if allow_done else _DONE_FORBIDDEN,
     )
+    if ref_image:
+        out += (
+            f"\n\n{ref_image} 는 사용자가 제공한 참조 이미지다 — 캡처와 참조를 비교해 "
+            "형태·비율·색이 참조에 가까워지도록 구체적으로 지적하라. 참조와 동떨어져 있으면 DONE이 아니다."
+        )
+    if multiview:
+        out += (
+            f"\n\n{multiview} 는 멀티뷰 참조 시트다 (좌상=정면, 우상=측면, 좌하=상면, 우하=3/4뷰). "
+            "캡처의 각 앵글을 시트의 해당 뷰와 나란히 비교해 실루엣·비율·누락 파트를 구체적으로 지적하라. "
+            "참조 시트와 실루엣이 동떨어져 있으면 DONE이 아니다."
+        )
+    return out
 
 
 def build_improve_prompt(original_request: str, current_code: str, feedback: str,
-                         image_names: list, stats: dict) -> str:
+                         image_names: list, stats: dict, ref_image: str = None) -> str:
     stats_text = "\n".join(f"- {k}: {v}" for k, v in stats.items())
     fb = f"\n\n**사용자 피드백 (최우선으로 반영하라)**: {feedback}" if feedback else ""
+    if ref_image:
+        fb += (f"\n\n{ref_image} 는 사용자가 제공한 참조 이미지다 — "
+               "캡처와 비교해 형태·비율·색이 참조에 가까워지도록 개선하라.")
     return (
         f"이전에 다음 요청으로 로우폴리 모델을 만들었다: {original_request}\n\n"
         f"현재 모델의 전체 코드:\n```python\n{current_code}\n```\n\n"

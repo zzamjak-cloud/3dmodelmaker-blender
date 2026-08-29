@@ -50,7 +50,7 @@ class ClaudeBackend(AgentBackend):
             return ""
         rels = [os.path.basename(p) for p in images]
         return (
-            "\n\n다음 캡처 이미지 파일들을 Read 도구로 반드시 모두 읽고 평가하라 "
+            "\n\n다음 이미지 파일들을 Read 도구로 반드시 모두 읽고 확인하라 "
             f"(현재 작업 디렉토리 기준): {', '.join(rels)}"
         )
 

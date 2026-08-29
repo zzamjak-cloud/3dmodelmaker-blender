@@ -3,7 +3,7 @@ import os
 import shutil
 
 import bpy
-from bpy.props import EnumProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 
 # macOS Finder로 실행한 Blender는 사용자 PATH를 상속하지 않으므로 흔한 설치 경로를 직접 탐색
 _EXTRA_PATHS = (
@@ -88,6 +88,12 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=512, min=256, max=1024,
         update=_persist_cb,
     )
+    use_multiview: BoolProperty(
+        name="멀티뷰 참조 생성",
+        description="생성 시작 시 codex image_gen으로 정면/측면/상면/쿼터뷰 참조 시트를 먼저 만들어 모델링·비평 기준으로 사용 (codex CLI 필요 — 없으면 자동 스킵)",
+        default=True,
+        update=_persist_cb,
+    )
     asset_library_path: StringProperty(
         name="에셋 라이브러리 경로",
         description="Asset Browser 라이브러리 루트 (카탈로그 파일 위치)",
@@ -105,6 +111,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col.prop(self, "timeout")
         col.prop(self, "capture_count")
         col.prop(self, "capture_resolution")
+        col.prop(self, "use_multiview")
         col.prop(self, "asset_library_path")
 
 
@@ -117,6 +124,7 @@ class _Defaults:
     timeout = 300
     capture_count = 2
     capture_resolution = 512
+    use_multiview = True
     asset_library_path = ""
 
 

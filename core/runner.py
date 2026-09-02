@@ -10,6 +10,8 @@ import time
 
 import bpy
 
+from . import errors
+
 log = logging.getLogger(__name__)
 
 _jobs = []  # 진행 중인 작업 목록 (동시 1개가 일반적이지만 리스트로 안전하게)
@@ -125,7 +127,9 @@ def _pump():
         elif job["cancelled"]:
             result, error = None, "사용자 취소"
         elif rc != 0:
-            detail = (stderr or stdout or "")[-1500:]
+            # stdout(JSON 이벤트)에도 원인이 담기므로 둘 다 넘긴다 —
+            # codex는 인증 실패를 stdout의 error 이벤트로도 알려준다
+            detail = errors.tail(stderr) + "\n" + errors.tail(stdout, 800)
             result, error = None, f"CLI 종료 코드 {rc}\n{detail}"
         else:
             result, error = stdout, None

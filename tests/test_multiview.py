@@ -68,3 +68,48 @@ class TestPromptIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLatestArchived(unittest.TestCase):
+    """보관 폴더에서 가장 최근 시트를 되찾는 조회 (Blender 상태 없이 파일만으로)."""
+
+    def setUp(self):
+        import tempfile
+        self.dir_a = tempfile.mkdtemp(prefix="lp3d_test_a_")
+        self.dir_b = tempfile.mkdtemp(prefix="lp3d_test_b_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir_a, ignore_errors=True)
+        shutil.rmtree(self.dir_b, ignore_errors=True)
+
+    def _write(self, directory, name, mtime):
+        path = os.path.join(directory, name)
+        with open(path, "wb") as f:
+            f.write(b"x")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_empty_dirs_return_blank(self):
+        self.assertEqual(multiview.latest_in([self.dir_a, self.dir_b]), "")
+
+    def test_picks_newest_across_directories(self):
+        self._write(self.dir_a, "LP3D_multiview_old.png", 1000)
+        newest = self._write(self.dir_b, "LP3D_multiview_new.png", 2000)
+        self.assertEqual(multiview.latest_in([self.dir_a, self.dir_b]), newest)
+
+    def test_ignores_unrelated_files(self):
+        self._write(self.dir_a, "LP3D_ref_clipboard_20260831.png", 9000)  # 참조 붙여넣기 결과
+        self._write(self.dir_a, "notes.txt", 9000)
+        sheet = self._write(self.dir_a, "LP3D_multiview_box.png", 100)
+        self.assertEqual(multiview.latest_in([self.dir_a]), sheet)
+
+    def test_missing_directory_is_skipped(self):
+        sheet = self._write(self.dir_a, "LP3D_multiview_box.png", 100)
+        self.assertEqual(multiview.latest_in(["/definitely/not/here", self.dir_a, ""]), sheet)
+
+    def test_archive_uses_same_prefix_as_lookup(self):
+        # archive()가 쓰는 파일명과 latest_in()이 찾는 접두어가 어긋나면 조용히 실패한다
+        self.assertTrue(
+            multiview.unique_path(self.dir_a, multiview.ARCHIVE_PREFIX + "x")
+            .endswith(multiview.ARCHIVE_PREFIX + "x.png"))

@@ -14,7 +14,8 @@ from .. import preferences
 from ..agents.claude_cli import ClaudeBackend
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import capture, executor, library, loop, multiview, prompts, runner, snapshots
+from . import (capture, errors, executor, library, loop, multiview, prompts,
+               runner, snapshots)
 
 _current = None  # 동시 세션은 1개만 허용
 
@@ -145,10 +146,11 @@ class GenerationSession:
         scene = bpy.data.scenes.get(self.scene_name)
         return scene.lp3d if scene else None
 
-    def _set_status(self, status: str, log: str = None, phase: str = None):
+    def _set_status(self, status: str, log: str = None, phase: str = None, hint: str = ""):
         props = self._props()
         if props:
             props.status = status
+            props.status_hint = hint
             props.iteration = self.iteration
             props.total_turns = self.max_iterations
             if phase is not None:
@@ -225,7 +227,7 @@ class GenerationSession:
             return
         self._start_generation()
 
-    def _on_multiview(self, path):
+    def _on_multiview(self, path, error=None):
         if path:
             self.multiview = path
             # .blend 옆에 남겨 나중에 참조 이미지로 다시 쓸 수 있게 한다
@@ -240,7 +242,17 @@ class GenerationSession:
                 self._set_status("멀티뷰 참조 생성 완료",
                                  "멀티뷰 시트 생성 완료 (파일 보관 실패 — 세션 중에만 사용)")
         else:
-            self._set_status("멀티뷰 생성 실패 — 참조 없이 진행", "멀티뷰 생성 실패/불가 — 스킵")
+            # 시트가 없어도 모델링은 계속한다. 다만 로그인 만료처럼 조치 가능한
+            # 원인은 상태줄에 그대로 드러내야 사용자가 고칠 수 있다.
+            reason = errors.describe(error, 'codex') if error else "원인 불명"
+            # 곧바로 코드 생성 단계가 상태줄을 덮어쓰므로, 조치까지 로그에 남긴다
+            lines = ["멀티뷰 생성 실패 — 참조 시트 없이 계속 진행합니다"]
+            todo = errors.action(error, 'codex') if error else ""
+            if todo:
+                lines.append(f"  → {todo}")
+            lines += [f"  · {l}" for l in errors.detail_lines(error)]
+            # 상태줄에 "— 참조 없이 진행"까지 붙이면 가운데가 잘려 정작 원인이 사라진다
+            self._set_status(f"멀티뷰 실패: {reason}", "\n".join(lines))
         self._start_generation()
 
     def _start_generation(self):
@@ -268,7 +280,7 @@ class GenerationSession:
             bpy.data.collections.remove(coll)
         self._finish("취소됨", ok=False)
 
-    def _finish(self, status: str, ok: bool):
+    def _finish(self, status: str, ok: bool, detail=None, hint: str = ""):
         # 개선 실패로 기존 모델까지 사라졌으면 이전 코드로 복원한다
         if not ok and self.improve_code:
             coll = bpy.data.collections.get(self.collection_name)
@@ -290,7 +302,11 @@ class GenerationSession:
                 if self.improve_code:
                     props.improve_feedback = ""  # 반영된 피드백은 비움
                 props.last_entry_id = self._archive(props.last_code)
-        self._set_status(status, f"세션 종료: {status}", phase="")
+        # 상태줄은 한 줄뿐이라 원인을 다 담을 수 없다 — 상세는 로그 패널에 남긴다
+        log_text = f"세션 종료: {status}"
+        if detail:
+            log_text += "\n" + "\n".join(f"  · {line}" for line in detail)
+        self._set_status(status, log_text, phase="", hint=hint)
         _end_session()
 
     def _archive(self, code: str) -> str:
@@ -342,14 +358,21 @@ class GenerationSession:
         if error:
             if "사용자 취소" in error:
                 return  # cancel()이 이미 정리함
+            kind = errors.classify(error)
+            reason = errors.describe(error, self.backend.name)
+            # 인증·사용량 문제는 재시도해도 똑같이 실패한다 — 폴백을 건너뛰고
+            # 바로 조치 문구를 보여준다 (예전에는 "CLI 종료 코드 1"만 보였다)
+            retryable = kind not in (errors.AUTH, errors.QUOTA, errors.MISSING)
             # resume이 깨졌으면 stateless 폴백으로 1회 재시도
-            if getattr(self, "_was_resume", False) and not self.fallback_used:
+            if retryable and getattr(self, "_was_resume", False) and not self.fallback_used:
                 self.fallback_used = True
                 self.stateless = True
-                self._set_status("세션 이어가기 실패, 폴백 재시도...", f"resume 실패: {error.splitlines()[0]}", phase='GEN')
+                self._set_status("세션 이어가기 실패, 폴백 재시도...",
+                                 f"resume 실패: {reason}", phase='GEN')
                 self._dispatch("직전 지시를 계속 수행하라. 전체 코드를 다시 작성하라.")
                 return
-            self._finish(f"실패: {error.splitlines()[0]}", ok=False)
+            self._finish(f"실패: {reason}", ok=False, detail=errors.detail_lines(error),
+                         hint=errors.action(error, self.backend.name))
             return
 
         try:

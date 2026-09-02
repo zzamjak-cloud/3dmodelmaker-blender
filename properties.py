@@ -49,6 +49,9 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
     # --- 이하 런타임 상태 (UI 표시용) ---
     is_running: BoolProperty(default=False)
     status: StringProperty(default="대기 중")
+    # 실패 시 사용자가 할 일 (예: "터미널에서 `codex login` 실행 후 다시 시도").
+    # 상태줄에 함께 넣으면 사이드바 폭에서 가운데가 잘려 정작 조치가 사라진다.
+    status_hint: StringProperty(default="")
     phase: StringProperty(default="")        # 현재 단계 식별자 (GEN/EXEC/CAPTURE/CRITIQUE/FINAL)
     started_at: FloatProperty(default=0.0)   # 세션 시작 시각 (경과 시간 표시용)
     iteration: IntProperty(default=0)
@@ -60,6 +63,11 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
     last_prompt: StringProperty(default="")
     last_entry_id: StringProperty(default="")  # 라이브러리에 축적된 마지막 결과의 id
     multiview_path: StringProperty(default="")  # 이번 세션의 멀티뷰 시트 경로
+    multiview_preview_open: BoolProperty(
+        name="멀티뷰 미리보기",
+        description="패널에 멀티뷰(3면도) 시트 썸네일을 펼쳐 보여준다",
+        default=True,
+    )
     export_dir: StringProperty(
         name="익스포트 폴더",
         subtype='DIR_PATH',

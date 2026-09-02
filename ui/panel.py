@@ -6,6 +6,7 @@ import bpy
 
 from .. import preferences
 from ..core import session, snapshots
+from . import previews
 
 # 진행 단계 정의 (session.py의 phase 식별자와 일치)
 _PHASES = ('GEN', 'EXEC', 'CAPTURE', 'CRITIQUE', 'FINAL')
@@ -42,14 +43,31 @@ class LP3D_PT_main(bpy.types.Panel):
         ref_row.operator("lp3d.paste_ref_image", text="클립보드에서 붙여넣기", icon='PASTEDOWN')
         if props.ref_image_path:
             ref_row.operator("lp3d.clear_ref_image", text="", icon='X')
-        # AI가 만든 멀티뷰 시트 — 나중에 참조 이미지로 다시 쓸 수 있게 경로와 보기 버튼을 노출
-        if props.multiview_path:
-            mv = col.box()
-            mv.label(text=f"멀티뷰: {os.path.basename(props.multiview_path)}", icon='IMAGE_DATA')
+        # AI가 만든 멀티뷰(3면도) 시트 — 패널에서 바로 확인하고 참조로 재사용할 수 있게 한다.
+        # 경로가 비어 있어도 상자를 그린다: 지난 세션 시트를 파일에서 되찾는 버튼이 필요하다.
+        mv = col.box()
+        mv_path = props.multiview_path
+        if mv_path:
+            header = mv.row(align=True)
+            header.prop(props, "multiview_preview_open", text="", emboss=False,
+                        icon='DISCLOSURE_TRI_DOWN' if props.multiview_preview_open
+                        else 'DISCLOSURE_TRI_RIGHT')
+            header.label(text=f"멀티뷰: {os.path.basename(mv_path)}", icon='IMAGE_DATA')
+            if props.multiview_preview_open:
+                icon = previews.icon_id(mv_path)
+                if icon:
+                    mv.template_icon(icon_value=icon, scale=7.5)
+                elif not os.path.isfile(mv_path):
+                    mv.label(text="시트 파일이 사라졌습니다", icon='ERROR')
+                else:
+                    mv.label(text="미리보기를 만들 수 없습니다", icon='ERROR')
             row = mv.row(align=True)
             row.operator("lp3d.show_multiview", text="크게 보기", icon='ZOOM_IN')
             row.operator("lp3d.use_multiview_as_ref", text="참조로 사용", icon='FILE_REFRESH')
             row.operator("lp3d.open_multiview_folder", text="", icon='FILEBROWSER')
+        else:
+            mv.operator("lp3d.load_last_multiview",
+                        text="저장된 멀티뷰 미리보기", icon='IMAGE_DATA')
         row = col.row(align=True)
         row.prop(props, "agent", expand=True)
         col.prop(props, "auto_turns")
@@ -86,7 +104,16 @@ class LP3D_PT_main(bpy.types.Panel):
 
         # 진행 상태: 현재 작업 + 경과 시간 + 단계 목록
         box = layout.box()
-        box.label(text=f"상태: {props.status}", icon='INFO')
+        # 실패는 눈에 띄어야 한다 — 조용히 지나가면 원인을 놓친다 (로그인 만료 사고)
+        # "실패: ...", "멀티뷰 실패: ..." 등 어느 위치든 실패면 경고색으로 표시한다
+        failed = "실패" in props.status
+        head = box.row()
+        head.alert = failed
+        head.label(text=f"상태: {props.status}", icon='ERROR' if failed else 'INFO')
+        if failed:
+            if props.status_hint:
+                box.label(text=props.status_hint, icon='CONSOLE')
+            box.label(text="자세한 원인은 [로그] 패널 참고", icon='TEXT')
         if running:
             elapsed = int(time.time() - props.started_at) if props.started_at else 0
             box.label(text=f"경과 {elapsed // 60}:{elapsed % 60:02d} · 턴 {props.iteration}/{props.total_turns}",

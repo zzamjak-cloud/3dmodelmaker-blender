@@ -107,6 +107,23 @@ class LP3D_OT_use_multiview_as_ref(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LP3D_OT_load_last_multiview(bpy.types.Operator):
+    bl_idname = "lp3d.load_last_multiview"
+    bl_label = "저장된 멀티뷰 불러오기"
+    bl_description = ("보관 폴더(.blend 옆 또는 다운로드/blender)에 저장된 "
+                      "가장 최근 멀티뷰 시트를 미리보기로 불러온다")
+
+    def execute(self, context):
+        path = multiview.latest_archived()
+        if not path:
+            self.report({'WARNING'},
+                        f"저장된 멀티뷰 시트가 없습니다: {multiview.archive_dir()}")
+            return {'CANCELLED'}
+        context.scene.lp3d.multiview_path = path
+        self.report({'INFO'}, f"불러옴: {os.path.basename(path)}")
+        return {'FINISHED'}
+
+
 class LP3D_OT_clear_snapshots(bpy.types.Operator):
     bl_idname = "lp3d.clear_snapshots"
     bl_label = "단계 스냅샷 정리"
@@ -389,6 +406,7 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 _CLASSES = (
     LP3D_OT_edit_prompt, LP3D_OT_rate, LP3D_OT_library_discard,
     LP3D_OT_show_multiview, LP3D_OT_use_multiview_as_ref, LP3D_OT_open_multiview_folder,
+    LP3D_OT_load_last_multiview,
     LP3D_OT_clear_snapshots,
     LP3D_OT_paste_ref_image, LP3D_OT_clear_ref_image,
     LP3D_OT_generate, LP3D_OT_cancel, LP3D_OT_variation,

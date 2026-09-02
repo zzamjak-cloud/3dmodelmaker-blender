@@ -15,6 +15,7 @@ import tempfile
 log = logging.getLogger(__name__)
 
 MULTIVIEW_FILENAME = "multiview.png"
+ARCHIVE_PREFIX = "LP3D_multiview_"  # 보관 폴더에 남는 시트 파일명 접두어
 
 
 def is_available() -> bool:
@@ -68,12 +69,43 @@ def archive(src: str, request: str) -> str:
     if not directory or not src or not os.path.isfile(src):
         return ""
     try:
-        dest = unique_path(directory, f"LP3D_multiview_{_slug(request)}")
+        dest = unique_path(directory, f"{ARCHIVE_PREFIX}{_slug(request)}")
         shutil.copy(src, dest)
         return dest
     except OSError:
         log.exception("멀티뷰 시트 보관 실패")
         return ""
+
+
+def latest_in(directories) -> str:
+    """주어진 폴더들에서 가장 최근에 저장된 멀티뷰 시트 경로 (없으면 빈 문자열)."""
+    best, best_mtime = "", -1.0
+    for directory in dict.fromkeys(d for d in directories if d):
+        if not os.path.isdir(directory):
+            continue
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            if not name.startswith(ARCHIVE_PREFIX) or not name.lower().endswith(".png"):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime > best_mtime:
+                best, best_mtime = path, mtime
+    return best
+
+
+def latest_archived() -> str:
+    """보관 폴더(.blend 옆 + 다운로드 폴더)에서 가장 최근 시트를 찾는다.
+
+    세션 상태(multiview_path)는 Blender를 다시 켜면 사라지지만 파일은 남는다 —
+    지난 세션에서 만든 시트를 다시 열어볼 수 있도록 파일 쪽에서 되찾는다."""
+    return latest_in([archive_dir(), fallback_dir()])
 
 
 def build_command(exe: str, work_dir: str, ref_image: str = None) -> list:
@@ -106,30 +138,38 @@ def build_prompt(request: str, has_ref: bool = False) -> str:
 
 
 def generate(request: str, session_workdir: str, timeout: int, on_done, ref_image: str = None):
-    """멀티뷰 시트를 비동기로 생성한다. 완료 시 메인 스레드에서 on_done(경로 or None) 호출."""
+    """멀티뷰 시트를 비동기로 생성한다.
+
+    완료 시 메인 스레드에서 on_done(경로 or None, 오류 문자열 or None)을 호출한다.
+    실패 원인을 함께 넘기는 이유: 예전에는 실패를 '스킵'으로만 알려서
+    codex 로그인 만료 같은 조치 가능한 원인이 그대로 묻혔다."""
     from .. import preferences
     from . import runner
 
     exe = preferences.resolve_cli_path('CODEX')
     if not exe:
-        on_done(None)
+        on_done(None, "codex CLI를 찾을 수 없습니다")
         return
     work = tempfile.mkdtemp(prefix="lp3d_mv_")
     out_path = os.path.join(work, MULTIVIEW_FILENAME)
     final_path = os.path.join(session_workdir, MULTIVIEW_FILENAME)
 
     def _cb(stdout, error):
-        path = None
+        path, failure = None, error
         if os.path.isfile(out_path):
             try:
                 shutil.move(out_path, final_path)
-                path = final_path
-            except OSError:
+                path, failure = final_path, None
+            except OSError as e:
                 log.exception("멀티뷰 시트 이동 실패")
-        elif error:
-            log.warning("멀티뷰 생성 실패: %s", error.splitlines()[0])
+                failure = f"시트 파일 이동 실패: {e}"
+        elif not error:
+            # 종료 코드는 0인데 파일이 없다 — image_gen 도구를 안 썼거나 다른 이름으로 저장
+            failure = f"codex가 {MULTIVIEW_FILENAME}을 저장하지 않았습니다"
+        if failure:
+            log.warning("멀티뷰 생성 실패: %s", failure.splitlines()[0])
         shutil.rmtree(work, ignore_errors=True)
-        on_done(path)
+        on_done(path, failure)
 
     cmd = build_command(exe, work, ref_image=ref_image)
     runner.run_cli_async(cmd, work, timeout, _cb,

@@ -840,11 +840,17 @@ def duplicate_job(props, index: int):
     결과·상태는 물려주지 않는다 (새로 실행할 대기 항목이다)."""
     if not (0 <= index < len(props.jobs)):
         return None
+    # 원본 값을 먼저 복사해둔다 — props.jobs.add()가 컬렉션을 재할당하면
+    # 앞서 얻은 항목 참조(src)가 무효가 되어 접근 시 크래시할 수 있다
     src = props.jobs[index]
+    values = {
+        "ref_image_path": src.ref_image_path,
+        "agent": src.agent,
+        "auto_turns": src.auto_turns,
+    }
     job = add_job(props, src.prompt)
-    job.ref_image_path = src.ref_image_path
-    job.agent = src.agent
-    job.auto_turns = src.auto_turns
+    for key, value in values.items():
+        setattr(job, key, value)
     return job
 
 
@@ -1858,11 +1864,14 @@ class LP3D_OT_variation(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.lp3d
         src = props.active_job()
-        code = src.code
+        # 원본 값을 먼저 복사한다 — jobs.add_job()이 컬렉션을 재할당하면 src 참조가
+        # 무효가 되어 접근 시 크래시할 수 있다
+        code, prompt = src.code, src.prompt
+        agent, turns = src.agent, src.auto_turns
         # 변형은 원본을 덮지 않고 새 항목·새 레인에 만든다
-        new_job = jobs.add_job(props, src.prompt)
-        new_job.agent = src.agent
-        new_job.auto_turns = src.auto_turns
+        new_job = jobs.add_job(props, prompt)
+        new_job.agent = agent
+        new_job.auto_turns = turns
         error = session.start_job(context.scene.name, new_job.uid,
                                   variation_of=code, variation_count=self.count)
         if error:

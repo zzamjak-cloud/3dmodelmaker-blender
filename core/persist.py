@@ -10,8 +10,9 @@ import os
 import bpy
 
 _PREF_KEYS = ("claude_path", "codex_path", "gen_model", "critique_model",
-              "timeout", "capture_count", "capture_resolution", "use_multiview",
-              "keep_turn_snapshots", "use_library", "asset_library_path")
+              "timeout", "ai_concurrency", "capture_count", "capture_resolution",
+              "use_multiview", "keep_turn_snapshots", "use_library",
+              "asset_library_path")
 # auto_cycles(사이클 단위) -> auto_turns(턴 단위 1:1) 키 교체 — 구버전 저장값은 무시된다
 _SCENE_KEYS = ("agent", "auto_turns", "export_dir")
 

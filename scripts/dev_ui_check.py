@@ -32,7 +32,7 @@ from lp3d_modelmaker.ui import panel as _panel
 _panel.LP3D_PT_main.bl_category = "Item"
 addon.register()
 
-from lp3d_modelmaker.core import errors, multiview  # noqa: E402
+from lp3d_modelmaker.core import errors, jobs, multiview  # noqa: E402
 from lp3d_modelmaker.ui import previews  # noqa: E402
 
 # 실제로 겪었던 codex 토큰 만료 실패를 그대로 재현한다
@@ -84,38 +84,43 @@ def _shot(tag: str):
 def step_setup():
     _prepare_sidebar()
     props = bpy.context.scene.lp3d
-    props.multiview_path = SHEET
+    # 상태는 이제 씬이 아니라 큐 항목(job) 하나에 담긴다 — 촬영용 항목을 만들어 선택해둔다
+    job = jobs.add_job(props, "테스트 프롬프트")
+    job.multiview_path = SHEET
     props.multiview_preview_open = True
-    props.status = "실패: " + errors.describe(AUTH_FAILURE, "codex")
-    props.status_hint = errors.action(AUTH_FAILURE, "codex")
-    props.log = "\n".join(["세션 종료: 실패"]
-                          + [f"  · {l}" for l in errors.detail_lines(AUTH_FAILURE)])
+    job.state = 'FAILED'
+    job.status = "실패: " + errors.describe(AUTH_FAILURE, "codex")
+    job.status_hint = errors.action(AUTH_FAILURE, "codex")
+    job.log = "\n".join(["세션 종료: 실패"]
+                        + [f"  · {l}" for l in errors.detail_lines(AUTH_FAILURE)])
     print("ICON_ID:", previews.icon_id(SHEET))   # 0이면 프리뷰 로드 실패
-    print("STATUS:", props.status)
-    print("HINT:", props.status_hint)
+    print("STATUS:", job.status)
+    print("HINT:", job.status_hint)
     print("ARCHIVE_DIR:", multiview.archive_dir())
 
 
 def step_shot_with_sheet():
     _shot("with_sheet")
     # 다음 촬영 상태로 바꿔만 둔다 — 같은 콜백에서 찍으면 리드로우 전 프레임이 찍힌다
-    props = bpy.context.scene.lp3d
-    props.multiview_path = ""
-    props.status = "멀티뷰 실패: " + errors.describe(AUTH_FAILURE, "codex")
-    props.status_hint = ""
+    job = bpy.context.scene.lp3d.active_job()
+    job.multiview_path = ""
+    job.status = "멀티뷰 실패: " + errors.describe(AUTH_FAILURE, "codex")
+    job.status_hint = ""
 
 
 def step_shot_multiview_fail():
     """멀티뷰만 실패하고 생성은 계속되는 상태 — 경고 표시가 붙어야 한다."""
     _shot("mv_failed")
-    bpy.context.scene.lp3d.status = "대기 중"
+    job = bpy.context.scene.lp3d.active_job()
+    job.state = 'PENDING'
+    job.status = "대기 중"
 
 
 def step_shot_no_sheet():
     """시트가 없을 때 — 저장된 시트를 불러오는 버튼이 보여야 한다."""
     _shot("no_sheet")
     print("LOAD_OP:", bpy.ops.lp3d.load_last_multiview(),
-          "->", repr(bpy.context.scene.lp3d.multiview_path))
+          "->", repr(bpy.context.scene.lp3d.active_job().multiview_path))
     bpy.ops.wm.quit_blender()
 
 

@@ -14,72 +14,96 @@ from .. import preferences
 from ..agents.claude_cli import ClaudeBackend
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import (capture, errors, executor, library, loop, multiview, prompts,
-               runner, snapshots)
+from . import (capture, errors, executor, jobs, library, loop, multiview,
+               prompts, runner, scheduler, snapshots)
 
-_current = None  # 동시 세션은 1개만 허용
-
-
-def is_active() -> bool:
-    return _current is not None
+_sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
 
 
-def start_session(context, variation_of=None, variation_count=3, improve=False):
-    """UI에서 호출하는 진입점. variation_of는 변형 생성, improve는 개선 세션."""
-    global _current
-    if _current is not None:
-        return "이미 생성 세션이 진행 중입니다"
-    props = context.scene.lp3d
-    if props.is_running:
-        # 세션 객체는 없는데 플래그만 남은 상태 (Dev Reload·파일 다시 열기 등)
-        props.is_running = False
+def is_active(uid=None) -> bool:
+    """세션 진행 여부. uid를 주면 그 잡만, 없으면 하나라도 돌고 있는지."""
+    if uid is None:
+        return bool(_sessions)
+    return uid in _sessions
+
+
+def active_count() -> int:
+    return len(_sessions)
+
+
+def start_job(scene_name, uid, variation_of=None, variation_count=3, improve=False):
+    """잡 항목 하나의 생성 세션을 시작한다. 오류 메시지 또는 None을 반환한다.
+
+    프롬프트·참조 이미지·에이전트·턴 수는 씬이 아니라 잡 항목에서 읽는다 —
+    여러 항목이 서로 다른 설정으로 동시에 돌 수 있어야 하기 때문이다."""
+    if uid in _sessions:
+        return "이미 진행 중인 항목입니다"
+    scene = bpy.data.scenes.get(scene_name)
+    if not scene or not getattr(scene, "lp3d", None):
+        return "씬을 찾을 수 없습니다"
+    props = scene.lp3d
+    job = props.job_by_uid(uid)
+    if job is None:
+        return "항목을 찾을 수 없습니다"
+
     if improve:
-        if not props.last_code or not props.last_collection:
+        if not job.code or not job.collection_name:
             return "개선할 결과가 없습니다 — 먼저 모델을 생성하세요"
-        coll = bpy.data.collections.get(props.last_collection)
+        coll = bpy.data.collections.get(job.collection_name)
         if not coll or not any(o.type == 'MESH' for o in coll.objects):
             return "개선할 모델 컬렉션을 찾을 수 없습니다"
-        request = props.last_prompt.strip() or props.prompt.strip()
-    else:
-        request = (props.last_prompt if variation_of else props.prompt).strip()
+    request = job.prompt.strip()
     if not request:
         return "프롬프트를 입력하세요"
-    exe = preferences.resolve_cli_path(props.agent)
+    exe = preferences.resolve_cli_path(job.agent)
     if not exe:
-        return f"{props.agent} CLI를 찾을 수 없습니다. 환경설정에서 경로를 지정하세요"
+        return f"{job.agent} CLI를 찾을 수 없습니다. 환경설정에서 경로를 지정하세요"
     ref_image = None
-    if props.ref_image_path.strip():
-        ref_image = bpy.path.abspath(props.ref_image_path.strip())
+    if job.ref_image_path.strip():
+        ref_image = bpy.path.abspath(job.ref_image_path.strip())
         if not os.path.isfile(ref_image):
-            return f"참조 이미지를 찾을 수 없습니다: {props.ref_image_path}"
+            return f"참조 이미지를 찾을 수 없습니다: {job.ref_image_path}"
         if os.path.splitext(ref_image)[1].lower() not in ('.png', '.jpg', '.jpeg', '.webp'):
             return "참조 이미지는 PNG/JPG/WEBP만 지원합니다"
-    _current = GenerationSession(
-        scene_name=context.scene.name,
+
+    # 환경설정 변경이 즉시 반영되도록 세션 시작 때마다 한도를 갱신한다
+    scheduler.set_ai_limit(getattr(preferences.get_prefs(), "ai_concurrency", 3))
+    session = GenerationSession(
+        scene_name=scene_name,
+        uid=uid,
         request=request,
-        agent=props.agent,
+        agent=job.agent,
         exe=exe,
-        max_iterations=1 if improve else loop.total_turns(props.auto_turns),
+        max_iterations=1 if improve else loop.total_turns(job.auto_turns),
         variation_code=variation_of,
         variation_count=variation_count,
-        improve_code=props.last_code if improve else None,
-        improve_feedback=props.improve_feedback.strip() if improve else "",
-        improve_collection=props.last_collection if improve else None,
+        improve_code=job.code if improve else None,
+        improve_feedback=job.improve_feedback.strip() if improve else "",
+        improve_collection=job.collection_name if improve else None,
         ref_image=ref_image,
+        lane=job.lane,
     )
-    _current.start()
+    _sessions[uid] = session
+    session.start()
     return None
 
 
-def cancel_session():
-    if _current:
-        _current.cancel()
+def cancel_session(uid=None):
+    """세션을 취소한다. uid가 없으면 전부 취소한다."""
+    targets = [_sessions[uid]] if uid in _sessions else (
+        list(_sessions.values()) if uid is None else [])
+    for session in targets:
+        session.cancel()
 
 
-def _end_session():
-    global _current
-    _current = None
-    runner.set_keepalive(False)
+def cancel_all():
+    cancel_session(None)
+
+
+def _end_session(uid):
+    _sessions.pop(uid, None)
+    scheduler.cancel_job(uid)
+    runner.remove_keepalive(uid)
 
 
 def _slug(text: str) -> str:
@@ -88,11 +112,13 @@ def _slug(text: str) -> str:
 
 
 class GenerationSession:
-    def __init__(self, scene_name, request, agent, exe, max_iterations,
+    def __init__(self, scene_name, uid, request, agent, exe, max_iterations,
                  variation_code=None, variation_count=3,
                  improve_code=None, improve_feedback="", improve_collection=None,
-                 ref_image=None):
+                 ref_image=None, lane=0):
         self.scene_name = scene_name
+        self.uid = uid
+        self.lane = lane
         self.request = request
         self.max_iterations = max_iterations
         self.variation_code = variation_code
@@ -142,22 +168,25 @@ class GenerationSession:
         return os.path.basename(self.multiview) if self.multiview else None
 
     # ---------- 상태/로그 ----------
-    def _props(self):
+    def _job(self):
+        """이 세션에 대응하는 잡 항목. 사용자가 삭제했으면 None."""
         scene = bpy.data.scenes.get(self.scene_name)
-        return scene.lp3d if scene else None
+        if not scene or not getattr(scene, "lp3d", None):
+            return None
+        return scene.lp3d.job_by_uid(self.uid)
 
     def _set_status(self, status: str, log: str = None, phase: str = None, hint: str = ""):
-        props = self._props()
-        if props:
-            props.status = status
-            props.status_hint = hint
-            props.iteration = self.iteration
-            props.total_turns = self.max_iterations
+        job = self._job()
+        if job:
+            job.status = status
+            job.status_hint = hint
+            job.iteration = self.iteration
+            job.total_turns = self.max_iterations
             if phase is not None:
-                props.phase = phase
+                job.phase = phase
             if log:
-                lines = (props.log + "\n" + log).strip().splitlines()
-                props.log = "\n".join(lines[-30:])
+                lines = (job.log + "\n" + log).strip().splitlines()
+                job.log = "\n".join(lines[-30:])
         if log:
             _log.info(log)
         self._redraw()
@@ -178,43 +207,25 @@ class GenerationSession:
 
     # ---------- 라이프사이클 ----------
     def start(self):
-        props = self._props()
-        if props:
-            props.is_running = True
-            props.log = ""
-            props.started_at = time.time()
-            props.phase = ""
-        runner.set_keepalive(True)
+        job = self._job()
+        if job:
+            job.state = 'RUNNING'
+            job.log = ""
+            job.started_at = time.time()
+            job.phase = ""
+            job.status = "대기 중 (순서 기다리는 중)"
+        runner.add_keepalive(self.uid)
         self.backend.prepare_workdir(prompts.build_system_prompt())
         if self.improve_code:
             # 개선 세션: 현재 모델을 캡처해 첫 턴부터 이미지+코드+피드백으로 개선 요청
-            self._set_status("현재 모델 캡처중...", phase='CAPTURE')
-            images, stats = capture.capture_collection(
-                self.collection_name, self.workdir,
-                count=self.prefs.capture_count, resolution=self.prefs.capture_resolution,
-                silhouettes=1,
-            )
-            if not images:
-                self._finish("실패: 개선할 모델 캡처 불가", ok=False)
-                return
-            first = prompts.build_improve_prompt(
-                self.request, self.improve_code, self.improve_feedback,
-                [os.path.basename(p) for p in images], stats,
-                ref_image=self._ref_name(),
-            )
-            if self.ref_image:
-                images = images + [self.ref_image]
-            self._set_status(f"스크린샷 분석·개선 — {self._model_label(critique=True)} 호출중...",
-                             f"개선 세션 시작: {self.request}"
-                             + (f" / 피드백: {self.improve_feedback}" if self.improve_feedback else ""),
-                             phase='CRITIQUE')
-            self._dispatch(first, images=images)
+            self._set_status("현재 모델 캡처 대기중...", phase='CAPTURE')
+            scheduler.submit_blender(self.uid, self._blender_improve_capture)
             return
         if self.variation_code:
             first = prompts.build_variation_prompt(self.request, self.variation_code,
                                                    self.variation_count)
             # 변형은 기존 코드 스타일을 따르므로 참조 이미지·멀티뷰 불필요
-            self._set_status(f"코드 생성 — {self._model_label()} 호출중...",
+            self._set_status(f"코드 생성 — {self._model_label()} 호출 대기중...",
                              f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')
             self._dispatch(first)
             return
@@ -222,19 +233,48 @@ class GenerationSession:
         if getattr(self.prefs, "use_multiview", True) and multiview.is_available():
             self._set_status("멀티뷰 참조 생성중 (codex image_gen)...",
                              "멀티뷰 참조 시트 생성 시작", phase='GEN')
-            multiview.generate(self.request, self.workdir, self.prefs.timeout,
-                               self._on_multiview, ref_image=self.ref_image)
+            # 멀티뷰도 CLI 호출이므로 AI 슬롯을 점유한다
+            scheduler.submit_ai(self.uid, self._run_multiview)
             return
         self._start_generation()
 
+    def _run_multiview(self):
+        multiview.generate(self.request, self.workdir, self.prefs.timeout,
+                           self._on_multiview, ref_image=self.ref_image)
+
+    def _blender_improve_capture(self):
+        """개선 세션의 첫 캡처 — Blender 큐에서 실행된다."""
+        self._set_status("현재 모델 캡처중...", phase='CAPTURE')
+        images, stats = capture.capture_collection(
+            self.collection_name, self.workdir,
+            count=self.prefs.capture_count, resolution=self.prefs.capture_resolution,
+            silhouettes=1,
+        )
+        if not images:
+            self._finish("실패: 개선할 모델 캡처 불가", ok=False)
+            return
+        first = prompts.build_improve_prompt(
+            self.request, self.improve_code, self.improve_feedback,
+            [os.path.basename(p) for p in images], stats,
+            ref_image=self._ref_name(),
+        )
+        if self.ref_image:
+            images = images + [self.ref_image]
+        self._set_status(f"스크린샷 분석·개선 — {self._model_label(critique=True)} 호출 대기중...",
+                         f"개선 세션 시작: {self.request}"
+                         + (f" / 피드백: {self.improve_feedback}" if self.improve_feedback else ""),
+                         phase='CRITIQUE')
+        self._dispatch(first, images=images)
+
     def _on_multiview(self, path, error=None):
+        scheduler.release_ai(self.uid)
         if path:
             self.multiview = path
             # .blend 옆에 남겨 나중에 참조 이미지로 다시 쓸 수 있게 한다
             saved = multiview.archive(path, self.request)
-            props = self._props()
-            if props:
-                props.multiview_path = saved or path
+            job = self._job()
+            if job:
+                job.multiview_path = saved or path
             if saved:
                 self._set_status("멀티뷰 참조 생성 완료",
                                  f"멀티뷰 시트 저장: {saved}")
@@ -272,15 +312,20 @@ class GenerationSession:
         self._dispatch(first, images=init_images)
 
     def cancel(self):
-        runner.cancel()
+        runner.cancel(self.uid)
+        scheduler.cancel_job(self.uid)
+        # 정리도 bpy 조작이므로 큐를 통해 순서대로 실행한다
+        scheduler.submit_blender(self.uid, self._blender_cancel_cleanup)
+
+    def _blender_cancel_cleanup(self):
         snapshots.clear_all(self.collection_name)  # 취소된 세션의 중간 단계는 남기지 않는다
         executor.clear_collection(self.collection_name)
         coll = bpy.data.collections.get(self.collection_name)
         if coll and not coll.objects:
             bpy.data.collections.remove(coll)
-        self._finish("취소됨", ok=False)
+        self._finish("취소됨", ok=False, state='CANCELLED')
 
-    def _finish(self, status: str, ok: bool, detail=None, hint: str = ""):
+    def _finish(self, status: str, ok: bool, detail=None, hint: str = "", state=None):
         # 개선 실패로 기존 모델까지 사라졌으면 이전 코드로 복원한다
         if not ok and self.improve_code:
             coll = bpy.data.collections.get(self.collection_name)
@@ -289,25 +334,22 @@ class GenerationSession:
                                                seed=1, workdir=self.workdir)
                 if restored:
                     status += " — 이전 결과 복원됨"
-        props = self._props()
-        if props:
-            props.is_running = False
+        job = self._job()
+        if job:
+            job.state = state or ('DONE' if ok else 'FAILED')
             if ok:
-                props.last_collection = self.collection_name
+                job.collection_name = self.collection_name
                 # 개선 세션이 코드 없이 DONE으로 끝나면 이전 코드를 유지
-                props.last_code = self.last_code or self.improve_code or ""
-                if not self.variation_code:
-                    props.last_prompt = self.request
-                props.improve_open = True  # 개선 UI 노출
+                job.code = self.last_code or self.improve_code or ""
                 if self.improve_code:
-                    props.improve_feedback = ""  # 반영된 피드백은 비움
-                props.last_entry_id = self._archive(props.last_code)
+                    job.improve_feedback = ""  # 반영된 피드백은 비움
+                job.entry_id = self._archive(job.code)
         # 상태줄은 한 줄뿐이라 원인을 다 담을 수 없다 — 상세는 로그 패널에 남긴다
         log_text = f"세션 종료: {status}"
         if detail:
             log_text += "\n" + "\n".join(f"  · {line}" for line in detail)
         self._set_status(status, log_text, phase="", hint=hint)
-        _end_session()
+        _end_session(self.uid)
 
     def _archive(self, code: str) -> str:
         """성공 결과를 라이브러리에 축적한다 — 실패해도 세션 결과에는 영향을 주지 않는다."""
@@ -341,13 +383,22 @@ class GenerationSession:
         else:
             cmd = self.backend.build_initial_command(prompt, images or [])
         self._was_resume = use_resume
+        # AI 슬롯이 빌 때까지 대기했다가 실행된다 (동시 실행 수는 환경설정)
+        scheduler.submit_ai(self.uid, lambda: self._launch(cmd, prompt))
+
+    def _launch(self, cmd, prompt):
         # 프롬프트는 stdin으로 — 명령줄 인자는 Windows .cmd 셸림에서 첫 줄만 전달된다
         runner.run_cli_async(cmd, self.workdir, self.prefs.timeout, self._on_response,
-                             stdin_text=prompt)
+                             stdin_text=prompt, job_key=self.uid)
 
     def _on_response(self, stdout, error):
         # 콜백에서 예외가 나면 runner가 로그만 남기고 삼켜서 세션이 영구히 진행 중으로
         # 남는다(취소/생성 모두 잠김). 여기서 반드시 세션을 종료시킨다.
+        scheduler.release_ai(self.uid)
+        if self._job() is None:
+            # 사용자가 리스트에서 항목을 지웠다 — 조용히 정리하고 끝낸다
+            _end_session(self.uid)
+            return
         try:
             self._handle_response(stdout, error)
         except Exception as e:
@@ -409,7 +460,13 @@ class GenerationSession:
 
     # ---------- 실행/비평 ----------
     def _execute(self, code: str, status):
-        self._set_status(f"Blender 코드 실행중 (턴 {self.iteration}/{self.max_iterations})...", phase='EXEC')
+        self._set_status(f"Blender 실행 대기중 (턴 {self.iteration}/{self.max_iterations})...",
+                         phase='EXEC')
+        scheduler.submit_blender(self.uid, lambda: self._blender_execute(code, status))
+
+    def _blender_execute(self, code: str, status):
+        self._set_status(f"Blender 코드 실행중 (턴 {self.iteration}/{self.max_iterations})...",
+                         phase='EXEC')
         ok, error = executor.execute(code, self.collection_name,
                                      seed=self.iteration, workdir=self.workdir)
         if not ok:
@@ -444,6 +501,10 @@ class GenerationSession:
             self._critique()
 
     def _critique(self):
+        self._set_status("뷰포트 캡처 대기중...", phase='CAPTURE')
+        scheduler.submit_blender(self.uid, self._blender_critique)
+
+    def _blender_critique(self):
         self._set_status("뷰포트 캡처중...", phase='CAPTURE')
         images, stats = capture.capture_collection(
             self.collection_name, self.workdir,
@@ -464,10 +525,16 @@ class GenerationSession:
         )
         # 비평 턴마다 참조·멀티뷰 시트와 비교하도록 함께 전달
         images = images + [p for p in (self.ref_image, self.multiview) if p]
-        self._set_status(f"스크린샷 분석 — {self._model_label(critique=True)} 호출중 ({self.iteration}/{self.max_iterations})...", phase='CRITIQUE')
+        self._set_status(
+            f"스크린샷 분석 — {self._model_label(critique=True)} 호출 대기중 "
+            f"({self.iteration}/{self.max_iterations})...", phase='CRITIQUE')
         self._dispatch(prompt, images=images)
 
     def _finalize(self):
+        self._set_status("마무리 대기중...", phase='FINAL')
+        scheduler.submit_blender(self.uid, self._blender_finalize)
+
+    def _blender_finalize(self):
         from ..lowpoly.cleanup import collection_tri_count, cull_hidden_faces, game_ready
         self._set_status("마무리 정리중 (은면 제거·게임레디)...", phase='FINAL')
         coll = bpy.data.collections.get(self.collection_name)
@@ -477,6 +544,8 @@ class GenerationSession:
             for obj in mesh_objs:
                 game_ready(obj)
             tris = collection_tri_count(coll)
+            # 배치 실행 결과가 원점에 겹치지 않도록 레인만큼 옆으로 민다
+            jobs.apply_lane_offset(self.collection_name, self.lane)
             note = f", 은면 {removed}개 제거" if removed else ""
             self._finish(f"완료 — {self.collection_name} ({tris} tris{note})", ok=True)
         else:

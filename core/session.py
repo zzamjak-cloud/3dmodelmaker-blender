@@ -219,16 +219,28 @@ class GenerationSession:
         return _sessions.get(self.uid) is not self
 
     def _discard(self):
-        """잡 항목이 사라진 세션을 정리한다 — 결과를 담을 곳이 없으므로 컬렉션도 지운다."""
+        """잡 항목이 사라진 세션을 정리한다.
+
+        신규 생성 세션은 이 세션이 만든 컬렉션이므로 통째로 지운다.
+        개선 세션은 다르다 — collection_name이 사용자가 이미 갖고 있던 모델이라
+        그냥 지우면 사용자가 만들어둔 결과가 사라진다. 항목을 리스트에서 뺀 것이지
+        모델을 버리라고 한 것이 아니므로, 반쯤 적용된 중간 결과까지 비운 뒤
+        개선 전 상태로 되돌려 준다. 복원은 _finish의 개선 실패 경로를 그대로 쓴다
+        (컬렉션을 비워 두면 그 조건이 성립한다) — 복원 수단을 둘로 나누지 않는다."""
         try:
             snapshots.clear_all(self.collection_name)
             executor.clear_collection(self.collection_name)
-            coll = bpy.data.collections.get(self.collection_name)
-            if coll and not coll.objects:
-                bpy.data.collections.remove(coll)
+            if not self.improve_code:
+                coll = bpy.data.collections.get(self.collection_name)
+                if coll and not coll.objects:
+                    bpy.data.collections.remove(coll)
         except Exception:
             _log.exception("LP3D 삭제된 항목 정리 실패")
-        _end_session(self.uid)
+        try:
+            self._finish("항목 삭제됨", ok=False, state='CANCELLED')
+        except Exception:
+            _log.exception("LP3D 세션 마감 실패")
+            _end_session(self.uid)
 
     def _fail(self, e):
         """단계 예외를 세션 실패로 마감한다. _finish 자체가 터져도 세션은 반드시 끝낸다."""

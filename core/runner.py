@@ -10,19 +10,23 @@ import time
 
 import bpy
 
-from . import errors
+from . import errors, scheduler
 
 log = logging.getLogger(__name__)
 
-_jobs = []  # 진행 중인 작업 목록 (동시 1개가 일반적이지만 리스트로 안전하게)
-_state = {"keepalive": False, "pump_on": False, "last_redraw": 0.0}
+_jobs = []  # 진행 중인 CLI 작업 목록
+_state = {"pump_on": False, "last_redraw": 0.0}
+_keepalive = set()  # 펌프를 살려둬야 하는 job_key 집합
 _PUMP_INTERVAL = 0.25
 _REDRAW_INTERVAL = 1.0  # 경과 시간 표시 갱신 주기
 _job_counter = 0
 
 
-def run_cli_async(cmd: list, cwd: str, timeout: int, on_done, stdin_text: str = None):
+def run_cli_async(cmd: list, cwd: str, timeout: int, on_done, stdin_text: str = None,
+                  job_key=None):
     """CLI를 논블로킹으로 실행하고 완료 시 메인 스레드에서 on_done(stdout, error)를 호출한다.
+
+    job_key는 잡 단위 취소용 식별자다 (없으면 전체 취소에만 걸린다).
 
     stdin_text가 주어지면 파일로 저장해 stdin으로 넘긴다. 프롬프트를 명령줄 인자로
     넘기면 Windows의 .cmd 셸림(npm 설치본)이 첫 줄에서 잘라버리기 때문이다."""
@@ -31,7 +35,7 @@ def run_cli_async(cmd: list, cwd: str, timeout: int, on_done, stdin_text: str = 
     out_path = os.path.join(cwd, f"cli_stdout_{_job_counter}.log")
     err_path = os.path.join(cwd, f"cli_stderr_{_job_counter}.log")
     job = {
-        "cmd": cmd, "on_done": on_done, "cancelled": False,
+        "cmd": cmd, "on_done": on_done, "cancelled": False, "job_key": job_key,
         "out_path": out_path, "err_path": err_path,
         "deadline": time.monotonic() + timeout, "timeout": timeout,
     }
@@ -62,19 +66,31 @@ def run_cli_async(cmd: list, cwd: str, timeout: int, on_done, stdin_text: str = 
     _ensure_pump()
 
 
-def cancel():
-    """진행 중인 CLI 프로세스를 모두 종료한다."""
+def cancel(job_key=None):
+    """진행 중인 CLI 프로세스를 종료한다.
+
+    job_key가 주어지면 그 잡의 프로세스만, 없으면 전부 종료한다.
+    여러 세션이 동시에 도는 구조에서 한 세션의 취소가 남의 프로세스를
+    죽이면 안 되므로 기본은 잡 단위 호출이다."""
     for job in _jobs:
+        if job_key is not None and job.get("job_key") != job_key:
+            continue
         job["cancelled"] = True
         if job["proc"].poll() is None:
             job["proc"].terminate()
 
 
-def set_keepalive(active: bool):
-    """세션이 살아있는 동안 펌프를 유지한다 (session.py가 제어)."""
-    _state["keepalive"] = active
-    if active:
-        _ensure_pump()
+def add_keepalive(job_key):
+    """세션이 살아있는 동안 펌프를 유지한다 (session.py가 제어).
+
+    전역 불리언이었을 때는 한 세션이 끝나면 다른 세션의 펌프까지 꺼져
+    진행 중인 잡이 영영 멈췄다. 그래서 잡 단위 집합으로 관리한다."""
+    _keepalive.add(job_key)
+    _ensure_pump()
+
+
+def remove_keepalive(job_key):
+    _keepalive.discard(job_key)
 
 
 def _close_job_files(job):
@@ -137,7 +153,9 @@ def _pump():
             job["on_done"](result, error)
         except Exception:
             log.exception("LP3D 콜백 오류")
-    if _state["keepalive"] or _jobs:
+    scheduler.pump()
+
+    if _keepalive or _jobs or scheduler.has_work():
         # 세션 진행 중에는 주기적으로 패널을 갱신 (경과 시간 실시간 표시)
         now = time.monotonic()
         if now - _state["last_redraw"] >= _REDRAW_INTERVAL:

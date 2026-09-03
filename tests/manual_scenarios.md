@@ -24,3 +24,4 @@
 20. **실행 중 항목 삭제**: 실행 중인 항목을 [－]로 삭제 → 크래시 없이 해당 CLI 프로세스가 종료되고 나머지 큐가 계속 도는지 확인.
 21. **Dev Reload 교착 해제**: 실행 중에 [Dev Reload] → 모든 세션이 정리되고, 리로드 후 `RUNNING`으로 남은 항목이 `대기 중 (세션이 끊겨 초기화됨)`으로 바뀌어 [전체 실행]이 다시 눌리는지 확인.
 22. **선택 항목 기준 결과물**: 완료된 항목 3개를 번갈아 선택하며 [FBX 익스포트]/[에셋 등록]/[개선하기]가 각각 선택한 항목의 컬렉션을 대상으로 동작하는지 확인. [변형 생성]은 새 큐 항목으로 추가되어 원본을 덮지 않아야 한다.
+23. **큐 자료구조 헤들리스 검증**: `.\scripts\dev_run.ps1 -Background -PythonFile tests\verify_queue_in_blender.py` (macOS는 `./scripts/dev_link.sh` 후 `blender -b --python tests/verify_queue_in_blender.py`) → 전 항목 PASS, 마지막 줄 "모두 통과". AI CLI 없이 도는 부분(잡 추가·복제·정렬·삭제, 레인 배치 멱등성, 시작 거부, reset_stale, shutdown)의 회귀를 잡는다. 16~22는 실제 생성이 필요하므로 이걸로 대체되지 않는다.

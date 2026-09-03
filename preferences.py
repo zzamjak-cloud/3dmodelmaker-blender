@@ -77,6 +77,14 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=300, min=30, max=1800,
         update=_persist_cb,
     )
+    ai_concurrency: IntProperty(
+        name="동시 AI 실행 수",
+        description=("동시에 실행할 AI CLI 개수 — 큐에 쌓인 여러 프롬프트의 AI 호출이 "
+                     "이만큼 병렬로 진행된다. Blender 작업은 이 값과 무관하게 항상 "
+                     "하나씩 순차 실행된다. 1로 두면 예전처럼 완전 순차 동작"),
+        default=3, min=1, max=8,
+        update=_persist_cb,
+    )
     capture_count: IntProperty(
         name="캡처 앵글 수",
         description="비평 턴에 보여줄 컬러 캡처 장수 (실루엣 1장은 별도) — 적을수록 비평이 빠르다",
@@ -121,6 +129,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col.prop(self, "gen_model")
         col.prop(self, "critique_model")
         col.prop(self, "timeout")
+        col.prop(self, "ai_concurrency")
         col.prop(self, "capture_count")
         col.prop(self, "capture_resolution")
         col.prop(self, "use_multiview")
@@ -142,6 +151,7 @@ class _Defaults:
     gen_model = 'DEFAULT'
     critique_model = 'DEFAULT'
     timeout = 300
+    ai_concurrency = 3
     capture_count = 2
     capture_resolution = 512
     use_multiview = True

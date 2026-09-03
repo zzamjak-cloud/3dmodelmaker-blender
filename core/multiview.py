@@ -39,11 +39,11 @@ def unique_path(directory: str, base: str) -> str:
     return path
 
 
-def fallback_dir() -> str:
-    """.blend를 저장하지 않았을 때 쓰는 보관 폴더 — OS 다운로드 폴더 아래 blender/.
+def archive_dir() -> str:
+    """멀티뷰 시트와 클립보드 참조 이미지를 남길 폴더 — 항상 다운로드 폴더 아래 blender/.
 
-    새 씬에서 바로 생성하는 경우가 흔한데 그때 시트를 잃지 않도록,
-    어느 OS에서나 존재가 보장되는 경로에 남긴다."""
+    예전에는 .blend를 저장했으면 그 옆, 아니면 다운로드 폴더로 갈렸다. 그래서 파일이
+    매번 다른 곳에 생겨 찾기 불편했다. 어느 OS에서나 존재가 보장되는 한 곳으로 고정한다."""
     home = os.path.expanduser("~")
     base = os.path.join(home, "Downloads")
     if not os.path.isdir(base):
@@ -57,10 +57,13 @@ def fallback_dir() -> str:
     return path
 
 
-def archive_dir() -> str:
-    """멀티뷰 시트를 남길 폴더 — 열려 있는 .blend 옆, 저장 전이면 다운로드 폴더."""
+def blend_dir() -> str:
+    """열려 있는 .blend 파일이 있는 폴더 (저장 전이면 빈 문자열).
+
+    보관 위치를 고정하기 전(v0.6.x 이하)에는 여기에 시트를 남겼다 —
+    조회할 때만 함께 훑어 예전 파일을 잃지 않게 한다."""
     import bpy
-    return os.path.dirname(bpy.data.filepath) if bpy.data.filepath else fallback_dir()
+    return os.path.dirname(bpy.data.filepath) if bpy.data.filepath else ""
 
 
 def archive(src: str, request: str) -> str:
@@ -101,11 +104,11 @@ def latest_in(directories) -> str:
 
 
 def latest_archived() -> str:
-    """보관 폴더(.blend 옆 + 다운로드 폴더)에서 가장 최근 시트를 찾는다.
+    """가장 최근 시트를 찾는다 — 고정 보관 폴더와, 예전에 쓰던 .blend 옆까지 훑는다.
 
     세션 상태(multiview_path)는 Blender를 다시 켜면 사라지지만 파일은 남는다 —
     지난 세션에서 만든 시트를 다시 열어볼 수 있도록 파일 쪽에서 되찾는다."""
-    return latest_in([archive_dir(), fallback_dir()])
+    return latest_in([archive_dir(), blend_dir()])
 
 
 def build_command(exe: str, work_dir: str, ref_image: str = None) -> list:

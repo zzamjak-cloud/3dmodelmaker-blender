@@ -82,22 +82,30 @@ class TestMultiviewArchive(unittest.TestCase):
         self.assertEqual(multiview._slug("///"), "model")
 
 
-class TestFallbackDir(unittest.TestCase):
-    # .blend를 저장하지 않아도 시트를 잃지 않도록 항상 쓸 수 있는 경로여야 한다
+class TestArchiveDir(unittest.TestCase):
+    # 시트·클립보드 참조 이미지가 매번 다른 곳에 생기지 않도록 한 곳으로 고정한다
     def test_uses_downloads_blender(self):
-        d = multiview.fallback_dir()
+        d = multiview.archive_dir()
         self.assertTrue(os.path.isdir(d), f"보관 폴더가 만들어지지 않음: {d}")
         self.assertEqual(os.path.basename(d), "blender")
 
     def test_under_home(self):
-        self.assertTrue(multiview.fallback_dir().startswith(os.path.expanduser("~")))
+        self.assertTrue(multiview.archive_dir().startswith(os.path.expanduser("~")))
 
     def test_writable(self):
-        probe = os.path.join(multiview.fallback_dir(), ".lp3d_write_probe")
+        probe = os.path.join(multiview.archive_dir(), ".lp3d_write_probe")
         with open(probe, "w") as f:
             f.write("ok")
         self.assertTrue(os.path.isfile(probe))
         os.remove(probe)
+
+    def test_does_not_depend_on_bpy(self):
+        # .blend 저장 여부로 갈리던 분기를 없앴다 — bpy 없이도 경로가 나와야 한다.
+        # (예전 archive_dir()은 bpy를 import해서 Blender 밖에서는 터졌다)
+        self.assertTrue(multiview.archive_dir())
+
+    def test_stable_across_calls(self):
+        self.assertEqual(multiview.archive_dir(), multiview.archive_dir())
 
 
 if __name__ == "__main__":

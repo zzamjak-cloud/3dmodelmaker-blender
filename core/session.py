@@ -156,7 +156,11 @@ class GenerationSession:
         else:
             base = f"LP3D_{_slug(request)}"
             name, n = base, 1
-            while bpy.data.collections.get(name):
+            # 진행 중인 세션이 쓸 이름도 점유로 본다 — 컬렉션은 executor.execute가
+            # 돌아야 실제로 생기므로, 같은 프롬프트 두 항목을 동시에 돌리면
+            # 둘 다 같은 이름을 골라 서로의 결과를 지운다
+            while (bpy.data.collections.get(name)
+                   or any(s.collection_name == name for s in _sessions.values())):
                 n += 1
                 name = f"{base}.{n:03d}"
             self.collection_name = name
@@ -205,6 +209,65 @@ class GenerationSession:
                 if area.type == 'VIEW_3D':
                     area.tag_redraw()
 
+    # ---------- 큐 제출 ----------
+    #
+    # 스케줄러는 작업 하나가 터져도 큐가 멈추지 않도록 예외를 로그만 남기고 삼킨다.
+    # 그래서 여기서 잡지 않으면 세션이 _sessions에 영원히 남아 is_active가 계속 참이
+    # 되고(항목 재시작 불가), keepalive가 풀리지 않아 펌프도 계속 돈다.
+    def _stale(self) -> bool:
+        """이미 끝났거나 교체된 세션의 지연 콜백인지."""
+        return _sessions.get(self.uid) is not self
+
+    def _discard(self):
+        """잡 항목이 사라진 세션을 정리한다 — 결과를 담을 곳이 없으므로 컬렉션도 지운다."""
+        try:
+            snapshots.clear_all(self.collection_name)
+            executor.clear_collection(self.collection_name)
+            coll = bpy.data.collections.get(self.collection_name)
+            if coll and not coll.objects:
+                bpy.data.collections.remove(coll)
+        except Exception:
+            _log.exception("LP3D 삭제된 항목 정리 실패")
+        _end_session(self.uid)
+
+    def _fail(self, e):
+        """단계 예외를 세션 실패로 마감한다. _finish 자체가 터져도 세션은 반드시 끝낸다."""
+        _log.exception("LP3D 세션 단계 오류")
+        try:
+            self._finish(f"실패: 내부 오류 {type(e).__name__}: {e}", ok=False)
+        except Exception:
+            _log.exception("LP3D 세션 마감 실패")
+            _end_session(self.uid)
+
+    def _submit_blender(self, fn):
+        """bpy 단계를 Blender 큐에 제출한다 (실행 시점의 유효성·예외를 함께 책임진다)."""
+        def _step():
+            if self._stale():
+                return
+            if self._job() is None:
+                self._discard()  # 사용자가 리스트에서 항목을 지웠다
+                return
+            try:
+                fn()
+            except Exception as e:
+                self._fail(e)
+
+        scheduler.submit_blender(self.uid, _step)
+
+    def _submit_ai(self, fn):
+        """CLI 호출을 AI 슬롯 대기열에 제출한다. 호출 자체가 터지면 슬롯을 되돌린다."""
+        def _step():
+            if self._stale():
+                scheduler.release_ai(self.uid)
+                return
+            try:
+                fn()
+            except Exception as e:
+                scheduler.release_ai(self.uid)  # 콜백이 안 오므로 여기서 반환한다
+                self._fail(e)
+
+        scheduler.submit_ai(self.uid, _step)
+
     # ---------- 라이프사이클 ----------
     def start(self):
         job = self._job()
@@ -219,7 +282,7 @@ class GenerationSession:
         if self.improve_code:
             # 개선 세션: 현재 모델을 캡처해 첫 턴부터 이미지+코드+피드백으로 개선 요청
             self._set_status("현재 모델 캡처 대기중...", phase='CAPTURE')
-            scheduler.submit_blender(self.uid, self._blender_improve_capture)
+            self._submit_blender(self._blender_improve_capture)
             return
         if self.variation_code:
             first = prompts.build_variation_prompt(self.request, self.variation_code,
@@ -234,13 +297,14 @@ class GenerationSession:
             self._set_status("멀티뷰 참조 생성중 (codex image_gen)...",
                              "멀티뷰 참조 시트 생성 시작", phase='GEN')
             # 멀티뷰도 CLI 호출이므로 AI 슬롯을 점유한다
-            scheduler.submit_ai(self.uid, self._run_multiview)
+            self._submit_ai(self._run_multiview)
             return
         self._start_generation()
 
     def _run_multiview(self):
         multiview.generate(self.request, self.workdir, self.prefs.timeout,
-                           self._on_multiview, ref_image=self.ref_image)
+                           self._on_multiview, ref_image=self.ref_image,
+                           job_key=self.uid)
 
     def _blender_improve_capture(self):
         """개선 세션의 첫 캡처 — Blender 큐에서 실행된다."""
@@ -267,6 +331,8 @@ class GenerationSession:
         self._dispatch(first, images=images)
 
     def _on_multiview(self, path, error=None):
+        if self._stale():
+            return  # 이미 끝난 세션의 지연 콜백 — 슬롯은 _end_session이 이미 반환했다
         scheduler.release_ai(self.uid)
         if path:
             self.multiview = path
@@ -318,12 +384,20 @@ class GenerationSession:
         scheduler.submit_blender(self.uid, self._blender_cancel_cleanup)
 
     def _blender_cancel_cleanup(self):
-        snapshots.clear_all(self.collection_name)  # 취소된 세션의 중간 단계는 남기지 않는다
-        executor.clear_collection(self.collection_name)
-        coll = bpy.data.collections.get(self.collection_name)
-        if coll and not coll.objects:
-            bpy.data.collections.remove(coll)
-        self._finish("취소됨", ok=False, state='CANCELLED')
+        # 취소 정리는 잡 항목이 지워진 뒤에도 돌아야 하므로 _submit_blender를 쓰지 않는다
+        if self._stale():
+            return
+        try:
+            snapshots.clear_all(self.collection_name)  # 취소된 세션의 중간 단계는 남기지 않는다
+            executor.clear_collection(self.collection_name)
+            coll = bpy.data.collections.get(self.collection_name)
+            if coll and not coll.objects:
+                bpy.data.collections.remove(coll)
+            self._finish("취소됨", ok=False, state='CANCELLED')
+        except Exception:
+            # _finish 자체가 터졌을 수도 있다 — 세션은 반드시 여기서 끝낸다
+            _log.exception("LP3D 취소 정리 실패")
+            _end_session(self.uid)
 
     def _finish(self, status: str, ok: bool, detail=None, hint: str = "", state=None):
         # 개선 실패로 기존 모델까지 사라졌으면 이전 코드로 복원한다
@@ -384,7 +458,7 @@ class GenerationSession:
             cmd = self.backend.build_initial_command(prompt, images or [])
         self._was_resume = use_resume
         # AI 슬롯이 빌 때까지 대기했다가 실행된다 (동시 실행 수는 환경설정)
-        scheduler.submit_ai(self.uid, lambda: self._launch(cmd, prompt))
+        self._submit_ai(lambda: self._launch(cmd, prompt))
 
     def _launch(self, cmd, prompt):
         # 프롬프트는 stdin으로 — 명령줄 인자는 Windows .cmd 셸림에서 첫 줄만 전달된다
@@ -394,6 +468,8 @@ class GenerationSession:
     def _on_response(self, stdout, error):
         # 콜백에서 예외가 나면 runner가 로그만 남기고 삼켜서 세션이 영구히 진행 중으로
         # 남는다(취소/생성 모두 잠김). 여기서 반드시 세션을 종료시킨다.
+        if self._stale():
+            return  # 이미 끝난 세션의 지연 콜백 — 슬롯은 _end_session이 이미 반환했다
         scheduler.release_ai(self.uid)
         if self._job() is None:
             # 사용자가 리스트에서 항목을 지웠다 — 조용히 정리하고 끝낸다
@@ -462,7 +538,7 @@ class GenerationSession:
     def _execute(self, code: str, status):
         self._set_status(f"Blender 실행 대기중 (턴 {self.iteration}/{self.max_iterations})...",
                          phase='EXEC')
-        scheduler.submit_blender(self.uid, lambda: self._blender_execute(code, status))
+        self._submit_blender(lambda: self._blender_execute(code, status))
 
     def _blender_execute(self, code: str, status):
         self._set_status(f"Blender 코드 실행중 (턴 {self.iteration}/{self.max_iterations})...",
@@ -502,7 +578,7 @@ class GenerationSession:
 
     def _critique(self):
         self._set_status("뷰포트 캡처 대기중...", phase='CAPTURE')
-        scheduler.submit_blender(self.uid, self._blender_critique)
+        self._submit_blender(self._blender_critique)
 
     def _blender_critique(self):
         self._set_status("뷰포트 캡처중...", phase='CAPTURE')
@@ -532,7 +608,7 @@ class GenerationSession:
 
     def _finalize(self):
         self._set_status("마무리 대기중...", phase='FINAL')
-        scheduler.submit_blender(self.uid, self._blender_finalize)
+        self._submit_blender(self._blender_finalize)
 
     def _blender_finalize(self):
         from ..lowpoly.cleanup import collection_tri_count, cull_hidden_faces, game_ready

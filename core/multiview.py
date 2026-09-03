@@ -140,12 +140,16 @@ def build_prompt(request: str, has_ref: bool = False) -> str:
     return base + "저장 완료 후 텍스트로는 SAVED 한 단어만 답하라."
 
 
-def generate(request: str, session_workdir: str, timeout: int, on_done, ref_image: str = None):
+def generate(request: str, session_workdir: str, timeout: int, on_done, ref_image: str = None,
+             job_key=None):
     """멀티뷰 시트를 비동기로 생성한다.
 
     완료 시 메인 스레드에서 on_done(경로 or None, 오류 문자열 or None)을 호출한다.
     실패 원인을 함께 넘기는 이유: 예전에는 실패를 '스킵'으로만 알려서
-    codex 로그인 만료 같은 조치 가능한 원인이 그대로 묻혔다."""
+    codex 로그인 만료 같은 조치 가능한 원인이 그대로 묻혔다.
+
+    job_key는 잡 단위 취소용 식별자다 — 이걸 넘기지 않으면 세션을 취소해도
+    codex 프로세스가 살아남아 AI 동시 실행 한도를 초과한 채로 돈다."""
     from .. import preferences
     from . import runner
 
@@ -176,4 +180,5 @@ def generate(request: str, session_workdir: str, timeout: int, on_done, ref_imag
 
     cmd = build_command(exe, work, ref_image=ref_image)
     runner.run_cli_async(cmd, work, timeout, _cb,
-                         stdin_text=build_prompt(request, has_ref=bool(ref_image)))
+                         stdin_text=build_prompt(request, has_ref=bool(ref_image)),
+                         job_key=job_key)

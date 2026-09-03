@@ -113,3 +113,16 @@ class TestLatestArchived(unittest.TestCase):
         self.assertTrue(
             multiview.unique_path(self.dir_a, multiview.ARCHIVE_PREFIX + "x")
             .endswith(multiview.ARCHIVE_PREFIX + "x.png"))
+
+
+class TestGenerateSignature(unittest.TestCase):
+    """generate()는 runner를 통해 codex를 띄우므로 Blender 없이는 실행할 수 없다.
+    대신 잡 단위 취소에 필요한 job_key 인자가 유지되는지만 확인한다 —
+    이게 빠지면 세션을 취소해도 codex 프로세스가 살아남는다."""
+
+    def test_accepts_job_key(self):
+        import inspect
+
+        params = inspect.signature(multiview.generate).parameters
+        self.assertIn("job_key", params)
+        self.assertIsNone(params["job_key"].default)

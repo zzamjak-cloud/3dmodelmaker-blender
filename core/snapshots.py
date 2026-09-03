@@ -34,7 +34,17 @@ def slot_offset(turn: int, total_turns: int, width: float) -> float:
     return -spacing * max(total_turns - turn, 0)
 
 
-def capture_turn(base_collection: str, turn: int, total_turns: int) -> str:
+def lane_offset(lane: int, spacing: float) -> float:
+    """레인 번호에 대응하는 Y 오프셋.
+
+    잡마다 최종 결과가 레인만큼 +Y로 밀리므로(core/jobs.apply_lane_offset) 스냅샷도
+    같은 값을 더해야 한 잡의 중간 단계와 최종본이 한 줄로 놓인다. 간격은 인자로 받는다
+    — 여기서 core/jobs를 임포트하면 이 모듈이 bpy에 묶여 단위 테스트가 불가능해진다."""
+    return spacing * max(lane, 0)
+
+
+def capture_turn(base_collection: str, turn: int, total_turns: int,
+                 lane: int = 0, lane_spacing: float = 0.0) -> str:
     """현재 세션 컬렉션의 상태를 스냅샷 컬렉션으로 복제한다. 컬렉션 이름을 반환."""
     import bpy
 
@@ -52,11 +62,13 @@ def capture_turn(base_collection: str, turn: int, total_turns: int) -> str:
     bpy.context.scene.collection.children.link(dst)
     bpy.context.view_layer.update()
     dx = slot_offset(turn, total_turns, _model_width(objs))
+    dy = lane_offset(lane, lane_spacing)
     for obj in objs:
         dup = obj.copy()
         dup.data = obj.data.copy()   # 메시도 복제 — 다음 턴의 삭제·수정에 영향받지 않도록
         dup.name = f"{obj.name}{SUFFIX}{turn}"
         dup.location.x += dx
+        dup.location.y += dy
         dst.objects.link(dup)
     return name
 

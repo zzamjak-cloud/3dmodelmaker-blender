@@ -499,13 +499,14 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
 
     def execute(self, context):
         # 리로드하면 세션 모듈의 전역 상태가 초기화되므로, 진행 중인 세션은 먼저 정리한다
-        # (안 하면 CLI 프로세스와 타이머 펌프가 구 모듈에 남아 떠돈다)
-        session.cancel_all()
+        # (안 하면 CLI 프로세스와 타이머 펌프가 구 모듈에 남아 떠돈다).
+        # cancel_all()이 아니라 shutdown()을 쓴다 — 정리를 Blender 큐에 넣기만 하면
+        # 큐가 비워지기 전에 리로드가 끼어들어 정리 자체가 사라진다
+        session.shutdown()
         pkg = __package__.rsplit(".", 1)[0]
 
         # 실제 리로드는 타이머로 미룬다 — 오퍼레이터 실행 스택 안에서 자기 클래스를
         # 등록 해제·재등록하면 self의 RNA가 해제된 채 접근되어 크래시한다 (macOS GUI).
-        scene_name = context.scene.name
 
         def _do_reload():
             import importlib
@@ -514,14 +515,13 @@ class LP3D_OT_dev_reload(bpy.types.Operator):
                 root.dev_reload()
                 message = "Dev Reload 완료"
             except Exception as e:
-                # 타이머 안에서는 report를 쓸 수 없으므로 상태 줄과 콘솔로 알린다.
+                # 타이머 안에서는 report를 쓸 수 없으므로 콘솔로 알린다.
                 # 조용히 실패하면 구버전 모듈이 섞인 채로 계속 쓰게 된다.
                 message = f"Dev Reload 실패: {e}"
                 _log.exception("Dev Reload 실패")
+            # 결과는 콘솔에만 남긴다 — 상태 줄은 잡 항목별 필드가 되어,
+            # 리로드 결과를 적으면 무관한 항목의 상태를 덮어쓰게 된다
             print(f"LP3D {message}")
-            scene = bpy.data.scenes.get(scene_name)
-            if scene and getattr(scene, "lp3d", None):
-                scene.lp3d.status = message
             return None
 
         bpy.app.timers.register(_do_reload, first_interval=0.1)

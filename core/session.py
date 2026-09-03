@@ -100,6 +100,27 @@ def cancel_all():
     cancel_session(None)
 
 
+def shutdown():
+    """모든 세션을 동기적으로 끝낸다. 정리한 세션 수를 반환한다.
+
+    cancel()은 정리를 Blender 큐에 넣기만 하고 실제 실행은 runner 펌프(0.25초 주기)가
+    맡는다. Dev Reload처럼 곧바로 모듈을 갈아끼우는 경로에서는 큐가 비워지기 전에
+    scheduler가 리로드되어 대기열째 사라지고, 반쯤 만들어진 컬렉션과 턴 스냅샷이
+    씬에 남는다. 그래서 여기서는 정리를 큐에 넣지 않고 그 자리에서 실행한다.
+    사용자의 일반 취소는 UI 응답성을 위해 기존 cancel_all()(큐 경로)을 그대로 쓴다."""
+    targets = list(_sessions.values())
+    for session in targets:
+        runner.cancel(session.uid)  # 서브프로세스부터 끊는다 — 콜백이 정리 뒤에 끼어들지 않도록
+        scheduler.cancel_job(session.uid)
+        try:
+            session._blender_cancel_cleanup()
+        except Exception:
+            _log.exception("LP3D 동기 종료 정리 실패")
+        _end_session(session.uid)  # 정리가 어디서 끊겼든 세션 기록은 반드시 지운다
+    scheduler.reset()  # 죽은 세션이 남긴 대기 항목까지 비워 큐를 실제 상태와 맞춘다
+    return len(targets)
+
+
 def _end_session(uid):
     _sessions.pop(uid, None)
     scheduler.cancel_job(uid)
@@ -577,8 +598,11 @@ class GenerationSession:
         if (not finalize and getattr(self.prefs, "keep_turn_snapshots", True)
                 and not self.improve_code):
             try:
+                # 레인을 함께 넘긴다 — 안 넘기면 여러 잡의 스냅샷이 모두 Y=0에 겹치고
+                # 각자의 최종본(레인만큼 밀린 자리)과도 떨어진다
                 if snapshots.capture_turn(self.collection_name, self.iteration,
-                                          self.max_iterations):
+                                          self.max_iterations, lane=self.lane,
+                                          lane_spacing=jobs.LANE_SPACING):
                     self._set_status(f"턴 {self.iteration} 생성 완료",
                                      f"턴 {self.iteration} 스냅샷 보관")
             except Exception:

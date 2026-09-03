@@ -10,6 +10,7 @@ import bpy
 log = logging.getLogger(__name__)
 
 LANE_SPACING = 4.0  # 레인 간 Y축 간격(미터). 배치 결과가 겹치지 않도록 벌린다
+LANE_MARK = "lp3d_lane"  # 레인 오프셋을 이미 적용한 오브젝트에 남기는 표식
 
 
 def add_job(props, prompt: str = ""):
@@ -161,13 +162,20 @@ def reset_stale(props) -> int:
 def apply_lane_offset(collection_name: str, lane: int):
     """완료된 결과를 레인 번호만큼 Y축으로 밀어 배치 결과가 겹치지 않게 한다.
 
-    생성 코드는 항상 원점 기준으로 작성되므로, 마무리 직전에 한 번만 적용한다."""
-    if not lane:
-        return
+    생성 코드는 항상 원점 기준으로 작성되므로, 마무리 직전에 한 번만 적용한다.
+
+    이동은 상대 이동이라 누적된다 — 개선 세션은 같은 컬렉션을 재사용하고, 에이전트가
+    코드 없이 STATUS: DONE으로 끝내면 오브젝트가 다시 만들어지지 않은 채 마무리에
+    도달한다. 그래서 이미 민 오브젝트에 적용한 레인을 표식으로 남겨 두 번 밀지 않는다
+    (코드가 다시 실행되면 오브젝트가 새로 생겨 표식이 없으므로 정상적으로 밀린다)."""
     coll = bpy.data.collections.get(collection_name)
     if not coll:
         return
-    dy = LANE_SPACING * lane
     for obj in coll.objects:
-        if obj.parent is None:  # 자식은 부모를 따라 움직인다
-            obj.location.y += dy
+        if obj.parent is not None:  # 자식은 부모를 따라 움직인다
+            continue
+        applied = obj.get(LANE_MARK) or 0
+        if applied == lane:
+            continue
+        obj.location.y += LANE_SPACING * (lane - applied)
+        obj[LANE_MARK] = lane

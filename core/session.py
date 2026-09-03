@@ -14,7 +14,7 @@ from .. import preferences
 from ..agents.claude_cli import ClaudeBackend
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import (capture, errors, executor, jobs, library, loop, multiview,
+from . import (capture, errors, executor, jobs, lanes, library, loop, multiview,
                prompts, runner, scheduler, snapshots)
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
@@ -598,11 +598,11 @@ class GenerationSession:
         if (not finalize and getattr(self.prefs, "keep_turn_snapshots", True)
                 and not self.improve_code):
             try:
-                # 레인을 함께 넘긴다 — 안 넘기면 여러 잡의 스냅샷이 모두 Y=0에 겹치고
-                # 각자의 최종본(레인만큼 밀린 자리)과도 떨어진다
+                # 최종본과 같은 레인 오프셋을 넘긴다 — 안 넘기면 여러 잡의 스냅샷이
+                # 모두 Y=0에 겹치고 각자의 최종본과도 떨어진다
                 if snapshots.capture_turn(self.collection_name, self.iteration,
-                                          self.max_iterations, lane=self.lane,
-                                          lane_spacing=jobs.LANE_SPACING):
+                                          self.max_iterations,
+                                          dy=lanes.lane_dy(self.lane)):
                     self._set_status(f"턴 {self.iteration} 생성 완료",
                                      f"턴 {self.iteration} 스냅샷 보관")
             except Exception:

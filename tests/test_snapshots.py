@@ -20,6 +20,9 @@ def _load(name: str, relpath: str):
 
 snapshots = _load("snapshots_mod", "core/snapshots.py")
 multiview = _load("multiview_mod2", "core/multiview.py")
+# 레인 산술은 최종본(core/jobs)과 스냅샷(core/snapshots)이 공유하는 계산이라
+# core/lanes에 따로 떼어 두었다 — 여기서 스냅샷 배치와 함께 검증한다
+lanes = _load("lanes_mod", "core/lanes.py")
 
 
 class TestSlotOffset(unittest.TestCase):
@@ -49,26 +52,43 @@ class TestSlotOffset(unittest.TestCase):
         self.assertLess(snapshots.slot_offset(1, 2, 5.0), snapshots.slot_offset(1, 2, 1.0))
 
 
-class TestLaneOffset(unittest.TestCase):
-    # 스냅샷은 그 잡의 최종본과 같은 레인(Y)에 놓여야 한 줄로 비교된다
-    def test_lane_zero_has_no_offset(self):
-        self.assertEqual(snapshots.lane_offset(0, 4.0), 0.0)
+class TestLaneLayout(unittest.TestCase):
+    """레인 배치 산술. bpy 호출에 붙어 있어 테스트가 못 보던 계산을 여기서 고정한다."""
 
-    def test_matches_final_model_lane(self):
-        # core/jobs.apply_lane_offset과 같은 계산 (LANE_SPACING * lane)
-        self.assertEqual(snapshots.lane_offset(2, 4.0), 8.0)
+    def test_snapshot_and_final_share_lane_y(self):
+        # 스냅샷 Y = capture_turn(dy=...)에 넘기는 값, 최종본 Y = 새 오브젝트의 이동량.
+        # 둘이 다르면 중간 단계가 자기 최종본과 떨어져 비교가 안 된다
+        for lane in range(4):
+            snapshot_y = lanes.lane_dy(lane)
+            final_y = lanes.lane_shift(None, lane)  # 갓 생성된 오브젝트(표식 없음)
+            self.assertEqual(snapshot_y, final_y, f"레인 {lane}에서 어긋남")
+
+    def test_lane_zero_is_noop(self):
+        self.assertEqual(lanes.lane_dy(0), 0.0)
+        self.assertEqual(lanes.lane_shift(None, 0), 0.0)
+        self.assertEqual(lanes.lane_shift(0, 0), 0.0)
+
+    def test_repeated_finalize_does_not_double(self):
+        # 개선 세션은 같은 컬렉션을 다시 마무리한다 — 이미 밀린 오브젝트는 안 움직여야 한다
+        for lane in range(1, 4):
+            self.assertEqual(lanes.lane_shift(lane, lane), 0.0)
+            # 몇 번을 돌려도 누적 이동량은 첫 이동 그대로다
+            total = lanes.lane_shift(None, lane)
+            for _ in range(5):
+                total += lanes.lane_shift(lane, lane)
+            self.assertEqual(total, lanes.lane_dy(lane))
+
+    def test_lane_change_moves_by_difference(self):
+        # 레인이 바뀌면 차분만 움직여 새 레인에 정확히 안착한다
+        self.assertEqual(lanes.lane_shift(1, 3), lanes.lane_dy(3) - lanes.lane_dy(1))
 
     def test_lanes_do_not_overlap(self):
-        offsets = [snapshots.lane_offset(lane, 4.0) for lane in range(4)]
+        offsets = [lanes.lane_dy(lane) for lane in range(4)]
         self.assertEqual(len(set(offsets)), len(offsets))
-
-    def test_no_spacing_means_no_shift(self):
-        # 레인 간격을 안 넘기는 호출자(기본값)는 예전처럼 Y=0에 그대로 둔다
-        self.assertEqual(snapshots.lane_offset(3, 0.0), 0.0)
 
     def test_negative_lane_is_clamped(self):
         # 레인은 음수가 될 수 없다 — 방어적으로 원점 뒤로 밀지 않는다
-        self.assertEqual(snapshots.lane_offset(-1, 4.0), 0.0)
+        self.assertEqual(lanes.lane_dy(-1), 0.0)
 
 
 class TestCollectionName(unittest.TestCase):

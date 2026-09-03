@@ -7,9 +7,10 @@ import logging
 
 import bpy
 
+from . import lanes
+
 log = logging.getLogger(__name__)
 
-LANE_SPACING = 4.0  # 레인 간 Y축 간격(미터). 배치 결과가 겹치지 않도록 벌린다
 LANE_MARK = "lp3d_lane"  # 레인 오프셋을 이미 적용한 오브젝트에 남기는 표식
 
 
@@ -51,6 +52,8 @@ def duplicate_job(props, index: int):
     # 원본 값을 먼저 복사해둔다 — props.jobs.add()가 컬렉션을 재할당하면
     # 앞서 얻은 항목 참조(src)가 무효가 되어 접근 시 크래시할 수 있다
     src = props.jobs[index]
+    # improve_feedback은 일부러 뺀다 — 원본의 완성된 결과에 대한 피드백이라
+    # 결과가 없는 새 대기 항목에 붙으면 첫 [개선하기]에 엉뚱하게 반영된다
     values = {
         "ref_image_path": src.ref_image_path,
         "agent": src.agent,
@@ -164,18 +167,18 @@ def apply_lane_offset(collection_name: str, lane: int):
 
     생성 코드는 항상 원점 기준으로 작성되므로, 마무리 직전에 한 번만 적용한다.
 
-    이동은 상대 이동이라 누적된다 — 개선 세션은 같은 컬렉션을 재사용하고, 에이전트가
-    코드 없이 STATUS: DONE으로 끝내면 오브젝트가 다시 만들어지지 않은 채 마무리에
-    도달한다. 그래서 이미 민 오브젝트에 적용한 레인을 표식으로 남겨 두 번 밀지 않는다
-    (코드가 다시 실행되면 오브젝트가 새로 생겨 표식이 없으므로 정상적으로 밀린다)."""
+    이동은 상대 이동이라 누적된다. 그래서 이미 민 오브젝트에는 적용한 레인을 표식으로
+    남기고 차분(lanes.lane_shift)만 적용해 두 번 밀지 않는다 — 코드가 다시 실행되면
+    오브젝트가 새로 생겨 표식이 없으므로 정상적으로 밀린다."""
     coll = bpy.data.collections.get(collection_name)
     if not coll:
         return
     for obj in coll.objects:
         if obj.parent is not None:  # 자식은 부모를 따라 움직인다
             continue
-        applied = obj.get(LANE_MARK) or 0
-        if applied == lane:
-            continue
-        obj.location.y += LANE_SPACING * (lane - applied)
+        applied = obj.get(LANE_MARK)
+        dy = lanes.lane_shift(applied, lane)
+        if not dy and applied is None:
+            continue  # 레인 0 — 옮길 것도, 남길 표식도 없다
+        obj.location.y += dy
         obj[LANE_MARK] = lane

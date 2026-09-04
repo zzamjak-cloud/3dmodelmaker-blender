@@ -14,7 +14,7 @@ from .. import preferences
 from ..agents.claude_cli import ClaudeBackend
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import (capture, errors, executor, jobs, lanes, library, loop, multiview,
+from . import (capture, errors, executor, jobs, lanes, library, loop, models, multiview,
                prompts, runner, scheduler, snapshots)
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
@@ -159,11 +159,32 @@ class GenerationSession:
         backend_cls = ClaudeBackend if agent == 'CLAUDE' else CodexBackend
         self.backend = backend_cls(exe, self.workdir)
         self.prefs = preferences.get_prefs()
-        # 모델 드롭다운은 Claude 별칭 기준 — Codex는 CLI 기본 설정을 따른다
         if agent == 'CLAUDE':
             self.backend.model = "" if self.prefs.gen_model == 'DEFAULT' else self.prefs.gen_model
             self.backend.critique_model = ("" if self.prefs.critique_model == 'DEFAULT'
                                            else self.prefs.critique_model)
+        else:
+            self.backend.model = models.codex_model_id(self.prefs.codex_model)
+        # 실행 중 환경설정이 바뀌어도 이 세션의 요청 모델은 바뀌지 않는다
+        self.requested_model_id = self.backend.model
+        self.requested_model_label = models.model_label(agent, self.requested_model_id)
+        requested_critique_id = self.backend.critique_model or self.backend.model
+        self.requested_critique_model_label = models.model_label(
+            agent, requested_critique_id)
+        self.effective_model_label = self.requested_model_label
+        self.effective_critique_model_label = self.requested_critique_model_label
+        self.model_fallback_used = False
+        self._pending_prompt = ""
+        self._pending_images = []
+        self._initial_dispatch_started = False
+        self._model_fallback_eligible = False
+        job = self._job()
+        if job:
+            job.requested_model = self.requested_model_label
+            job.effective_model = self.effective_model_label
+            job.requested_critique_model = self.requested_critique_model_label
+            job.effective_critique_model = self.effective_critique_model_label
+            job.model_fallback = False
         # 런타임 상태
         self.session_id = None
         self.iteration = 1
@@ -218,7 +239,24 @@ class GenerationSession:
 
     def _model_label(self, critique=False):
         m = (self.backend.critique_model if critique else "") or self.backend.model
-        return m.capitalize() if m else "기본 모델"
+        agent = 'CLAUDE' if self.backend.name == 'claude' else 'CODEX'
+        return models.model_label(agent, m)
+
+    def _model_log(self, include_requested=True):
+        """credential 없이 요청 및 실제 provider/model snapshot을 로그로 만든다."""
+        lines = []
+        if include_requested:
+            lines.append(
+                f"요청 모델: provider={self.backend.name}, "
+                f"generation={self.requested_model_label}, "
+                f"critique={self.requested_critique_model_label}"
+            )
+        lines.append(
+            f"실제 모델: provider={self.backend.name}, "
+            f"generation={self.effective_model_label}, "
+            f"critique={self.effective_critique_model_label}"
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def _redraw():
@@ -310,6 +348,7 @@ class GenerationSession:
             job.started_at = time.time()
             job.phase = ""
             job.status = "대기 중 (순서 기다리는 중)"
+        self._set_status("대기 중 (순서 기다리는 중)", self._model_log())
         runner.add_keepalive(self.uid)
         self.backend.prepare_workdir(prompts.build_system_prompt())
         if self.improve_code:
@@ -452,7 +491,7 @@ class GenerationSession:
                     job.improve_feedback = ""  # 반영된 피드백은 비움
                 job.entry_id = self._archive(job.code)
         # 상태줄은 한 줄뿐이라 원인을 다 담을 수 없다 — 상세는 로그 패널에 남긴다
-        log_text = f"세션 종료: {status}"
+        log_text = self._model_log(include_requested=False) + f"\n세션 종료: {status}"
         if detail:
             log_text += "\n" + "\n".join(f"  · {line}" for line in detail)
         self._set_status(status, log_text, phase="", hint=hint)
@@ -476,9 +515,14 @@ class GenerationSession:
 
     # ---------- 에이전트 왕복 ----------
     def _dispatch(self, prompt: str, images=None):
+        # fallback은 image hint가 붙기 전 원본 요청을 그대로 다시 보내야 한다
+        self._pending_prompt = prompt
+        self._pending_images = list(images or [])
         if images:
             prompt += self.backend.image_prompt_hint(images)
         use_resume = self.session_id and not self.stateless
+        self._model_fallback_eligible = not self._initial_dispatch_started and not use_resume
+        self._initial_dispatch_started = True
         if self.stateless and self.last_code:
             # 폴백: 세션 기억이 없으므로 맥락을 프롬프트에 인라인
             prompt = (
@@ -518,6 +562,8 @@ class GenerationSession:
         if error:
             if "사용자 취소" in error:
                 return  # cancel()이 이미 정리함
+            if self._try_model_fallback(error):
+                return
             kind = errors.classify(error)
             reason = errors.describe(error, self.backend.name)
             # 인증·사용량 문제는 재시도해도 똑같이 실패한다 — 폴백을 건너뛰고
@@ -566,6 +612,50 @@ class GenerationSession:
             return
 
         self._execute(code, status)
+
+    def _try_model_fallback(self, error: str) -> bool:
+        """초기 Astra 가용성 오류를 Codex CLI 기본 모델로 한 번 재시도한다."""
+        terminal_kinds = (errors.AUTH, errors.QUOTA, errors.NETWORK,
+                          errors.TIMEOUT, errors.MISSING)
+        if (self.backend.name != "codex"
+                or self.model_fallback_used
+                or self.backend.model != models.ASTRA_ID
+                or not self._model_fallback_eligible
+                or self.session_id is not None
+                or getattr(self, "_was_resume", False)
+                or errors.classify(error) in terminal_kinds
+                or not models.is_model_unavailable(error, models.ASTRA_ID)):
+            return False
+
+        # 재호출이 pending 값을 갱신하기 전에 원본 요청을 지역 변수에 고정한다
+        prompt = self._pending_prompt
+        images = list(self._pending_images)
+        self.model_fallback_used = True
+        self.backend.model = ""
+        self.session_id = None
+        self.effective_model_label = models.CODEX_DEFAULT_LABEL
+        self.effective_critique_model_label = models.CODEX_DEFAULT_LABEL
+        job = self._job()
+        if job:
+            job.effective_model = self.effective_model_label
+            job.effective_critique_model = self.effective_critique_model_label
+            job.model_fallback = True
+        reason = errors.describe(error, self.backend.name)
+        log_lines = [
+            "모델 fallback: GPT-6 Astra -> Codex CLI 기본 모델",
+            f"fallback 판정: {reason}",
+            self._model_log(include_requested=False),
+        ]
+        for detail in errors.detail_lines(error, limit=2):
+            detail = detail[:200]
+            if detail and detail not in reason and reason not in detail:
+                log_lines.append(f"  · {detail}")
+        self._set_status(
+            "GPT-6 Astra 사용 불가 - Codex CLI 기본 모델로 재시도중...",
+            "\n".join(log_lines),
+        )
+        self._dispatch(prompt, images=images)
+        return True
 
     # ---------- 실행/비평 ----------
     def _execute(self, code: str, status):

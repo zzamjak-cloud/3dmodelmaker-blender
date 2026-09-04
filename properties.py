@@ -47,7 +47,7 @@ class LP3DJobItem(bpy.types.PropertyGroup):
             ('CLAUDE', "Claude", "claude -p 서브프로세스 사용"),
             ('CODEX', "Codex", "codex exec 서브프로세스 사용"),
         ],
-        default='CLAUDE',
+        default='CODEX',
     )
     auto_turns: IntProperty(
         name="자동 반복(턴)",
@@ -87,6 +87,11 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     entry_id: StringProperty(default="")       # 라이브러리에 축적된 결과의 id
     multiview_path: StringProperty(default="")  # 이 잡의 멀티뷰 시트 경로
     lane: IntProperty(default=0)                # 결과를 Y축으로 밀어둘 레인 번호
+    requested_model: StringProperty(default="")           # 생성 요청 모델 snapshot
+    effective_model: StringProperty(default="")           # 실제 생성 모델 snapshot
+    requested_critique_model: StringProperty(default="")  # 비평 요청 모델 snapshot
+    effective_critique_model: StringProperty(default="")  # 실제 비평 모델 snapshot
+    model_fallback: BoolProperty(default=False)             # Astra fallback 여부
 
 
 class LP3DSceneProps(bpy.types.PropertyGroup):
@@ -102,7 +107,7 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
             ('CLAUDE', "Claude", "claude -p 서브프로세스 사용"),
             ('CODEX', "Codex", "codex exec 서브프로세스 사용"),
         ],
-        default='CLAUDE',
+        default='CODEX',
         update=_persist_cb,
     )
     auto_turns: IntProperty(

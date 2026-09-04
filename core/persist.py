@@ -9,7 +9,7 @@ import os
 
 import bpy
 
-_PREF_KEYS = ("claude_path", "codex_path", "gen_model", "critique_model",
+_PREF_KEYS = ("claude_path", "codex_path", "codex_model", "gen_model", "critique_model",
               "timeout", "ai_concurrency", "capture_count", "capture_resolution",
               "use_multiview", "keep_turn_snapshots", "use_library",
               "asset_library_path")

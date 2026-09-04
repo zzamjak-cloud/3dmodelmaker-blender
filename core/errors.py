@@ -80,6 +80,12 @@ def classify(error: str) -> str:
     text = _norm(error)
     if not text:
         return UNKNOWN
+    # MCP별 OAuth 실패는 Codex 본체 로그인 상태와 무관하다. 한 프로세스의 stderr에
+    # 함께 섞이므로 상세 표시뿐 아니라 원인 분류에서도 해당 줄을 제외한다.
+    text = "\n".join(
+        line for line in text.splitlines()
+        if not any(noise in line for noise in _NOISE)
+    )
     for kind, needles in _RULES:
         if any(n in text for n in needles):
             return kind

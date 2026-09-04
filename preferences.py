@@ -51,6 +51,17 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default="",
         update=_persist_cb,
     )
+    _CODEX_MODEL_ITEMS = [
+        ('ASTRA', "GPT-6 Astra", "공간 추론과 vision이 강화된 고품질 모델"),
+        ('DEFAULT', "CLI 기본 모델", "Codex CLI에 설정된 기본 모델 사용"),
+    ]
+    codex_model: EnumProperty(
+        name="Codex 모델",
+        description="Codex가 Blender 코드를 생성하고 렌더를 비평할 때 사용할 모델",
+        items=_CODEX_MODEL_ITEMS,
+        default='ASTRA',
+        update=_persist_cb,
+    )
     _MODEL_ITEMS = [
         ('DEFAULT', "CLI 기본", "claude CLI에 설정된 기본 모델 사용"),
         ('opus', "Opus (고품질)", "가장 정교한 결과, 느림"),
@@ -59,7 +70,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
     ]
     gen_model: EnumProperty(
         name="생성 모델",
-        description="초기 코드 생성 모델 (Claude 전용 — Codex는 CLI 기본 설정 사용)",
+        description="Claude의 초기 코드 생성에 사용할 모델 (Claude 전용)",
         items=_MODEL_ITEMS,
         default='DEFAULT',
         update=_persist_cb,
@@ -126,6 +137,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col = self.layout.column()
         col.prop(self, "claude_path")
         col.prop(self, "codex_path")
+        col.prop(self, "codex_model")
         col.prop(self, "gen_model")
         col.prop(self, "critique_model")
         col.prop(self, "timeout")
@@ -148,6 +160,7 @@ class _Defaults:
     """애드온으로 활성화되지 않은 상태(테스트 등)에서 쓰는 기본값."""
     claude_path = ""
     codex_path = ""
+    codex_model = 'ASTRA'
     gen_model = 'DEFAULT'
     critique_model = 'DEFAULT'
     timeout = 300

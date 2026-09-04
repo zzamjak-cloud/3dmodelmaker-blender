@@ -28,6 +28,12 @@ CODEX_AUTH = """CLI 종료 코드 1
 2026-09-02T01:31:05.866137Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed
 """
 
+MCP_AUTH_NOISE = (
+    "2026-09-04T07:55:26Z ERROR rmcp::transport::worker: worker quit with fatal: "
+    "AuthRequired(AuthRequiredError { error=\"invalid_token\", "
+    "error_description=\"Missing or invalid access token\" })"
+)
+
 
 class TestClassify(unittest.TestCase):
     def test_auth_from_real_codex_stderr(self):
@@ -42,6 +48,9 @@ class TestClassify(unittest.TestCase):
     def test_unknown_stays_unknown(self):
         self.assertEqual(errors.classify("ValueError: bad mesh"), errors.UNKNOWN)
         self.assertEqual(errors.classify(""), errors.UNKNOWN)
+
+    def test_mcp_auth_noise_is_not_codex_login_failure(self):
+        self.assertEqual(errors.classify(MCP_AUTH_NOISE), errors.UNKNOWN)
 
 
 class TestDescribe(unittest.TestCase):

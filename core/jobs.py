@@ -14,6 +14,16 @@ log = logging.getLogger(__name__)
 LANE_MARK = "lp3d_lane"  # 레인 오프셋을 이미 적용한 오브젝트에 남기는 표식
 
 
+def _clear_model_tracking(job):
+    """새 실행 전에 이전 세션의 모델 추적 정보를 비운다."""
+    job.phase = ""
+    job.requested_model = ""
+    job.effective_model = ""
+    job.requested_critique_model = ""
+    job.effective_critique_model = ""
+    job.model_fallback = False
+
+
 def add_job(props, prompt: str = ""):
     """새 잡 항목을 만들어 리스트 끝에 붙이고 선택 상태로 만든다.
 
@@ -138,6 +148,7 @@ def retry_job(context, index: int) -> str:
     job.status_hint = ""
     job.log = ""
     job.iteration = 0
+    _clear_model_tracking(job)
     error = start_one(context, job)
     if error:
         job.state = 'FAILED'
@@ -157,7 +168,7 @@ def reset_stale(props) -> int:
         if job.state == 'RUNNING' and not session.is_active(job.uid):
             job.state = 'PENDING'
             job.status = "대기 중 (세션이 끊겨 초기화됨)"
-            job.phase = ""
+            _clear_model_tracking(job)
             fixed += 1
     return fixed
 

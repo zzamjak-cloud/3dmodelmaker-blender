@@ -108,8 +108,9 @@ removed_name = module + '.agents.claude_cli'
 removed_module = types.ModuleType(removed_name)
 removed_module.__file__ = str(source / 'agents/claude_cli.py')
 sys.modules[removed_name] = removed_module
+check("구버전 Claude 모듈 리로드 제외", removed_module not in addon._reload_targets())
 addon.dev_reload()
-check("구버전 Claude 모듈 잔재 제거", removed_name not in sys.modules)
+check("전역 모듈 레지스트리 보존", sys.modules.get(removed_name) is removed_module)
 check("Dev Reload 재등록", hasattr(bpy.types.Scene, 'lp3d'))
 check("리로드 후 개선 연산자 없음", 'improve' not in dir(bpy.ops.lp3d))
 check("리로드 후 단계 스냅샷 연산자 없음", 'clear_snapshots' not in dir(bpy.ops.lp3d))

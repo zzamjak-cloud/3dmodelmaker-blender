@@ -2,6 +2,12 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag_prefix:
+        description: '새 릴리스 태그 접두사 (기존 태그 재사용 금지)'
+        required: true
+        default: 'v'
+        type: string
 
 permissions:
   contents: write # 드래프트 릴리스 생성에 필요
@@ -17,6 +23,7 @@ jobs:
         uses: natapol2547/blender-extension-builder@main
         with:
           source-dir: '.'
+          tag-prefix: ${{ inputs.tag_prefix }}
 
       - name: Summary
         run: |

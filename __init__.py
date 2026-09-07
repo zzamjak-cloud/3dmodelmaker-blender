@@ -40,8 +40,6 @@ def _reload_targets():
     removed = [n for n in names
                if getattr(sys.modules[n], "__file__", None)
                and not Path(sys.modules[n].__file__).is_file()]
-    for name in removed:
-        sys.modules.pop(name, None)
     names = [n for n in names if n not in removed]
     # ui.* 는 _MODULES에서 따로 리로드하므로 제외
     names = [n for n in names if not n.startswith(prefix + "ui")]

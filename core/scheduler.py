@@ -3,7 +3,7 @@
 # 이 모듈은 bpy에 의존하지 않는 순수 로직만 담는다 (Blender 없이 테스트 가능).
 # 타이머 연동은 core/runner.py의 펌프가 pump()를 주기적으로 호출하는 방식이다.
 #
-# 배경: CLI 서브프로세스(claude/codex)는 서로 독립이라 여러 개를 동시에 띄워도
+# 배경: Codex CLI 서브프로세스는 서로 독립이라 여러 개를 동시에 띄워도
 # 되지만, bpy 조작은 단일 스레드·전역 상태(lowpoly.set_session, 씬 렌더 설정,
 # executor의 bpy.data 스냅샷/롤백)라 반드시 하나씩 원자적으로 실행해야 한다.
 import logging

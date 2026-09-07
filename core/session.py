@@ -1,4 +1,4 @@
-# 생성 세션 상태머신: 프롬프트 → 코드 생성 → 실행 → 캡처 → 비평 → 반복 → 마무리
+# 생성 세션 상태머신: 프롬프트 → 코드 생성 → 실행 → 마무리
 import logging
 import os
 import re
@@ -11,10 +11,9 @@ import bpy
 _log = logging.getLogger(__name__)
 
 from .. import preferences
-from ..agents.claude_cli import ClaudeBackend
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import (capture, errors, executor, jobs, lanes, library, loop, models, multiview,
+from . import (errors, executor, jobs, library, models, multiview,
                prompts, runner, scheduler, snapshots)
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
@@ -31,10 +30,10 @@ def active_count() -> int:
     return len(_sessions)
 
 
-def start_job(scene_name, uid, variation_of=None, variation_count=3, improve=False):
+def start_job(scene_name, uid, variation_of=None, variation_count=3):
     """잡 항목 하나의 생성 세션을 시작한다. 오류 메시지 또는 None을 반환한다.
 
-    프롬프트·참조 이미지·에이전트·턴 수는 씬이 아니라 잡 항목에서 읽는다 —
+    프롬프트·참조 이미지는 씬이 아니라 잡 항목에서 읽는다 —
     여러 항목이 서로 다른 설정으로 동시에 돌 수 있어야 하기 때문이다."""
     if uid in _sessions:
         return "이미 진행 중인 항목입니다"
@@ -46,18 +45,12 @@ def start_job(scene_name, uid, variation_of=None, variation_count=3, improve=Fal
     if job is None:
         return "항목을 찾을 수 없습니다"
 
-    if improve:
-        if not job.code or not job.collection_name:
-            return "개선할 결과가 없습니다 — 먼저 모델을 생성하세요"
-        coll = bpy.data.collections.get(job.collection_name)
-        if not coll or not any(o.type == 'MESH' for o in coll.objects):
-            return "개선할 모델 컬렉션을 찾을 수 없습니다"
     request = job.prompt.strip()
     if not request:
         return "프롬프트를 입력하세요"
-    exe = preferences.resolve_cli_path(job.agent)
+    exe = preferences.resolve_cli_path('CODEX')
     if not exe:
-        return f"{job.agent} CLI를 찾을 수 없습니다. 환경설정에서 경로를 지정하세요"
+        return "Codex CLI를 찾을 수 없습니다. 환경설정에서 경로를 지정하세요"
     ref_image = None
     if job.ref_image_path.strip():
         ref_image = bpy.path.abspath(job.ref_image_path.strip())
@@ -72,14 +65,9 @@ def start_job(scene_name, uid, variation_of=None, variation_count=3, improve=Fal
         scene_name=scene_name,
         uid=uid,
         request=request,
-        agent=job.agent,
         exe=exe,
-        max_iterations=1 if improve else loop.total_turns(job.auto_turns),
         variation_code=variation_of,
         variation_count=variation_count,
-        improve_code=job.code if improve else None,
-        improve_feedback=job.improve_feedback.strip() if improve else "",
-        improve_collection=job.collection_name if improve else None,
         ref_image=ref_image,
         lane=job.lane,
     )
@@ -133,20 +121,16 @@ def _slug(text: str) -> str:
 
 
 class GenerationSession:
-    def __init__(self, scene_name, uid, request, agent, exe, max_iterations,
+    def __init__(self, scene_name, uid, request, exe,
                  variation_code=None, variation_count=3,
-                 improve_code=None, improve_feedback="", improve_collection=None,
                  ref_image=None, lane=0):
         self.scene_name = scene_name
         self.uid = uid
         self.lane = lane
         self.request = request
-        self.max_iterations = max_iterations
+        self.max_iterations = 1
         self.variation_code = variation_code
         self.variation_count = variation_count
-        self.improve_code = improve_code
-        self.improve_feedback = improve_feedback
-        self.improve_collection = improve_collection
         self.workdir = tempfile.mkdtemp(prefix="lp3d_")
         # 참조 이미지는 workdir로 복사 — 에이전트가 상대경로(Read/-i)로 접근한다
         self.ref_image = None
@@ -156,23 +140,13 @@ class GenerationSession:
             self.ref_image = dest
         self.multiview = None  # codex image_gen으로 생성한 멀티뷰 참조 시트 경로
         self.last_images = []  # 마지막 캡처 (라이브러리 썸네일용)
-        backend_cls = ClaudeBackend if agent == 'CLAUDE' else CodexBackend
-        self.backend = backend_cls(exe, self.workdir)
+        self.backend = CodexBackend(exe, self.workdir)
         self.prefs = preferences.get_prefs()
-        if agent == 'CLAUDE':
-            self.backend.model = "" if self.prefs.gen_model == 'DEFAULT' else self.prefs.gen_model
-            self.backend.critique_model = ("" if self.prefs.critique_model == 'DEFAULT'
-                                           else self.prefs.critique_model)
-        else:
-            self.backend.model = models.codex_model_id(self.prefs.codex_model)
+        self.backend.model = models.ASTRA_ID
         # 실행 중 환경설정이 바뀌어도 이 세션의 요청 모델은 바뀌지 않는다
         self.requested_model_id = self.backend.model
-        self.requested_model_label = models.model_label(agent, self.requested_model_id)
-        requested_critique_id = self.backend.critique_model or self.backend.model
-        self.requested_critique_model_label = models.model_label(
-            agent, requested_critique_id)
+        self.requested_model_label = models.model_label('CODEX', self.requested_model_id)
         self.effective_model_label = self.requested_model_label
-        self.effective_critique_model_label = self.requested_critique_model_label
         self.model_fallback_used = False
         self._pending_prompt = ""
         self._pending_images = []
@@ -182,8 +156,6 @@ class GenerationSession:
         if job:
             job.requested_model = self.requested_model_label
             job.effective_model = self.effective_model_label
-            job.requested_critique_model = self.requested_critique_model_label
-            job.effective_critique_model = self.effective_critique_model_label
             job.model_fallback = False
         # 런타임 상태
         self.session_id = None
@@ -193,19 +165,14 @@ class GenerationSession:
         self.stateless = False       # resume 실패 시 폴백 모드
         self.fallback_used = False
         self.last_code = None
-        if improve_collection:
-            self.collection_name = improve_collection  # 기존 결과를 제자리에서 개선
-        else:
-            base = f"LP3D_{_slug(request)}"
-            name, n = base, 1
-            # 진행 중인 세션이 쓸 이름도 점유로 본다 — 컬렉션은 executor.execute가
-            # 돌아야 실제로 생기므로, 같은 프롬프트 두 항목을 동시에 돌리면
-            # 둘 다 같은 이름을 골라 서로의 결과를 지운다
-            while (bpy.data.collections.get(name)
-                   or any(s.collection_name == name for s in _sessions.values())):
-                n += 1
-                name = f"{base}.{n:03d}"
-            self.collection_name = name
+        base = f"LP3D_{_slug(request)}"
+        name, n = base, 1
+        # 컬렉션 생성 전인 다른 세션의 이름도 점유로 본다.
+        while (bpy.data.collections.get(name)
+               or any(s.collection_name == name for s in _sessions.values())):
+            n += 1
+            name = f"{base}.{n:03d}"
+        self.collection_name = name
 
     def _ref_name(self):
         return os.path.basename(self.ref_image) if self.ref_image else None
@@ -237,10 +204,8 @@ class GenerationSession:
             _log.info(log)
         self._redraw()
 
-    def _model_label(self, critique=False):
-        m = (self.backend.critique_model if critique else "") or self.backend.model
-        agent = 'CLAUDE' if self.backend.name == 'claude' else 'CODEX'
-        return models.model_label(agent, m)
+    def _model_label(self):
+        return models.model_label('CODEX', self.backend.model)
 
     def _model_log(self, include_requested=True):
         """credential 없이 요청 및 실제 provider/model snapshot을 로그로 만든다."""
@@ -248,13 +213,11 @@ class GenerationSession:
         if include_requested:
             lines.append(
                 f"요청 모델: provider={self.backend.name}, "
-                f"generation={self.requested_model_label}, "
-                f"critique={self.requested_critique_model_label}"
+                f"generation={self.requested_model_label}"
             )
         lines.append(
             f"실제 모델: provider={self.backend.name}, "
-            f"generation={self.effective_model_label}, "
-            f"critique={self.effective_critique_model_label}"
+            f"generation={self.effective_model_label}"
         )
         return "\n".join(lines)
 
@@ -278,21 +241,13 @@ class GenerationSession:
         return _sessions.get(self.uid) is not self
 
     def _discard(self):
-        """잡 항목이 사라진 세션을 정리한다.
-
-        신규 생성 세션은 이 세션이 만든 컬렉션이므로 통째로 지운다.
-        개선 세션은 다르다 — collection_name이 사용자가 이미 갖고 있던 모델이라
-        그냥 지우면 사용자가 만들어둔 결과가 사라진다. 항목을 리스트에서 뺀 것이지
-        모델을 버리라고 한 것이 아니므로, 반쯤 적용된 중간 결과까지 비운 뒤
-        개선 전 상태로 되돌려 준다. 복원은 _finish의 개선 실패 경로를 그대로 쓴다
-        (컬렉션을 비워 두면 그 조건이 성립한다) — 복원 수단을 둘로 나누지 않는다."""
+        """잡 항목이 사라진 세션의 미완성 컬렉션을 정리한다."""
         try:
             snapshots.clear_all(self.collection_name)
             executor.clear_collection(self.collection_name)
-            if not self.improve_code:
-                coll = bpy.data.collections.get(self.collection_name)
-                if coll and not coll.objects:
-                    bpy.data.collections.remove(coll)
+            coll = bpy.data.collections.get(self.collection_name)
+            if coll and not coll.objects:
+                bpy.data.collections.remove(coll)
         except Exception:
             _log.exception("LP3D 삭제된 항목 정리 실패")
         try:
@@ -351,11 +306,6 @@ class GenerationSession:
         self._set_status("대기 중 (순서 기다리는 중)", self._model_log())
         runner.add_keepalive(self.uid)
         self.backend.prepare_workdir(prompts.build_system_prompt())
-        if self.improve_code:
-            # 개선 세션: 현재 모델을 캡처해 첫 턴부터 이미지+코드+피드백으로 개선 요청
-            self._set_status("현재 모델 캡처 대기중...", phase='CAPTURE')
-            self._submit_blender(self._blender_improve_capture)
-            return
         if self.variation_code:
             first = prompts.build_variation_prompt(self.request, self.variation_code,
                                                    self.variation_count)
@@ -377,30 +327,6 @@ class GenerationSession:
         multiview.generate(self.request, self.workdir, self.prefs.timeout,
                            self._on_multiview, ref_image=self.ref_image,
                            job_key=self.uid)
-
-    def _blender_improve_capture(self):
-        """개선 세션의 첫 캡처 — Blender 큐에서 실행된다."""
-        self._set_status("현재 모델 캡처중...", phase='CAPTURE')
-        images, stats = capture.capture_collection(
-            self.collection_name, self.workdir,
-            count=self.prefs.capture_count, resolution=self.prefs.capture_resolution,
-            silhouettes=1,
-        )
-        if not images:
-            self._finish("실패: 개선할 모델 캡처 불가", ok=False)
-            return
-        first = prompts.build_improve_prompt(
-            self.request, self.improve_code, self.improve_feedback,
-            [os.path.basename(p) for p in images], stats,
-            ref_image=self._ref_name(),
-        )
-        if self.ref_image:
-            images = images + [self.ref_image]
-        self._set_status(f"스크린샷 분석·개선 — {self._model_label(critique=True)} 호출 대기중...",
-                         f"개선 세션 시작: {self.request}"
-                         + (f" / 피드백: {self.improve_feedback}" if self.improve_feedback else ""),
-                         phase='CRITIQUE')
-        self._dispatch(first, images=images)
 
     def _on_multiview(self, path, error=None):
         if self._stale():
@@ -472,23 +398,12 @@ class GenerationSession:
             _end_session(self.uid)
 
     def _finish(self, status: str, ok: bool, detail=None, hint: str = "", state=None):
-        # 개선 실패로 기존 모델까지 사라졌으면 이전 코드로 복원한다
-        if not ok and self.improve_code:
-            coll = bpy.data.collections.get(self.collection_name)
-            if not coll or not any(o.type == 'MESH' for o in coll.objects):
-                restored, _ = executor.execute(self.improve_code, self.collection_name,
-                                               seed=1, workdir=self.workdir)
-                if restored:
-                    status += " — 이전 결과 복원됨"
         job = self._job()
         if job:
             job.state = state or ('DONE' if ok else 'FAILED')
             if ok:
                 job.collection_name = self.collection_name
-                # 개선 세션이 코드 없이 DONE으로 끝나면 이전 코드를 유지
-                job.code = self.last_code or self.improve_code or ""
-                if self.improve_code:
-                    job.improve_feedback = ""  # 반영된 피드백은 비움
+                job.code = self.last_code or ""
                 job.entry_id = self._archive(job.code)
         # 상태줄은 한 줄뿐이라 원인을 다 담을 수 없다 — 상세는 로그 패널에 남긴다
         log_text = self._model_log(include_requested=False) + f"\n세션 종료: {status}"
@@ -591,21 +506,12 @@ class GenerationSession:
 
         status, code = parse_agent_reply(reply.text)
         if code is None:
-            if status == 'DONE':
-                # 최소 턴 전의 DONE은 근거 없는 조기 종료 — 무시하고 계속 비평한다
-                # (self.last_code가 없으면 비평할 모델 자체가 없으므로 그대로 마무리)
-                if loop.allow_done(self.iteration, self.max_iterations) or not self.last_code:
-                    self._finalize()
-                else:
-                    self._set_status("이른 DONE 무시 — 계속 개선", "최소 턴 전 DONE 선언 무시")
-                    self._critique()
-                return
             if self.format_retries < 1:
                 self.format_retries += 1
                 self._set_status("형식 위반, 재요청...", "응답에 코드 블록 없음 — 형식 재요청", phase='GEN')
                 self._dispatch(
                     "출력 형식 위반이다. 첫 줄 `STATUS: REVISE` 또는 `STATUS: DONE`, "
-                    "이어서 python 코드 블록 1개(수정 불필요 시 DONE만)로 다시 답하라."
+                    "이어서 모델 전체의 python 코드 블록 1개로 다시 답하라."
                 )
                 return
             self._finish("실패: 에이전트 응답 형식 위반", ok=False)
@@ -634,11 +540,9 @@ class GenerationSession:
         self.backend.model = ""
         self.session_id = None
         self.effective_model_label = models.CODEX_DEFAULT_LABEL
-        self.effective_critique_model_label = models.CODEX_DEFAULT_LABEL
         job = self._job()
         if job:
             job.effective_model = self.effective_model_label
-            job.effective_critique_model = self.effective_critique_model_label
             job.model_fallback = True
         reason = errors.describe(error, self.backend.name)
         log_lines = [
@@ -657,7 +561,7 @@ class GenerationSession:
         self._dispatch(prompt, images=images)
         return True
 
-    # ---------- 실행/비평 ----------
+    # ---------- 실행/마무리 ----------
     def _execute(self, code: str, status):
         self._set_status(f"Blender 실행 대기중 (턴 {self.iteration}/{self.max_iterations})...",
                          phase='EXEC')
@@ -682,55 +586,7 @@ class GenerationSession:
         self.exec_retries = 0
         self.last_code = code
         self._set_status(f"턴 {self.iteration} 생성 완료", f"턴 {self.iteration} 실행 성공")
-        finalize = loop.should_finalize(status, self.iteration, self.max_iterations)
-        # 다음 턴이 컬렉션을 비우기 전에 이번 턴 결과를 옆으로 복제해 남긴다.
-        # 마지막 턴은 그 결과가 곧 최종본(원점)이므로 복제하지 않는다.
-        if (not finalize and getattr(self.prefs, "keep_turn_snapshots", True)
-                and not self.improve_code):
-            try:
-                # 최종본과 같은 레인 오프셋을 넘긴다 — 안 넘기면 여러 잡의 스냅샷이
-                # 모두 Y=0에 겹치고 각자의 최종본과도 떨어진다
-                if snapshots.capture_turn(self.collection_name, self.iteration,
-                                          self.max_iterations,
-                                          dy=lanes.lane_dy(self.lane)):
-                    self._set_status(f"턴 {self.iteration} 생성 완료",
-                                     f"턴 {self.iteration} 스냅샷 보관")
-            except Exception:
-                _log.exception("턴 스냅샷 실패")  # 스냅샷 문제로 생성을 막지 않는다
-        if finalize:
-            self._finalize()
-        else:
-            self._critique()
-
-    def _critique(self):
-        self._set_status("뷰포트 캡처 대기중...", phase='CAPTURE')
-        self._submit_blender(self._blender_critique)
-
-    def _blender_critique(self):
-        self._set_status("뷰포트 캡처중...", phase='CAPTURE')
-        images, stats = capture.capture_collection(
-            self.collection_name, self.workdir,
-            count=self.prefs.capture_count, resolution=self.prefs.capture_resolution,
-            silhouettes=1,  # 비평 속도를 위해 실루엣은 1장만 (iso)
-        )
-        if not images:
-            self._finalize()  # 캡처할 게 없으면 그대로 마무리
-            return
-        self.last_images = list(images)
-        self.iteration += 1
-        prompt = prompts.build_critique_prompt(
-            [os.path.basename(p) for p in images], stats,
-            self.iteration, self.max_iterations,
-            allow_done=loop.allow_done(self.iteration, self.max_iterations),
-            ref_image=self._ref_name(),
-            multiview=self._mv_name(),
-        )
-        # 비평 턴마다 참조·멀티뷰 시트와 비교하도록 함께 전달
-        images = images + [p for p in (self.ref_image, self.multiview) if p]
-        self._set_status(
-            f"스크린샷 분석 — {self._model_label(critique=True)} 호출 대기중 "
-            f"({self.iteration}/{self.max_iterations})...", phase='CRITIQUE')
-        self._dispatch(prompt, images=images)
+        self._finalize()
 
     def _finalize(self):
         self._set_status("마무리 대기중...", phase='FINAL')

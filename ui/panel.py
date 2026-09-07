@@ -4,36 +4,19 @@ import time
 
 import bpy
 
-from .. import preferences
-from ..core import models, scheduler, session, snapshots
+from ..core import models, scheduler, session
 from . import previews
 
 # 진행 단계 정의 (session.py의 phase 식별자와 일치)
-_PHASES = ('GEN', 'EXEC', 'CAPTURE', 'CRITIQUE', 'FINAL')
+_PHASES = ('GEN', 'EXEC', 'FINAL')
 
 
-def _model_labels(job):
-    """단계 표시용 생성/비평 모델 이름."""
-    if job.agent == 'CODEX':
-        scheduled_model = models.model_label('CODEX', models.codex_model_id(
-            preferences.get_prefs().codex_model))
-        scheduled_critique_model = scheduled_model
-    else:
-        prefs = preferences.get_prefs()
-        scheduled_model = models.model_label(
-            'CLAUDE', "" if prefs.gen_model == 'DEFAULT' else prefs.gen_model)
-        critique_id = ("" if prefs.critique_model == 'DEFAULT'
-                       else prefs.critique_model)
-        scheduled_critique_model = models.model_label(
-            'CLAUDE', critique_id) if critique_id else scheduled_model
-    return models.stage_model_labels(
+def _model_label(job):
+    """생성 예정 모델 또는 기록된 실제 모델 이름."""
+    return models.generation_model_label(
         state=job.state,
         requested_model=getattr(job, "requested_model", ""),
         effective_model=getattr(job, "effective_model", ""),
-        requested_critique_model=getattr(job, "requested_critique_model", ""),
-        effective_critique_model=getattr(job, "effective_critique_model", ""),
-        scheduled_model=scheduled_model,
-        scheduled_critique_model=scheduled_critique_model,
     )
 
 
@@ -48,16 +31,14 @@ class LP3D_UL_jobs(bpy.types.UIList):
         row.label(text="", icon=STATE_ICONS.get(item.state, 'DOT'))
         row.label(text=item.prompt or "(빈 프롬프트)")
         if item.state == 'RUNNING':
-            generation_model, critique_model = _model_labels(item)
-            model = models.current_model_label(
-                item.phase, generation_model, critique_model)
+            model = _model_label(item)
             if model == "GPT-6 Astra":
-                progress = f"Astra {item.iteration}/{item.total_turns}"
+                progress = "Astra"
             elif model and model != models.NO_MODEL_RECORD_LABEL:
                 compact_model = "Codex 기본" if model == models.CODEX_DEFAULT_LABEL else model
-                progress = f"{compact_model} {item.iteration}/{item.total_turns}"
+                progress = compact_model
             else:
-                progress = f"{item.iteration}/{item.total_turns}"
+                progress = "실행 중"
             row.label(text=progress)
         elif item.state == 'FAILED':
             row.label(text="실패")
@@ -112,15 +93,12 @@ class LP3D_PT_main(bpy.types.Panel):
         box.prop(job, "prompt", text="")
         # 주의: 입력 필드에 scale을 주면 macOS IME(한글 조합)가 더 불안정해짐.
         # 한글은 필드 직접 입력 대신 [프롬프트 입력] 버튼의 OS 네이티브 팝업을 쓴다.
-        box.operator("lp3d.edit_prompt", text="프롬프트 입력", icon='TEXT').target = 'prompt'
+        box.operator("lp3d.edit_prompt", text="프롬프트 입력", icon='TEXT')
         box.prop(job, "ref_image_path", text="참조 이미지")
         ref_row = box.row(align=True)
         ref_row.operator("lp3d.paste_ref_image", text="클립보드에서 붙여넣기", icon='PASTEDOWN')
         if job.ref_image_path:
             ref_row.operator("lp3d.clear_ref_image", text="", icon='X')
-        agent_row = box.row(align=True)
-        agent_row.prop(job, "agent", expand=True)
-        box.prop(job, "auto_turns")
 
         self._draw_multiview(box, props, job)
         self._draw_status(layout, job)
@@ -161,30 +139,16 @@ class LP3D_PT_main(bpy.types.Panel):
         head = box.row()
         head.alert = failed
         head.label(text=f"상태: {job.status}", icon='ERROR' if failed else 'INFO')
-        generation_model, critique_model = _model_labels(job)
+        generation_model = _model_label(job)
         tracked = any((
             getattr(job, "requested_model", ""),
             getattr(job, "effective_model", ""),
-            getattr(job, "requested_critique_model", ""),
-            getattr(job, "effective_critique_model", ""),
         ))
         if generation_model == models.NO_MODEL_RECORD_LABEL:
             box.label(text=models.NO_MODEL_RECORD_LABEL, icon='SETTINGS')
-        elif job.state == 'PENDING' and not tracked and generation_model != critique_model:
-            box.label(text=f"예정 생성 모델: {generation_model}", icon='SETTINGS')
-            box.label(text=f"예정 비평 모델: {critique_model}", icon='SETTINGS')
-        elif job.state in ('DONE', 'FAILED', 'CANCELLED') and generation_model != critique_model:
-            box.label(text=f"생성 모델: {generation_model}", icon='SETTINGS')
-            box.label(text=f"비평 모델: {critique_model}", icon='SETTINGS')
         else:
-            current_model = models.current_model_label(
-                job.phase, generation_model, critique_model)
-            requested_model = (
-                getattr(job, "requested_critique_model", "")
-                if job.phase == 'CRITIQUE'
-                else getattr(job, "requested_model", "")
-            ) or current_model
-            effective_model = current_model if tracked else ""
+            requested_model = getattr(job, "requested_model", "") or generation_model
+            effective_model = generation_model if tracked else ""
             box.label(text=models.job_model_label(
                 requested_model, effective_model, job.model_fallback), icon='SETTINGS')
         if failed:
@@ -197,14 +161,11 @@ class LP3D_PT_main(bpy.types.Panel):
             return
         box.operator("lp3d.job_cancel", icon='CANCEL')
         elapsed = int(time.time() - job.started_at) if job.started_at else 0
-        box.label(text=f"경과 {elapsed // 60}:{elapsed % 60:02d} · 턴 {job.iteration}/{job.total_turns}",
+        box.label(text=f"경과 {elapsed // 60}:{elapsed % 60:02d}",
                   icon='TIME')
-        gen_label, crit_label = generation_model, critique_model
         steps = (
-            ('GEN', f"코드 생성 — {gen_label}"),
+            ('GEN', f"코드 생성 — {generation_model}"),
             ('EXEC', "Blender 실행"),
-            ('CAPTURE', "뷰포트 캡처"),
-            ('CRITIQUE', f"스크린샷 비평 — {crit_label}"),
             ('FINAL', "마무리 정리"),
         )
         cur_idx = _PHASES.index(job.phase) if job.phase in _PHASES else -1
@@ -252,24 +213,10 @@ class LP3D_PT_output(bpy.types.Panel):
 
         col.label(text=f"결과: {job.collection_name}", icon='OUTLINER_COLLECTION')
 
-        # 개선 사이클: 결과가 마음에 안 들면 [개선하기]를 필요한 만큼 반복
-        if job.code and not session.is_active(job.uid):
-            box = layout.box()
-            box.label(text="개선", icon='MODIFIER')
-            box.prop(job, "improve_feedback", text="")
-            box.operator("lp3d.edit_prompt", text="개선 프롬프트 입력",
-                         icon='TEXT').target = 'improve_feedback'
-            box.operator("lp3d.improve", icon='FILE_REFRESH')
-            # 턴별 중간 결과를 옆에 남겨뒀다면 비교가 끝난 뒤 정리할 수 있게 한다
-            snaps = snapshots.count(job.collection_name)
-            if snaps:
-                box.operator("lp3d.clear_snapshots",
-                             text=f"단계 스냅샷 {snaps}개 정리", icon='TRASH')
-            # 라이브러리 축적: 잘 나온 결과를 우수로 표시하면 다음 생성의 예시로 우선 쓰인다
-            if job.entry_id:
-                rate = box.row(align=True)
-                rate.operator("lp3d.rate", text="우수", icon='SOLO_ON').rating = 2
-                rate.operator("lp3d.library_discard", text="제외", icon='TRASH')
+        if job.entry_id and not session.is_active(job.uid):
+            rate = layout.row(align=True)
+            rate.operator("lp3d.rate", text="우수", icon='SOLO_ON').rating = 2
+            rate.operator("lp3d.library_discard", text="제외", icon='TRASH')
 
         col = layout.column()
         col.prop(props, "export_dir")

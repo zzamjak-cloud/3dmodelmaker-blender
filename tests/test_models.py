@@ -13,11 +13,8 @@ def read_source(relative_path: str) -> str:
 
 
 class TestCodexModelSelection(unittest.TestCase):
-    def test_astra_maps_to_api_model_id(self):
-        self.assertEqual(models.codex_model_id("ASTRA"), "gpt-6-astra")
-
-    def test_default_omits_explicit_model(self):
-        self.assertEqual(models.codex_model_id("DEFAULT"), "")
+    def test_astra_api_model_id(self):
+        self.assertEqual(models.ASTRA_ID, "gpt-6-astra")
 
     def test_labels_are_stable(self):
         self.assertEqual(models.model_label("CODEX", "gpt-6-astra"), "GPT-6 Astra")
@@ -80,10 +77,11 @@ class TestCodexPreferenceDefaults(unittest.TestCase):
         props = read_source("properties.py")
         persist = read_source("core/persist.py")
 
-        self.assertIn("codex_model: EnumProperty", prefs)
-        self.assertIn("default='ASTRA'", prefs)
-        self.assertGreaterEqual(props.count("default='CODEX'"), 2)
-        self.assertIn('"codex_model"', persist)
+        self.assertNotIn("codex_model: EnumProperty", prefs)
+        self.assertNotIn("claude_path", prefs)
+        self.assertNotIn("auto_turns:", props)
+        self.assertNotIn("agent: EnumProperty", props)
+        self.assertNotIn('"codex_model"', persist)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 # 병렬 AI 생성 + Blender 직렬 큐 Implementation Plan
 
+> 과거 큐 구현 기록입니다. 2026-09-07부터 Claude 지원과 비평·개선 턴은 제거되었습니다. 큐의 병렬 AI 호출과 Blender 직렬 실행은 유지하며, 각 항목은 Astra 단일 생성으로 완료합니다. 현재 사용법은 [README](../../../README.md)를 따릅니다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** AI(CLI) 호출은 여러 개를 동시에 진행하고 Blender 작업만 전역 FIFO 큐로 하나씩 실행하도록 분리하고, AI 모델러 탭을 프롬프트 리스트(큐) 기반으로 바꾼다.

@@ -9,7 +9,7 @@ class AgentReply:
 
 
 class AgentBackend(ABC):
-    """claude/codex CLI 차이를 흡수하는 어댑터.
+    """Codex CLI 실행을 위한 어댑터.
 
     사용 규약:
     - build_initial_command: 새 세션 시작 (시스템 프롬프트 포함)
@@ -17,8 +17,8 @@ class AgentBackend(ABC):
     - parse_response: stdout(+workdir 부산물)에서 응답 텍스트와 세션 ID 추출
 
     프롬프트는 명령줄 인자가 아니라 **stdin**으로 전달한다. Windows의 npm 설치본은
-    codex.cmd/claude.cmd 배치 셸림을 통해 실행되는데, 배치 파일은 명령줄을 줄 단위로
-    처리하므로 여러 줄 인자가 첫 줄에서 잘린다(오류 traceback·비평 프롬프트 유실).
+    codex.cmd 배치 셸림을 통해 실행되는데, 배치 파일은 명령줄을 줄 단위로
+    처리하므로 여러 줄 인자가 첫 줄에서 잘린다(오류 traceback 유실).
     따라서 build_*_command는 프롬프트를 포함하지 않으며, session이 stdin으로 넘긴다.
     """
 
@@ -29,7 +29,6 @@ class AgentBackend(ABC):
         self.workdir = workdir
         # 세션이 환경설정에서 주입 — 비우면 CLI 기본 모델 사용
         self.model = ""           # 초기 코드 생성용
-        self.critique_model = ""  # 이미지 비평 턴용 (빠른 모델 권장)
 
     @abstractmethod
     def prepare_workdir(self, system_prompt: str):
@@ -37,7 +36,7 @@ class AgentBackend(ABC):
 
     @abstractmethod
     def build_initial_command(self, user_prompt: str, images: list = None) -> list:
-        """새 세션 시작 명령. images가 있으면 첫 턴부터 이미지 첨부 (개선 세션용)."""
+        """새 세션 시작 명령. images가 있으면 첫 턴부터 이미지 첨부."""
 
     @abstractmethod
     def build_resume_command(self, session_id: str, user_prompt: str, images: list) -> list:

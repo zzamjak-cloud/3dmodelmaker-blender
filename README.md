@@ -1,14 +1,14 @@
 # AI LowPoly ModelMaker
 
-Claude Code / Codex CLI 에이전트로 캐주얼 게임용 로우폴리 3D 모델(프랍·건물·자연물)을 블렌더 안에서 텍스트 프롬프트로 생성하는 Blender 확장.
+Codex CLI의 GPT-6 Astra로 캐주얼 게임용 로우폴리 3D 모델(프랍·건물·자연물)을 블렌더 안에서 텍스트 프롬프트로 생성하는 Blender 확장.
 
-- 에이전트가 로우폴리 헬퍼 라이브러리(`lp`) 기반 bpy 코드를 생성 → 실행 → 멀티앵글 캡처를 보고 스스로 비평·개선하는 시각 피드백 루프
+- GPT-6 Astra가 로우폴리 헬퍼 라이브러리(`lp`) 기반 bpy 코드를 1턴으로 생성하고 실행한 뒤 완료
 - 단일 팔레트 텍스처 머티리얼(Unity 드로우콜 1개), FBX/glTF 게임엔진 익스포트, Asset Browser 등록, 변형(variation) 생성
-- API 키 불필요 — 설치된 `claude` / `codex` CLI 구독을 그대로 사용
+- API 키 불필요 — 설치된 `codex` CLI 구독을 그대로 사용
 
 ## 설치 (자동 업데이트, 권장)
 
-한 번 등록하면 이후 새 릴리즈가 나올 때 블렌더가 자동으로 업데이트를 감지·설치합니다.
+한 번 등록하면 이후 새 릴리즈가 나올 때 블렌더가 자동으로 업데이트를 확인하고 알립니다. 설치는 사용자가 실행합니다.
 
 1. 블렌더(**5.2 LTS 권장, 최소 4.2**) → Edit → Preferences → **Get Extensions** → 우측 상단 **▼ → Repositories** → **+ → Add Remote Repository**
 2. URL에 아래 주소 입력 후 **Check for Updates on Startup** 체크:
@@ -27,24 +27,34 @@ Claude Code / Codex CLI 에이전트로 캐주얼 게임용 로우폴리 3D 모�
 
 ## 사용법
 
-1. 신규 기본 에이전트인 `codex` 또는 기존 `claude` CLI가 설치·로그인되어 있어야 합니다. (경로 자동 탐지 실패 시 애드온 환경설정에서 절대경로 지정)
+1. `codex` CLI가 설치·로그인되어 있어야 합니다. (경로 자동 탐지 실패 시 애드온 환경설정에서 절대경로 지정)
 2. 3D 뷰포트 사이드바(N) → **AI 모델러** 탭
-3. 프롬프트 입력 (예: `낡은 나무 배럴, 금속 밴드 2개`) → 에이전트 선택 → 개선 반복 횟수 설정 → **[＋]**로 큐에 추가 → **전체 실행**
+3. 프롬프트 입력 (예: `낡은 나무 배럴, 금속 밴드 2개`) → **[＋]**로 큐에 추가 → **전체 실행**
    (AI 호출은 환경설정의 동시 실행 수만큼 병렬로, Blender 작업은 하나씩 순차로 진행된다)
 4. 완료 후 **결과물** 패널에서 FBX/glTF 익스포트, 에셋 등록, 변형 생성
 
-Codex를 선택하면 환경설정의 **Codex 모델**에서 `GPT-6 Astra` 또는 `Codex CLI 기본 모델`을 고를 수 있다. 대기 중에는 `예정 모델`이, 실행·완료 후에는 job이 실제로 사용한 모델이 상태에 표시된다. 단계적 rollout으로 Astra가 지원되지 않는 경우에는 초기 모델 가용성 오류에 한해서만 `Codex CLI 기본 모델 (Astra 사용 불가)`로 한 번 재시도한다. 네트워크 차단이나 로그인 만료 같은 오류에는 fallback하지 않는다. Claude 사용과 Claude 전용 생성·비평 모델 설정도 계속 지원한다.
+모든 생성은 `GPT-6 Astra`를 요청하고 1턴으로 완료한다. 대기 중에는 `예정 모델`이, 실행·완료 후에는 실제 사용한 모델이 상태에 표시된다. Astra가 지원되지 않는 경우에는 초기 모델 가용성 오류에 한해서만 `Codex CLI 기본 모델 (Astra 사용 불가)`로 한 번 재시도한다. 네트워크 차단이나 로그인 만료 같은 오류에는 폴백하지 않는다. 코드 실행 실패나 응답 형식 오류의 복구 재시도는 유지하며, 성공한 결과에는 후속 AI 호출을 하지 않는다. 이전 버전의 에이전트·턴 수·모델 선택 저장값은 새 생성에 적용하지 않는다.
+
+## 변경 이력
+
+- **0.9.0**: GPT-6 Astra 기본 생성 및 1턴 완료 고정. Claude 생성, 추가 비평·개선과 반복 설정 제거. Astra 사용 불가 시 Codex 기본 모델 폴백 유지.
 
 ## 개발
 
 ```bash
-./scripts/dev_link.sh        # 확장 폴더에 소스 심링크 (개발 설치)
+./scripts/dev_run.sh         # macOS 격리 프로필로 개발 소스 실행
 ./scripts/build.sh           # dist/에 배포 zip + index.json 빌드
-python3 scripts/spike_cli.py claude   # CLI 계약 검증
+python3 scripts/spike_cli.py  # Astra 단일 호출 계약 검증 (실제 CLI 호출)
 ```
 
 - 코드 수정 후 패널의 **Dev Reload** 버튼으로 재시작 없이 리로드
 - 수동 테스트 시나리오: `tests/manual_scenarios.md`
+
+macOS 백그라운드 검증:
+
+```bash
+./scripts/dev_run.sh --background --python tests/verify_single_turn_in_blender.py
+```
 
 ## 릴리즈 절차
 

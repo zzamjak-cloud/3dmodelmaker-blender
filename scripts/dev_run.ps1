@@ -14,7 +14,7 @@
 #   .\scripts\dev_run.ps1 -LinkOnly          # 연결만 하고 실행하지 않음
 #   .\scripts\dev_run.ps1 -Background -PythonExpr "import bpy; print(bpy.app.version)"
 #
-# macOS는 scripts/dev_link.sh 를 쓴다.
+# macOS는 scripts/dev_run.sh 를 쓴다.
 
 [CmdletBinding()]
 param(
@@ -34,13 +34,22 @@ param(
     [string]$PythonExpr,
 
     # -Background와 함께 쓰는 파이썬 스크립트 파일
-    [string]$PythonFile
+    [string]$PythonFile,
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$BlenderArgs
 )
 
 $ErrorActionPreference = 'Stop'
 
 $AddonId = "lp3d_modelmaker"
 $SourceDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$manifest = Join-Path $SourceDir "blender_manifest.toml"
+if (-not (Test-Path $manifest)) { Write-Error "매니페스트를 찾을 수 없습니다: $manifest" }
+$manifestText = Get-Content $manifest -Raw -Encoding UTF8
+if ($manifestText -notmatch '(?m)^id\s*=\s*"lp3d_modelmaker"\s*$') {
+    Write-Error "예상하지 못한 Extension ID입니다"
+}
 
 # ---------- 포터블 Blender 확인 ----------
 
@@ -63,6 +72,7 @@ blender.org에서 포터블 ZIP을 받아 압축을 푸세요:
 # <BlenderDir>\portable\extensions\user_default 이다
 # (bpy.utils.resource_path('USER') == <BlenderDir>\portable 로 확인).
 $portableRoot = Join-Path $BlenderDir "portable"
+$env:BLENDER_USER_RESOURCES = $portableRoot
 $extDir = Join-Path $portableRoot "extensions\user_default"
 New-Item -ItemType Directory -Path $extDir -Force | Out-Null
 
@@ -70,7 +80,7 @@ New-Item -ItemType Directory -Path $extDir -Force | Out-Null
 
 $link = Join-Path $extDir $AddonId
 
-if (Test-Path $link) {
+if ($null -ne (Get-Item $link -Force -ErrorAction SilentlyContinue)) {
     $item = Get-Item $link -Force
     $isLink = $item.LinkType -in @('Junction', 'SymbolicLink')
     if ($isLink) {
@@ -106,34 +116,16 @@ if ($LinkOnly) {
 
 # ---------- 실행 ----------
 
-if ($Background) {
-    # 헤들리스: stdout/stderr을 그대로 받는다. 종료 코드도 전달한다.
-    # --factory-startup은 쓰지 않는다. 확장 저장소 자체가 비활성화되어
-    # user_default 리포를 스캔하지 않으므로 애드온을 찾을 수 없다.
-    $args = @('--background')
-    # 애드온은 기본적으로 꺼져 있으므로 명시적으로 켠다
-    $enable = "import bpy; bpy.ops.preferences.addon_enable(module='bl_ext.user_default.$AddonId')"
-    if ($PythonFile) {
-        if (-not (Test-Path $PythonFile)) { Write-Error "스크립트를 찾을 수 없습니다: $PythonFile" }
-        $args += @('--python-expr', $enable, '--python', (Resolve-Path $PythonFile).Path)
-    } elseif ($PythonExpr) {
-        $args += @('--python-expr', "$enable`n$PythonExpr")
-    } else {
-        $args += @('--python-expr', $enable)
-    }
-    Write-Host "헤들리스 실행: $exe"
-    Write-Host ""
-    & $exe @args
-    exit $LASTEXITCODE
+$launchArgs = @('--python-exit-code', '1')
+if ($Background) { $launchArgs += '--background' }
+$launchArgs += @('--python', (Join-Path $PSScriptRoot 'dev_bootstrap.py'))
+if ($PythonFile) {
+    if (-not (Test-Path $PythonFile)) { Write-Error "스크립트를 찾을 수 없습니다: $PythonFile" }
+    $launchArgs += @('--python', (Resolve-Path $PythonFile).Path)
 }
-
-Write-Host ""
+if ($PythonExpr) { $launchArgs += @('--python-expr', $PythonExpr) }
+if ($BlenderArgs) { $launchArgs += $BlenderArgs }
+Write-Host "격리 프로필: $portableRoot"
 Write-Host "개발 Blender 실행: $exe"
-Write-Host "  리소스 경로: $portableRoot\$Version"
-Write-Host "  설치된 릴리스 버전과 분리되어 있습니다."
-Write-Host ""
-Write-Host "처음 실행이라면: 환경설정 > Add-ons 에서 'AI LowPoly ModelMaker' 활성화"
-Write-Host "코드 수정 후에는 Blender 재시작 없이 애드온의 Dev Reload 사용"
-Write-Host ""
-
-Start-Process -FilePath $exe -WorkingDirectory $BlenderDir
+& $exe @launchArgs
+exit $LASTEXITCODE

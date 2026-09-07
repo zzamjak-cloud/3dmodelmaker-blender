@@ -10,3 +10,4 @@ REM NOTE: comments here are ASCII on purpose. cmd reads .bat files using the
 REM console codepage, which varies per machine, so Korean comments get
 REM mangled into bogus commands. Every other file in this repo uses Korean.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0dev_run.ps1" %*
+exit /b %errorlevel%

@@ -1,5 +1,7 @@
 # Codex CLI 기반 GPT-6 Astra 통합 설계
 
+> 과거 설계 기록입니다. 2026-09-07부터 생성은 Astra 1턴으로 고정되고 Codex CLI 기본 모델은 접근 불가 시 폴백으로만 사용합니다. 아래의 Claude 지원, 모델 선택, 비평·개선 턴 설계는 폐기되었습니다. 현재 동작과 검증은 [README](../../../README.md)와 [수동 테스트](../../../tests/manual_scenarios.md)를 따릅니다.
+
 - 작성일: 2026-09-04
 - 대상: `lp3d_modelmaker` Blender 확장
 - 목적: GPT-6 Astra를 기존 Codex CLI 생성 루프에 연결하고, 새 설치에서 Codex를 기본 에이전트로 사용하며 실제 사용 모델을 UI에 명확히 표시한다.

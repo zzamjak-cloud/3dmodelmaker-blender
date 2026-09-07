@@ -56,10 +56,11 @@ class TestPromptIntegration(unittest.TestCase):
         self.assertIn("multiview.png", p)
         self.assertIn("멀티뷰", p)
 
-    def test_critique_prompt_with_multiview(self):
-        p = prompts.build_critique_prompt(["cap.png"], {"tris": 10}, 2, 3,
-                                          multiview="multiview.png")
+    def test_initial_prompt_combines_reference_and_multiview(self):
+        p = prompts.build_initial_prompt("승용차", ref_image="reference.png",
+                                         multiview="multiview.png")
         self.assertIn("multiview.png", p)
+        self.assertIn("reference.png", p)
 
     def test_no_multiview_no_note(self):
         p = prompts.build_initial_prompt("승용차")

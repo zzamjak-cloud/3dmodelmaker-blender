@@ -1,5 +1,7 @@
 # Codex CLI 기반 GPT-6 Astra 통합 구현 계획
 
+> 과거 구현 기록입니다. 2026-09-07부터 생성은 Astra 1턴으로 고정되고 Codex CLI 기본 모델은 접근 불가 시 폴백으로만 사용합니다. 아래의 Claude 지원, 모델 선택, 비평·개선 턴 계획은 폐기되었습니다. 현재 동작과 검증은 [README](../../../README.md)와 [수동 테스트](../../../tests/manual_scenarios.md)를 따릅니다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** ModelMaker가 Codex CLI에서 GPT-6 Astra를 기본 사용하고, 실제 실행 모델과 제한적 fallback을 job 및 UI에 정확히 표시하도록 만든다.

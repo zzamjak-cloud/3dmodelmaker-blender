@@ -1,5 +1,5 @@
 # 오퍼레이터: 생성 큐 항목 조작(추가/삭제/복제/이동/재시도/중단)과
-# 선택 항목 기준 결과물 처리(평가/변형/개선/익스포트/에셋 등록)/개발 리로드
+# 선택 항목 기준 결과물 처리(평가/변형/익스포트/에셋 등록)/개발 리로드
 import logging
 import os
 
@@ -9,7 +9,7 @@ from bpy.props import EnumProperty, IntProperty
 _log = logging.getLogger(__name__)
 
 from ..core import (clipboard_image, jobs, library, multiview, native_input,
-                    session, snapshots)
+                    session)
 
 
 class LP3D_OT_job_add(bpy.types.Operator):
@@ -280,22 +280,6 @@ class LP3D_OT_load_last_multiview(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class LP3D_OT_clear_snapshots(bpy.types.Operator):
-    bl_idname = "lp3d.clear_snapshots"
-    bl_label = "단계 스냅샷 정리"
-    bl_description = "옆에 남겨둔 턴별 중간 결과를 모두 삭제한다 (최종 모델은 유지)"
-
-    @classmethod
-    def poll(cls, context):
-        job = context.scene.lp3d.active_job()
-        return job is not None and bool(job.collection_name)
-
-    def execute(self, context):
-        removed = snapshots.clear_all(context.scene.lp3d.active_job().collection_name)
-        self.report({'INFO'}, f"스냅샷 {removed}개 정리됨" if removed else "정리할 스냅샷이 없습니다")
-        return {'FINISHED'}
-
-
 class LP3D_OT_rate(bpy.types.Operator):
     bl_idname = "lp3d.rate"
     bl_label = "평가"
@@ -344,20 +328,12 @@ class LP3D_OT_edit_prompt(bpy.types.Operator):
     bl_label = "프롬프트 입력"
     bl_description = "OS 네이티브 입력 창을 열어 한글 입력 문제 없이 작성 (입력완료 시 필드에 반영)"
 
-    # 프롬프트/개선 요청 두 필드를 하나의 오퍼레이터로 처리 — 값은 프로퍼티 이름과 일치
-    target: EnumProperty(
-        items=[('prompt', "프롬프트", ""), ('improve_feedback', "개선 요청", "")],
-        default='prompt', options={'HIDDEN'},
-    )
-
     @classmethod
     def poll(cls, context):
         return not native_input.is_open() and context.scene.lp3d.active_job() is not None
 
     def execute(self, context):
         job = context.scene.lp3d.active_job()
-        target = self.target
-        title = "프롬프트 입력" if target == 'prompt' else "개선 프롬프트 입력"
         scene_name = context.scene.name
         uid = job.uid
 
@@ -370,9 +346,9 @@ class LP3D_OT_edit_prompt(bpy.types.Operator):
                 return
             target_job = scene.lp3d.job_by_uid(uid)
             if target_job:
-                setattr(target_job, target, native_input.to_single_line(text))
+                target_job.prompt = native_input.to_single_line(text)
 
-        error = native_input.open_dialog(title, getattr(job, target, ""), on_done)
+        error = native_input.open_dialog("프롬프트 입력", job.prompt, on_done)
         if error:
             self.report({'ERROR'}, error)
             return {'CANCELLED'}
@@ -397,35 +373,13 @@ class LP3D_OT_variation(bpy.types.Operator):
         # 원본 값을 먼저 복사한다 — jobs.add_job()이 컬렉션을 재할당하면 src 참조가
         # 무효가 되어 접근 시 크래시할 수 있다
         code, prompt = src.code, src.prompt
-        agent, turns = src.agent, src.auto_turns
         # 변형은 원본을 덮지 않고 새 항목·새 레인에 만든다
         new_job = jobs.add_job(props, prompt)
-        new_job.agent = agent
-        new_job.auto_turns = turns
         error = session.start_job(context.scene.name, new_job.uid,
                                   variation_of=code, variation_count=self.count)
         if error:
             new_job.state = 'FAILED'
             new_job.status = f"실패: {error}"
-            self.report({'ERROR'}, error)
-            return {'CANCELLED'}
-        return {'FINISHED'}
-
-
-class LP3D_OT_improve(bpy.types.Operator):
-    bl_idname = "lp3d.improve"
-    bl_label = "개선하기"
-    bl_description = "선택 항목의 결과를 캡처해 한 단계 개선 (개선 요청 텍스트가 있으면 최우선 반영)"
-
-    @classmethod
-    def poll(cls, context):
-        job = context.scene.lp3d.active_job()
-        return job is not None and bool(job.code) and not session.is_active(job.uid)
-
-    def execute(self, context):
-        job = context.scene.lp3d.active_job()
-        error = session.start_job(context.scene.name, job.uid, improve=True)
-        if error:
             self.report({'ERROR'}, error)
             return {'CANCELLED'}
         return {'FINISHED'}
@@ -533,12 +487,11 @@ _CLASSES = (
     LP3D_OT_edit_prompt, LP3D_OT_rate, LP3D_OT_library_discard,
     LP3D_OT_show_multiview, LP3D_OT_use_multiview_as_ref, LP3D_OT_open_multiview_folder,
     LP3D_OT_load_last_multiview,
-    LP3D_OT_clear_snapshots,
     LP3D_OT_paste_ref_image, LP3D_OT_clear_ref_image,
     LP3D_OT_job_add, LP3D_OT_job_remove, LP3D_OT_job_duplicate, LP3D_OT_job_move,
     LP3D_OT_job_retry, LP3D_OT_job_cancel,
     LP3D_OT_queue_start, LP3D_OT_queue_stop,
-    LP3D_OT_variation, LP3D_OT_improve,
+    LP3D_OT_variation,
     LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,
 )
 

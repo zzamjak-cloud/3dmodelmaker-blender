@@ -111,8 +111,6 @@ class TestJobModelFields(unittest.TestCase):
 
         self.assertEqual(annotations["requested_model"]["default"], "")
         self.assertEqual(annotations["effective_model"]["default"], "")
-        self.assertEqual(annotations["requested_critique_model"]["default"], "")
-        self.assertEqual(annotations["effective_critique_model"]["default"], "")
         self.assertFalse(annotations["model_fallback"]["default"])
 
 
@@ -132,20 +130,16 @@ class TestSessionModelRouting(unittest.TestCase):
         BPY.data.scenes.clear()
         shutil.rmtree(self.workdir, ignore_errors=True)
 
-    def _session(self, agent="CODEX", codex_model="ASTRA",
-                 gen_model="DEFAULT", critique_model="DEFAULT"):
+    def _session(self, codex_model="ASTRA"):
         PREFS.current = SimpleNamespace(
             codex_model=codex_model,
-            gen_model=gen_model,
-            critique_model=critique_model,
             timeout=30,
             use_multiview=False,
             use_library=False,
         )
         return SESSION.GenerationSession(
-            scene_name="Scene", uid=7, request="crate", agent=agent,
-            exe="codex" if agent == "CODEX" else "claude",
-            max_iterations=3,
+            scene_name="Scene", uid=7, request="crate",
+            exe="codex",
         )
 
     def test_astra_preference_reaches_initial_codex_command(self):
@@ -157,44 +151,12 @@ class TestSessionModelRouting(unittest.TestCase):
         self.assertEqual(command[command.index("-m") + 1], "gpt-6-astra")
         self.assertEqual(self.job.requested_model, "GPT-6 Astra")
         self.assertEqual(self.job.effective_model, "GPT-6 Astra")
-        self.assertEqual(self.job.requested_critique_model, "GPT-6 Astra")
-        self.assertEqual(self.job.effective_critique_model, "GPT-6 Astra")
         self.assertFalse(self.job.model_fallback)
 
-    def test_default_preference_omits_initial_model_flag(self):
+    def test_old_default_preference_still_starts_astra(self):
         session = self._session(codex_model="DEFAULT")
-
-        command = session.backend.build_initial_command("prompt")
-
-        self.assertNotIn("-m", command)
-        self.assertEqual(self.job.requested_model, "Codex CLI 기본 모델")
-        self.assertEqual(self.job.effective_model, "Codex CLI 기본 모델")
-        self.assertEqual(self.job.requested_critique_model, "Codex CLI 기본 모델")
-        self.assertEqual(self.job.effective_critique_model, "Codex CLI 기본 모델")
-
-    def test_claude_generation_and_critique_models_are_preserved(self):
-        session = self._session(agent="CLAUDE", gen_model="sonnet",
-                                critique_model="haiku")
-
-        self.assertEqual(session.backend.model, "sonnet")
-        self.assertEqual(session.backend.critique_model, "haiku")
-        self.assertEqual(self.job.requested_model, "Sonnet")
-        self.assertEqual(self.job.effective_model, "Sonnet")
-        self.assertEqual(self.job.requested_critique_model, "Haiku")
-        self.assertEqual(self.job.effective_critique_model, "Haiku")
-        self.assertEqual(session._model_label(critique=True), "Haiku")
-
-    def test_started_claude_model_snapshot_ignores_later_preferences(self):
-        session = self._session(agent="CLAUDE", gen_model="sonnet",
-                                critique_model="haiku")
-
-        PREFS.current.gen_model = "opus"
-        PREFS.current.critique_model = "opus"
-
-        self.assertEqual(session.requested_model_label, "Sonnet")
-        self.assertEqual(session.requested_critique_model_label, "Haiku")
-        self.assertEqual(self.job.requested_model, "Sonnet")
-        self.assertEqual(self.job.requested_critique_model, "Haiku")
+        self.assertEqual(session.backend.model, "gpt-6-astra")
+        self.assertEqual(session.max_iterations, 1)
 
     def test_start_log_records_requested_and_effective_provider_models(self):
         session = self._session()
@@ -208,37 +170,26 @@ class TestSessionModelRouting(unittest.TestCase):
             session.start()
 
         self.assertIn(
-            "요청 모델: provider=codex, generation=GPT-6 Astra, critique=GPT-6 Astra",
+            "요청 모델: provider=codex, generation=GPT-6 Astra",
             self.job.log,
         )
         self.assertIn(
-            "실제 모델: provider=codex, generation=GPT-6 Astra, critique=GPT-6 Astra",
+            "실제 모델: provider=codex, generation=GPT-6 Astra",
             self.job.log,
         )
 
-    def test_success_finish_preserves_generation_and_critique_models(self):
-        session = self._session(agent="CLAUDE", gen_model="sonnet",
-                                critique_model="haiku")
-        session.last_code = "print('done')"
+    def test_success_finish_preserves_model(self):
+        session = self._session()
+        session.last_code = "print(1)"
         session._archive = lambda code: "entry-1"
-        SESSION._sessions[session.uid] = session
-
-        with (
-            patch.object(SESSION.scheduler, "cancel_job", create=True),
-            patch.object(SESSION.runner, "remove_keepalive", create=True),
-        ):
+        with (patch.object(SESSION.scheduler, "cancel_job", create=True),
+              patch.object(SESSION.runner, "remove_keepalive", create=True)):
             session._finish("완료", ok=True)
-
         self.assertEqual(self.job.state, "DONE")
-        self.assertEqual(self.job.effective_model, "Sonnet")
-        self.assertEqual(self.job.effective_critique_model, "Haiku")
-        self.assertIn(
-            "실제 모델: provider=claude, generation=Sonnet, critique=Haiku",
-            self.job.log,
-        )
+        self.assertEqual(self.job.effective_model, "GPT-6 Astra")
 
     def test_dispatch_caches_original_prompt_and_copies_images(self):
-        session = self._session(agent="CLAUDE")
+        session = self._session()
         session._submit_ai = lambda fn: None
         images = ["view.png"]
 
@@ -276,26 +227,12 @@ class TestSessionModelFallback(unittest.TestCase):
         self.assertIn("view.png", launched[0][0])
         self.assertTrue(session.model_fallback_used)
         self.assertEqual(session.effective_model_label, "Codex CLI 기본 모델")
-        self.assertEqual(session.effective_critique_model_label,
-                         "Codex CLI 기본 모델")
-        self.assertEqual(self.job.effective_critique_model,
-                         "Codex CLI 기본 모델")
         self.assertTrue(self.job.model_fallback)
         self.assertIn("gpt-6-astra does not exist", self.job.log)
         self.assertIn(
-            "실제 모델: provider=codex, generation=Codex CLI 기본 모델, "
-            "critique=Codex CLI 기본 모델",
+            "실제 모델: provider=codex, generation=Codex CLI 기본 모델",
             self.job.log,
         )
-
-    def test_improve_fallback_preserves_critique_phase(self):
-        session = self._session()
-        session._submit_ai = lambda fn: None
-        self.job.phase = "CRITIQUE"
-        session._dispatch("개선 요청", images=["view.png"])
-
-        self.assertTrue(session._try_model_fallback(ASTRA_ERROR))
-        self.assertEqual(self.job.phase, "CRITIQUE")
 
     def test_model_fallback_is_single_use(self):
         session = self._session()
@@ -357,11 +294,9 @@ class TestResetStaleModelTracking(unittest.TestCase):
             status_hint="이전 안내",
             log="이전 로그",
             iteration=3,
-            phase="CRITIQUE",
+            phase="GEN",
             requested_model="GPT-6 Astra",
             effective_model="Codex CLI 기본 모델",
-            requested_critique_model="GPT-6 Astra",
-            effective_critique_model="Codex CLI 기본 모델",
             model_fallback=True,
         )
         context = SimpleNamespace(
@@ -371,8 +306,6 @@ class TestResetStaleModelTracking(unittest.TestCase):
             self.assertEqual(current_job.phase, "")
             self.assertEqual(current_job.requested_model, "")
             self.assertEqual(current_job.effective_model, "")
-            self.assertEqual(current_job.requested_critique_model, "")
-            self.assertEqual(current_job.effective_critique_model, "")
             self.assertFalse(current_job.model_fallback)
             return "Codex CLI를 찾을 수 없습니다"
 
@@ -389,11 +322,9 @@ class TestResetStaleModelTracking(unittest.TestCase):
             uid=41,
             state="RUNNING",
             status="실행 중",
-            phase="CRITIQUE",
-            requested_model="Sonnet",
-            effective_model="Sonnet",
-            requested_critique_model="Haiku",
-            effective_critique_model="Haiku",
+            phase="GEN",
+            requested_model="GPT-6 Astra",
+            effective_model="GPT-6 Astra",
             model_fallback=True,
         )
         props = SimpleNamespace(jobs=[job])
@@ -404,10 +335,48 @@ class TestResetStaleModelTracking(unittest.TestCase):
         self.assertEqual(job.state, "PENDING")
         self.assertEqual(job.requested_model, "")
         self.assertEqual(job.effective_model, "")
-        self.assertEqual(job.requested_critique_model, "")
-        self.assertEqual(job.effective_critique_model, "")
         self.assertFalse(job.model_fallback)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestSingleGeneration(unittest.TestCase):
+    setUp = TestSessionModelRouting.setUp
+    tearDown = TestSessionModelRouting.tearDown
+    _session = TestSessionModelRouting._session
+
+    def test_first_success_finalizes_without_another_ai_request(self):
+        for status in ("REVISE", "DONE"):
+            with self.subTest(status=status):
+                session = self._session()
+                with (patch.object(SESSION.executor, "execute",
+                                   return_value=(True, None), create=True),
+                      patch.object(session, "_finalize") as finalize,
+                      patch.object(session, "_dispatch") as dispatch):
+                    session._blender_execute("model_code", status)
+                finalize.assert_called_once_with()
+                dispatch.assert_not_called()
+                self.assertEqual(session.iteration, 1)
+                self.assertEqual(session.last_code, "model_code")
+
+    def test_done_without_code_requires_code_and_never_finalizes(self):
+        session = self._session()
+        with (patch.object(session.backend, "parse_response",
+                           return_value=SimpleNamespace(text="STATUS: DONE", session_id=None)),
+              patch.object(session, "_dispatch") as dispatch,
+              patch.object(session, "_finalize") as finalize):
+            session._handle_response("", None)
+        dispatch.assert_called_once()
+        finalize.assert_not_called()
+
+    def test_execution_failure_repair_stays_in_first_turn(self):
+        session = self._session()
+        with (patch.object(SESSION.executor, "execute",
+                           return_value=(False, "ValueError: invalid"), create=True),
+              patch.object(SESSION.prompts, "build_error_prompt",
+                           return_value="오류 복구", create=True),
+              patch.object(session, "_dispatch") as dispatch):
+            session._blender_execute("bad_code", "DONE")
+        dispatch.assert_called_once_with("오류 복구")
+        self.assertEqual(session.iteration, 1)

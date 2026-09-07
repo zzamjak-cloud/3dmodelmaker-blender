@@ -8,16 +8,32 @@
 #
 # 사용법: ./scripts/dev_run.sh [블렌더버전, 기본 5.2]
 # Windows는 scripts/dev_run.ps1 을 쓴다.
-set -e
-VERSION="${1:-5.2}"
+set -eu
+VERSION="${BLENDER_VERSION:-5.2}"
+if [[ "${1:-}" == <->.<-> ]]; then
+    VERSION="$1"
+    shift
+fi
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
+[[ -f "$SRC/blender_manifest.toml" ]] || { echo "매니페스트를 찾을 수 없습니다" >&2; exit 1; }
+ADDON_ID="$(sed -n 's/^id = "\([^"]*\)"/\1/p' "$SRC/blender_manifest.toml")"
+[[ "$ADDON_ID" == lp3d_modelmaker ]] || { echo "예상하지 못한 Extension ID입니다" >&2; exit 1; }
 PROFILE="$HOME/Library/Application Support/Blender/LP3DModelMakerDev/$VERSION"
 EXT_DIR="$PROFILE/extensions/user_default"
-
+LINK="$EXT_DIR/$ADDON_ID"
+BINARY="${BLENDER_BINARY:-/Applications/Blender.app/Contents/MacOS/Blender}"
+[[ -x "$BINARY" ]] || { echo "Blender 실행 파일을 찾을 수 없습니다: $BINARY" >&2; exit 1; }
 mkdir -p "$EXT_DIR"
-ln -sfn "$SRC" "$EXT_DIR/lp3d_modelmaker"
+if [[ -e "$LINK" && ! -L "$LINK" ]]; then
+    echo "소스 링크 자리에 실제 파일이나 폴더가 있습니다: $LINK" >&2
+    exit 1
+fi
+TEMP_LINK="$EXT_DIR/.$ADDON_ID.$$"
+trap 'rm -f "$TEMP_LINK"' EXIT
+ln -s "$SRC" "$TEMP_LINK"
+mv -fh "$TEMP_LINK" "$LINK"
 echo "격리 프로필: $PROFILE"
-echo "소스 링크:   $EXT_DIR/lp3d_modelmaker -> $SRC"
+echo "소스 링크: $LINK -> $SRC"
 
 export BLENDER_USER_RESOURCES="$PROFILE"
-exec /Applications/Blender.app/Contents/MacOS/Blender
+exec "$BINARY" --python-exit-code 1 --python "$SRC/scripts/dev_bootstrap.py" "$@"

@@ -30,7 +30,7 @@ class CodexBackend(AgentBackend):
         model = ["-m", self.model] if self.model else []
         cmd = [self.exe, "exec", *model, *self._common_flags()]
         for img in images or []:
-            cmd += ["-i", img]  # 개선 세션: 첫 턴부터 캡처 첨부
+            cmd += ["-i", img]  # 참조 이미지를 첫 요청에 첨부
         cmd.append("-")
         return cmd
 

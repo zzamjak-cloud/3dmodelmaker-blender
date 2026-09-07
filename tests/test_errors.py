@@ -65,9 +65,6 @@ class TestDescribe(unittest.TestCase):
     def test_action_carries_the_login_command(self):
         self.assertIn("codex login", errors.action(CODEX_AUTH, "codex"))
 
-    def test_claude_gets_its_own_login_command(self):
-        self.assertIn("claude login", errors.action("401 Unauthorized", "claude"))
-
     def test_action_empty_when_cause_unknown(self):
         self.assertEqual(errors.action("ValueError: bad mesh", "codex"), "")
 

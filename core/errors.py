@@ -44,7 +44,7 @@ _HINTS = {
     MISSING: ("{cli} 실행 파일 없음", "환경설정에서 CLI 경로를 지정하세요"),
 }
 
-_LOGIN_CMD = {"codex": "codex login", "claude": "claude login"}
+_LOGIN_CMD = {"codex": "codex login"}
 
 # stderr 잡음(MCP 서버 연결 실패 등)은 원인이 아니므로 상세 줄에서 제외한다
 _NOISE = ("rmcp::transport", "mcp client", "worker quit with fatal")
@@ -94,7 +94,7 @@ def classify(error: str) -> str:
 
 def _fill(text: str, agent: str) -> str:
     cli = (agent or "CLI").lower()
-    cli = "codex" if "codex" in cli else ("claude" if "claude" in cli else cli)
+    cli = "codex" if "codex" in cli else cli
     return text.format(cli=cli, login=_LOGIN_CMD.get(cli, f"{cli} login"))
 
 

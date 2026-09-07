@@ -1,7 +1,7 @@
 # 설정 영속화: 애드온 업데이트·스키마 변경·새 .blend 파일에서도 사용자 설정 유지
 #
 # AddonPreferences는 프로퍼티 타입이 바뀌면(예: String→Enum) 저장값이 초기화되고,
-# 씬 프로퍼티(agent, 반복 수, 익스포트 폴더)는 .blend 파일에 종속된다.
+# 씬 프로퍼티(익스포트 폴더)는 .blend 파일에 종속된다.
 # 그래서 사용자 설정을 Blender config 폴더의 JSON에 별도 저장하고
 # 등록/파일 열기 시점에 복원한다.
 import json
@@ -9,12 +9,11 @@ import os
 
 import bpy
 
-_PREF_KEYS = ("claude_path", "codex_path", "codex_model", "gen_model", "critique_model",
-              "timeout", "ai_concurrency", "capture_count", "capture_resolution",
-              "use_multiview", "keep_turn_snapshots", "use_library",
+_PREF_KEYS = ("codex_path", "timeout", "ai_concurrency",
+              "use_multiview", "use_library",
               "asset_library_path")
-# auto_cycles(사이클 단위) -> auto_turns(턴 단위 1:1) 키 교체 — 구버전 저장값은 무시된다
-_SCENE_KEYS = ("agent", "auto_turns", "export_dir")
+# 제거된 모델·턴 설정은 복원하지 않아 구버전 파일도 현재 생성 정책을 따른다.
+_SCENE_KEYS = ("export_dir",)
 
 _suspended = False  # 복원 중 update 콜백의 재저장 방지
 
@@ -50,7 +49,7 @@ def on_prefs_changed(prefs):
 
 
 def on_scene_changed(props):
-    """씬 설정(agent/반복/익스포트 폴더) update 콜백."""
+    """익스포트 폴더 설정 update 콜백."""
     if _suspended:
         return
     data = _load()

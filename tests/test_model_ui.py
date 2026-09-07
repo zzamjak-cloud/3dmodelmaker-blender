@@ -43,55 +43,19 @@ class TestJobModelLabel(unittest.TestCase):
         )
 
 
-class TestStageModelLabels(unittest.TestCase):
-    def test_started_claude_job_uses_saved_generation_and_critique_models(self):
-        """실행 중 환경설정이 바뀌어도 시작 시 모델 snapshot을 표시한다."""
-        labels = models.stage_model_labels(
-            state="RUNNING",
-            requested_model="Sonnet",
-            effective_model="Sonnet",
-            requested_critique_model="Haiku",
-            effective_critique_model="Haiku",
-            scheduled_model="Opus",
-            scheduled_critique_model="Opus",
-        )
+class TestGenerationModelLabel(unittest.TestCase):
+    def test_fallback_job_uses_effective_model(self):
+        self.assertEqual(models.generation_model_label(
+            "RUNNING", "GPT-6 Astra", "Codex CLI 기본 모델"),
+            "Codex CLI 기본 모델")
 
-        self.assertEqual(labels, ("Sonnet", "Haiku"))
+    def test_pending_job_uses_astra(self):
+        self.assertEqual(models.generation_model_label("PENDING", "", ""),
+                         "GPT-6 Astra")
 
-    def test_pending_job_uses_current_scheduled_models(self):
-        """아직 시작하지 않은 job만 현재 환경설정으로 예정 모델을 계산한다."""
-        labels = models.stage_model_labels(
-            state="PENDING",
-            requested_model="",
-            effective_model="",
-            requested_critique_model="",
-            effective_critique_model="",
-            scheduled_model="Sonnet",
-            scheduled_critique_model="Haiku",
-        )
-
-        self.assertEqual(labels, ("Sonnet", "Haiku"))
-
-    def test_completed_legacy_job_does_not_claim_current_preferences(self):
-        """모델 snapshot이 없는 완료 job은 현재 설정을 과거 기록처럼 쓰지 않는다."""
-        labels = models.stage_model_labels(
-            state="DONE",
-            requested_model="",
-            effective_model="",
-            requested_critique_model="",
-            effective_critique_model="",
-            scheduled_model="Opus",
-            scheduled_critique_model="Haiku",
-        )
-
-        self.assertEqual(labels, ("모델 기록 없음", "모델 기록 없음"))
-
-    def test_critique_phase_uses_critique_model_as_current(self):
-        """비평 단계의 현재 모델은 생성 모델이 아니라 비평 모델이다."""
-        self.assertEqual(
-            models.current_model_label("CRITIQUE", "Sonnet", "Haiku"),
-            "Haiku",
-        )
+    def test_completed_legacy_job_does_not_claim_astra(self):
+        self.assertEqual(models.generation_model_label("DONE", "", ""),
+                         "모델 기록 없음")
 
 
 if __name__ == "__main__":

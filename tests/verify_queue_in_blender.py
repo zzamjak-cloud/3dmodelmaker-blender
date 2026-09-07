@@ -7,7 +7,7 @@
 #
 # 실행:
 #   .\scripts\dev_run.ps1 -Background -PythonFile tests\verify_queue_in_blender.py
-#   ./scripts/dev_link.sh && blender -b --python tests/verify_queue_in_blender.py
+#   ./scripts/dev_run.sh --background --python tests/verify_queue_in_blender.py
 import bpy
 from bl_ext.user_default.lp3d_modelmaker.core import jobs, lanes, scheduler, session
 
@@ -32,14 +32,14 @@ try:
     check("uid 조회 실패는 None", props.job_by_uid(999) is None)
 
     # 2) 잡 추가와 레인 배정 — 레인이 겹치면 배치 결과가 원점에 포개진다
-    # 새 scene과 새 job의 Codex 기본값 및 모델 추적 초기값을 함께 확인한다.
-    check("새 scene 기본 에이전트 Codex", props.agent == 'CODEX', props.agent)
+    # 새 scene과 새 job에 제거된 에이전트 선택 속성이 남지 않아야 한다.
+    check("새 scene 에이전트 선택 제거", not hasattr(props, "agent"))
     a = jobs.add_job(props, "나무 상자")
-    check("새 job 기본 에이전트 Codex", a.agent == 'CODEX', a.agent)
+    check("새 job 에이전트 선택 제거", not hasattr(a, "agent"))
     check("새 job 생성 모델 추적값 초기 상태",
           not a.requested_model and not a.effective_model)
-    check("새 job 비평 모델 추적값 초기 상태",
-          not a.requested_critique_model and not a.effective_critique_model)
+    check("새 job 비평 모델 추적값 제거",
+          not hasattr(a, "requested_critique_model") and not hasattr(a, "effective_critique_model"))
     check("새 job fallback 초기값 false", a.model_fallback is False)
     b = jobs.add_job(props, "돌 항아리")
     c = jobs.add_job(props, "철제 랜턴")
@@ -75,7 +75,7 @@ try:
         jobs.remove_job(bpy.context, 0)
     check("전부 삭제 후 active_job=None", props.active_job() is None)
 
-    # 6) 레인 오프셋 멱등성 — 개선하기를 누를 때마다 모델이 +Y로 밀려나던 결함의 회귀 검사
+    # 6) 레인 오프셋 멱등성 — 재적용으로 모델이 중복 이동하지 않아야 한다.
     coll = bpy.data.collections.new("LP3D_LaneProbe")
     bpy.context.scene.collection.children.link(coll)
     obj = bpy.data.objects.new("LP3D_LaneProbeObj", bpy.data.meshes.new("LP3D_LaneProbeMesh"))
@@ -108,15 +108,11 @@ try:
     stuck.state = 'RUNNING'
     stuck.requested_model = "GPT-6 Astra"
     stuck.effective_model = "Codex CLI 기본 모델"
-    stuck.requested_critique_model = "GPT-6 Astra"
-    stuck.effective_critique_model = "Codex CLI 기본 모델"
     stuck.model_fallback = True
     check("reset_stale 1건 처리", jobs.reset_stale(props) == 1)
     check("RUNNING -> PENDING", stuck.state == 'PENDING', stuck.state)
     check("reset_stale 생성 모델 추적값 초기화",
           not stuck.requested_model and not stuck.effective_model)
-    check("reset_stale 비평 모델 추적값 초기화",
-          not stuck.requested_critique_model and not stuck.effective_critique_model)
     check("reset_stale fallback 초기화", stuck.model_fallback is False)
     jobs.remove_job(bpy.context, len(props.jobs) - 1)
 

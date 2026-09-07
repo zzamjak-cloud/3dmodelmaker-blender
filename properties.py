@@ -1,4 +1,4 @@
-# 씬 단위 상태: 프롬프트, 에이전트 선택, 진행 상태, 로그
+# 씬 단위 상태: 프롬프트, 진행 상태, 로그
 import bpy
 from bpy.app.handlers import persistent
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty,
@@ -7,7 +7,7 @@ from bpy.props import (BoolProperty, CollectionProperty, EnumProperty,
 
 
 def _persist_cb(self, context):
-    # 에이전트·반복 수·익스포트 폴더는 파일이 바뀌어도 유지되도록 JSON에 저장
+    # 익스포트 폴더는 파일이 바뀌어도 유지되도록 JSON에 저장
     from .core import persist
     persist.on_scene_changed(self)
 
@@ -37,26 +37,8 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     )
     ref_image_path: StringProperty(
         name="참조 이미지",
-        description="모델링 시 참고할 이미지 (선택) — 형태·비율·색 구성을 이 이미지에 맞춰 생성·개선",
+        description="모델링 시 참고할 이미지 (선택) — 형태·비율·색 구성을 이 이미지에 맞춰 생성",
         subtype='FILE_PATH',
-        default="",
-    )
-    agent: EnumProperty(
-        name="에이전트",
-        items=[
-            ('CLAUDE', "Claude", "claude -p 서브프로세스 사용"),
-            ('CODEX', "Codex", "codex exec 서브프로세스 사용"),
-        ],
-        default='CODEX',
-    )
-    auto_turns: IntProperty(
-        name="자동 반복(턴)",
-        description="자동 시각 피드백 루프의 총 턴 수 — 값 그대로가 턴 수 (권장 3: 생성 1 + 비평·개선 2)",
-        default=3, min=1, max=9,
-    )
-    improve_feedback: StringProperty(
-        name="개선 요청",
-        description="어디가 마음에 안 드는지 설명 (선택 — 비워두면 자동 비평만으로 개선)",
         default="",
     )
 
@@ -75,7 +57,7 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     # 실패 시 사용자가 할 일 (예: "터미널에서 `codex login` 실행 후 다시 시도").
     # 상태줄에 함께 넣으면 사이드바 폭에서 가운데가 잘려 정작 조치가 사라진다.
     status_hint: StringProperty(default="")
-    phase: StringProperty(default="")        # GEN/EXEC/CAPTURE/CRITIQUE/FINAL
+    phase: StringProperty(default="")        # GEN/EXEC/FINAL
     started_at: FloatProperty(default=0.0)   # 경과 시간 표시용
     iteration: IntProperty(default=0)
     total_turns: IntProperty(default=0)
@@ -89,8 +71,6 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     lane: IntProperty(default=0)                # 결과를 Y축으로 밀어둘 레인 번호
     requested_model: StringProperty(default="")           # 생성 요청 모델 snapshot
     effective_model: StringProperty(default="")           # 실제 생성 모델 snapshot
-    requested_critique_model: StringProperty(default="")  # 비평 요청 모델 snapshot
-    effective_critique_model: StringProperty(default="")  # 실제 비평 모델 snapshot
     model_fallback: BoolProperty(default=False)             # Astra fallback 여부
 
 
@@ -101,21 +81,6 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
     next_uid: IntProperty(default=1)  # 다음 항목에 발급할 uid
 
     # --- 새 항목의 기본값이 되는 씬 설정 (설정 JSON으로 영속화) ---
-    agent: EnumProperty(
-        name="에이전트",
-        items=[
-            ('CLAUDE', "Claude", "claude -p 서브프로세스 사용"),
-            ('CODEX', "Codex", "codex exec 서브프로세스 사용"),
-        ],
-        default='CODEX',
-        update=_persist_cb,
-    )
-    auto_turns: IntProperty(
-        name="자동 반복(턴)",
-        description="새 항목에 적용할 기본 턴 수 — 값 그대로가 턴 수 (권장 3)",
-        default=3, min=1, max=9,
-        update=_persist_cb,
-    )
     export_dir: StringProperty(
         name="익스포트 폴더",
         subtype='DIR_PATH',
@@ -142,7 +107,7 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
 
 
 def _apply_saved(scene=None):
-    """저장된 씬 설정(agent/반복/익스포트 폴더)을 복원하고, 멈춘 잡 상태를 정리한다."""
+    """저장된 익스포트 폴더를 복원하고, 멈춘 잡 상태를 정리한다."""
     from .core import jobs, persist
     scenes = [scene] if scene else bpy.data.scenes
     for sc in scenes:

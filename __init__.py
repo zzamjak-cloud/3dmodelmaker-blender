@@ -1,7 +1,8 @@
-# AI LowPoly ModelMaker — Claude/Codex CLI 에이전트로 로우폴리 모델을 생성하는 애드온
+# AI LowPoly ModelMaker — GPT-6 Astra로 로우폴리 모델을 생성하는 애드온
 import importlib
 import pkgutil
 import sys
+from pathlib import Path
 
 from . import preferences, properties
 from .ui import operators, panel, previews
@@ -35,6 +36,13 @@ def _reload_targets():
     _discover_submodules()
     prefix = __package__ + "."
     names = [n for n in sys.modules if n.startswith(prefix) and sys.modules[n] is not None]
+    # 업데이트로 삭제된 모듈은 실행 중 세션에 남아 있어도 다시 로드하지 않는다.
+    removed = [n for n in names
+               if getattr(sys.modules[n], "__file__", None)
+               and not Path(sys.modules[n].__file__).is_file()]
+    for name in removed:
+        sys.modules.pop(name, None)
+    names = [n for n in names if n not in removed]
     # ui.* 는 _MODULES에서 따로 리로드하므로 제외
     names = [n for n in names if not n.startswith(prefix + "ui")]
     names.sort(key=lambda n: (-n.count("."), n))

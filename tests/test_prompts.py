@@ -29,32 +29,17 @@ class TestRefImage(unittest.TestCase):
         self.assertIn("reference.png", p)
         self.assertIn("참조 이미지", p)
 
-    def test_critique_with_ref(self):
-        p = prompts.build_critique_prompt(["capture_0.png"], {"tris": 100}, 2, 3,
-                                          allow_done=True, ref_image="reference.jpg")
-        self.assertIn("reference.jpg", p)
-        self.assertIn("참조", p)
-
-    def test_critique_without_ref(self):
-        p = prompts.build_critique_prompt(["capture_0.png"], {"tris": 100}, 2, 3)
-        self.assertNotIn("참조 이미지", p)
-
-    def test_improve_with_ref(self):
-        p = prompts.build_improve_prompt("배럴", "code", "더 낡게", ["cap.png"],
-                                         {"tris": 100}, ref_image="reference.png")
-        self.assertIn("reference.png", p)
+    def test_removed_followup_prompts_are_unavailable(self):
+        self.assertFalse(hasattr(prompts, "build_critique_prompt"))
+        self.assertFalse(hasattr(prompts, "build_improve_prompt"))
 
     def test_budget_is_10k(self):
-        # 시스템/비평 프롬프트의 버짓이 10000으로 일치해야 한다
+        # 첫 생성의 기존 품질 기준은 유지한다.
         with open(os.path.join(_ROOT, "prompts", "system_lowpoly.md"), encoding="utf-8") as f:
             sys_md = f.read()
-        with open(os.path.join(_ROOT, "prompts", "critique.md"), encoding="utf-8") as f:
-            crit_md = f.read()
         self.assertIn("10000", sys_md)
-        self.assertIn("10000", crit_md)
         for old in ("≤ 1500", "≤ 5000", "프랍 1500"):
             self.assertNotIn(old, sys_md)
-            self.assertNotIn(old, crit_md)
 
 
 if __name__ == "__main__":

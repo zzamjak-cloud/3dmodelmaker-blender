@@ -39,16 +39,9 @@ _MODEL_UNAVAILABLE_PHRASES = (
 _MCP_NOISE_PHRASES = ("rmcp::transport", "mcp client", "worker quit with fatal")
 
 
-def codex_model_id(selection: str) -> str:
-    """저장된 Codex 모델 선택을 CLI model ID로 변환한다."""
-    return ASTRA_ID if selection == "ASTRA" else ""
-
-
 def model_label(agent: str, model_id: str) -> str:
     """job 상태와 로그에 사용할 안정적인 모델 표시명을 반환한다."""
-    if agent == "CODEX":
-        return "GPT-6 Astra" if model_id == ASTRA_ID else CODEX_DEFAULT_LABEL
-    return model_id.capitalize() if model_id else "기본 모델"
+    return "GPT-6 Astra" if model_id == ASTRA_ID else CODEX_DEFAULT_LABEL
 
 
 def job_model_label(requested_model: str, effective_model: str, fallback: bool) -> str:
@@ -59,36 +52,15 @@ def job_model_label(requested_model: str, effective_model: str, fallback: bool) 
     return f"예정 모델: {requested_model or '기본 모델'}"
 
 
-def stage_model_labels(
-        state: str,
-        requested_model: str,
-        effective_model: str,
-        requested_critique_model: str,
-        effective_critique_model: str,
-        scheduled_model: str,
-        scheduled_critique_model: str) -> tuple:
-    """job snapshot과 상태에 따라 생성/비평 모델 표시명을 반환한다.
-
-    시작한 job은 저장된 값을 우선한다. snapshot이 없는 구버전 job은 대기 중일
-    때만 현재 환경설정을 예정값으로 쓰고, 종료된 job에는 기록 부재를 명시한다.
-    """
+def generation_model_label(state: str, requested_model: str,
+                           effective_model: str) -> str:
+    """실행 기록을 우선하고, 새 대기 항목에는 Astra를 예정 모델로 표시한다."""
     generation = effective_model or requested_model
-    critique = effective_critique_model or requested_critique_model
-    if generation or critique:
-        generation = generation or critique
-        critique = critique or generation
-        return generation, critique
+    if generation:
+        return generation
     if state == "PENDING":
-        generation = scheduled_model or "기본 모델"
-        critique = scheduled_critique_model or generation
-        return generation, critique
-    return NO_MODEL_RECORD_LABEL, NO_MODEL_RECORD_LABEL
-
-
-def current_model_label(phase: str, generation_model: str,
-                        critique_model: str) -> str:
-    """현재 단계에서 실제로 사용하는 모델 표시명을 반환한다."""
-    return critique_model if phase == "CRITIQUE" else generation_model
+        return model_label("CODEX", ASTRA_ID)
+    return NO_MODEL_RECORD_LABEL
 
 
 def is_model_unavailable(error: str, model_id: str) -> bool:

@@ -6,6 +6,10 @@
 import os
 import re
 import unittest
+import importlib.util
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -59,6 +63,47 @@ class TestNoStaleSceneProps(unittest.TestCase):
                      "new_job.status = f'실패: {error}'", "self.log = ''",
                      "if props.status == 'x':"):
             self.assertIsNone(_PATTERN.search(line), line)
+
+
+class TestLegacySettings(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "legacy_settings_persist", os.path.join(_ROOT, "core", "persist.py"))
+        self.persist = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"bpy": SimpleNamespace()}):
+            spec.loader.exec_module(self.persist)
+
+    def test_legacy_model_and_turn_settings_are_not_restored(self):
+        """구버전 설정은 익스포트·CLI 경로만 복원하고 삭제한 설정을 되살리지 않는다."""
+        stored = {
+            "prefs": {
+                "claude_path": "/old/claude", "codex_model": "DEFAULT",
+                "gen_model": "opus", "critique_model": "haiku",
+                "keep_turn_snapshots": True, "capture_count": 6,
+                "capture_resolution": 1024,
+                "codex_path": "/local/codex", "timeout": 600,
+            },
+            "scene": {"agent": "CLAUDE", "auto_turns": 9,
+                      "auto_cycles": 3, "export_dir": "/exports"},
+        }
+        prefs = SimpleNamespace(codex_path="", timeout=300)
+        props = SimpleNamespace(export_dir="//exports/", bl_rna=SimpleNamespace(
+            properties={"export_dir": SimpleNamespace(default="//exports/")}))
+        with patch.object(self.persist, "_load", return_value=stored):
+            self.persist.apply_prefs(prefs)
+            self.persist.apply_scene(props)
+        self.assertEqual(vars(prefs), {"codex_path": "/local/codex", "timeout": 600})
+        self.assertEqual(props.export_dir, "/exports")
+        self.assertFalse(hasattr(props, "agent"))
+        self.assertFalse(hasattr(props, "auto_turns"))
+
+    def test_scene_export_override_is_preserved(self):
+        props = SimpleNamespace(export_dir="/blend-specific", bl_rna=SimpleNamespace(
+            properties={"export_dir": SimpleNamespace(default="//exports/")}))
+        with patch.object(self.persist, "_load", return_value={
+                "scene": {"export_dir": "/saved"}}):
+            self.persist.apply_scene(props)
+        self.assertEqual(props.export_dir, "/blend-specific")
 
 
 if __name__ == "__main__":

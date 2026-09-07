@@ -19,21 +19,15 @@ def _clear_model_tracking(job):
     job.phase = ""
     job.requested_model = ""
     job.effective_model = ""
-    job.requested_critique_model = ""
-    job.effective_critique_model = ""
     job.model_fallback = False
 
 
 def add_job(props, prompt: str = ""):
-    """새 잡 항목을 만들어 리스트 끝에 붙이고 선택 상태로 만든다.
-
-    에이전트·턴 수는 씬 기본값을 상속한다 (항목별로 나중에 바꿀 수 있다)."""
+    """새 잡 항목을 만들어 리스트 끝에 붙이고 선택 상태로 만든다."""
     job = props.jobs.add()
     job.uid = props.next_uid
     props.next_uid += 1
     job.prompt = prompt
-    job.agent = props.agent
-    job.auto_turns = props.auto_turns
     job.lane = next_lane(props)
     props.job_index = len(props.jobs) - 1
     return job
@@ -62,12 +56,8 @@ def duplicate_job(props, index: int):
     # 원본 값을 먼저 복사해둔다 — props.jobs.add()가 컬렉션을 재할당하면
     # 앞서 얻은 항목 참조(src)가 무효가 되어 접근 시 크래시할 수 있다
     src = props.jobs[index]
-    # improve_feedback은 일부러 뺀다 — 원본의 완성된 결과에 대한 피드백이라
-    # 결과가 없는 새 대기 항목에 붙으면 첫 [개선하기]에 엉뚱하게 반영된다
     values = {
         "ref_image_path": src.ref_image_path,
-        "agent": src.agent,
-        "auto_turns": src.auto_turns,
     }
     job = add_job(props, src.prompt)
     for key, value in values.items():

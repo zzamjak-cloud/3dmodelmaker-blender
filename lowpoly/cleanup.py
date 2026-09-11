@@ -1,21 +1,51 @@
 # 게임레디 정리 패스 + 은면 컬링 + 메시 QA 지표
+import math
+from collections import deque
+
 import bmesh
 import bpy
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
-# 은면 판정용 레이 방향(26방향). 면의 노멀 방향을 포함해 어느 방향으로도
-# 바깥으로 나가지 못하는(전부 막힌) 면만 내부로 판정한다.
-_CULL_DIRECTIONS = tuple(
+# ---------- 은면 판정 ----------
+# 원칙: "다른 닫힌 파트 볼륨 안에 완전히 파묻힌 면"만 은면이다. 컵·관 같은 오목한
+# 공간, 노멀이 뒤집힌 면, 테두리만 노출된 면은 절대 지우지 않는다. 삭제는 되돌릴 수
+# 없으므로 판정이 애매하면 항상 살려두는 쪽을 택한다.
+
+
+def _fibonacci_sphere(count):
+    """구 표면에 고르게 분포한 단위 방향 벡터 count개."""
+    golden = math.pi * (3 - math.sqrt(5))
+    out = []
+    for i in range(count):
+        z = 1 - 2 * (i + 0.5) / count
+        r = math.sqrt(max(0.0, 1 - z * z))
+        out.append(Vector((r * math.cos(golden * i), r * math.sin(golden * i), z)))
+    return tuple(out)
+
+
+# 최종 확인용 레이 방향: 축·대각 26방향 + 피보나치 64방향 (약 18도 간격)
+_FINE_DIRECTIONS = tuple(
     Vector((x, y, z)).normalized()
     for x in (-1, 0, 1) for y in (-1, 0, 1) for z in (-1, 0, 1)
     if (x, y, z) != (0, 0, 0)
-)
-_RAY_OFFSET = 5e-4  # 면에서 노멀 방향으로 띄우는 거리(자기 면 재충돌 방지)
+) + _fibonacci_sphere(64)
+_RAY_OFFSET_MAX = 5e-4   # 면에서 띄우는 거리 상한 (자기 면 재충돌 방지)
+_SAMPLE_INSET = 0.06     # 정점/변 근처 샘플을 면 안쪽으로 들이는 비율
+
+
+def _ray_offset(objs) -> float:
+    """모델 크기에 비례한 면 오프셋 (작은 모델에서 얇은 파트를 뚫지 않도록)."""
+    pts = [o.matrix_world @ Vector(c) for o in objs for c in o.bound_box]
+    if not pts:
+        return _RAY_OFFSET_MAX
+    lo = Vector((min(p.x for p in pts), min(p.y for p in pts), min(p.z for p in pts)))
+    hi = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
+    return min(_RAY_OFFSET_MAX, max(1e-5, (hi - lo).length * 2e-4))
 
 
 def _build_world_bvh(objs):
-    """오브젝트들의 월드 공간 폴리곤 전체로 BVH를 만든다."""
+    """오브젝트들의 월드 공간 폴리곤 전체로 BVH를 만든다 (가림 판정용)."""
     verts, polys = [], []
     for obj in objs:
         mw = obj.matrix_world
@@ -28,39 +58,130 @@ def _build_world_bvh(objs):
     return BVHTree.FromPolygons(verts, polys)
 
 
-def _sees_outside(bvh, origin, normal) -> bool:
-    if bvh.ray_cast(origin, normal)[0] is None:  # 노멀 방향 우선(가장 흔한 탈출로)
-        return True
-    return any(bvh.ray_cast(origin, d)[0] is None for d in _CULL_DIRECTIONS)
+def _closed_islands(objs):
+    """오브젝트별 (면→아일랜드 번호 목록)과 전역 아일랜드 목록을 만든다.
+
+    아일랜드 = 연결된 면 묶음(파트). 닫힌(모든 변에 면이 정확히 2개) 아일랜드만
+    다른 면을 파묻을 수 있는 볼륨으로 인정해 BVH를 만들고, 열린 셸은 None으로 둔다.
+    BVH는 recalc_face_normals로 바깥 노멀을 맞춘 뒤 만들어 find_nearest의 노멀
+    부호로 내부/외부를 판정할 수 있게 한다."""
+    islands = []       # [(bvh 또는 None, aabb_min, aabb_max)]
+    face_island = {}   # obj → [면 인덱스별 전역 아일랜드 번호]
+    for obj in objs:
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        bm.transform(obj.matrix_world)   # bmesh.transform은 감기 순서를 유지 → 아래 recalc로 통일
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        bm.faces.ensure_lookup_table()
+        mapping = [-1] * len(bm.faces)
+        for seed in bm.faces:
+            if mapping[seed.index] != -1:
+                continue
+            island_id = len(islands)
+            faces, queue = [], deque([seed])
+            mapping[seed.index] = island_id
+            while queue:
+                face = queue.popleft()
+                faces.append(face)
+                for edge in face.edges:
+                    for other in edge.link_faces:
+                        if mapping[other.index] == -1:
+                            mapping[other.index] = island_id
+                            queue.append(other)
+            closed = all(len(e.link_faces) == 2 for f in faces for e in f.edges)
+            verts = {}
+            coords, polys = [], []
+            for face in faces:
+                poly = []
+                for v in face.verts:
+                    idx = verts.get(v.index)
+                    if idx is None:
+                        idx = verts[v.index] = len(coords)
+                        coords.append(v.co.copy())
+                    poly.append(idx)
+                polys.append(tuple(poly))
+            lo = Vector((min(c.x for c in coords), min(c.y for c in coords), min(c.z for c in coords)))
+            hi = Vector((max(c.x for c in coords), max(c.y for c in coords), max(c.z for c in coords)))
+            bvh = BVHTree.FromPolygons(coords, polys) if closed else None
+            islands.append((bvh, lo, hi))
+        bm.free()
+        face_island[obj] = mapping
+    return face_island, islands
 
 
-def _hidden_face_indices(obj, bvh):
-    """어느 샘플점에서도 바깥이 보이지 않는(완전히 파묻힌) 면 인덱스 목록.
+def _inside_other_island(point, own, islands, margin) -> bool:
+    """점이 자기 아일랜드가 아닌 닫힌 아일랜드 볼륨 안에 있는지."""
+    for island_id, (bvh, lo, hi) in enumerate(islands):
+        if bvh is None or island_id == own:
+            continue
+        if not (lo.x - margin <= point.x <= hi.x + margin
+                and lo.y - margin <= point.y <= hi.y + margin
+                and lo.z - margin <= point.z <= hi.z + margin):
+            continue
+        co, normal, _index, _dist = bvh.find_nearest(point)
+        if co is not None and (point - co).dot(normal) < 0:
+            return True
+    return False
+
+
+def _face_samples(mesh, mw):
+    """폴리곤 인덱스 → 면 위 월드 샘플점 목록.
 
     샘플점은 폴리곤 테셀레이션 삼각형 위에서만 뽑는다 — 오목/고리형 ngon은
-    poly.center가 면 밖(구멍 위)에 놓여 가시면을 은면으로 오판하기 때문.
-    부분만 가려진 면을 지우지 않도록 모든 샘플이 막혀야 은면으로 판정한다."""
-    mesh = obj.data
+    poly.center가 면 밖(구멍 위)에 놓이기 때문. 삼각형마다 중심·정점 근처·변 중점
+    근처 7점을 뽑아, 볼록한 가림체라면 "모든 샘플이 가려짐 ⇒ 면 전체가 가려짐"이
+    성립하게 한다(테두리만 노출된 받침대 윗면 등을 지우지 않기 위함)."""
     mesh.calc_loop_triangles()
-    mw = obj.matrix_world
-    nmat = mw.inverted_safe().transposed().to_3x3()
     wverts = [mw @ v.co for v in mesh.vertices]
-    samples = {}  # 폴리곤 인덱스 → 면 위 샘플점 목록
+    samples = {}
     for lt in mesh.loop_triangles:
-        tri = [wverts[vi] for vi in lt.vertices]
-        center = (tri[0] + tri[1] + tri[2]) / 3
+        a, b, c = (wverts[vi] for vi in lt.vertices)
+        center = (a + b + c) / 3
         pts = samples.setdefault(lt.polygon_index, [])
         pts.append(center)
-        pts.extend(v.lerp(center, 0.35) for v in tri)
+        pts.extend(v.lerp(center, _SAMPLE_INSET) for v in (a, b, c))
+        pts.extend(((p + q) / 2).lerp(center, _SAMPLE_INSET) for p, q in ((a, b), (b, c), (c, a)))
+    return samples
+
+
+def _escapes(bvh, origin, direction) -> bool:
+    return bvh.ray_cast(origin, direction)[0] is None
+
+
+def _sees_outside_fine(bvh, point, normal, eps) -> bool:
+    """면 양쪽 반구의 세밀 방향 중 하나라도 바깥으로 빠져나가는지."""
+    front, back = point + normal * eps, point - normal * eps
+    return any(_escapes(bvh, front if d.dot(normal) >= 0 else back, d) for d in _FINE_DIRECTIONS)
+
+
+def _hidden_face_indices(obj, bvh, islands, face_island, eps):
+    """다른 닫힌 파트 안에 완전히 파묻힌 면 인덱스 목록.
+
+    면의 노멀이 뒤집혀 있어도 오판하지 않도록 양쪽(±노멀) 오프셋 점을 모두 본다.
+    1) 어느 샘플이든 ±노멀 방향으로 빠져나가면 가시면 (대부분 여기서 끝난다)
+    2) 모든 샘플이 다른 닫힌 아일랜드 안에 있어야 은면 후보 (오목 공간은 탈락)
+    3) 후보만 세밀 방향으로 최종 확인 — 하나라도 빠져나가면 살려둔다"""
+    mesh = obj.data
+    mw = obj.matrix_world
+    nmat = mw.inverted_safe().transposed().to_3x3()
+    samples = _face_samples(mesh, mw)
     hidden = []
     for poly in mesh.polygons:
         normal = nmat @ poly.normal
-        if normal.length_squared < 1e-12:
+        pts = samples.get(poly.index)
+        if not pts or normal.length_squared < 1e-12:
             continue  # 퇴화면은 판정 불가 — 살려둔다
         normal.normalize()
-        pts = samples.get(poly.index)
-        if pts and not any(_sees_outside(bvh, p + normal * _RAY_OFFSET, normal) for p in pts):
-            hidden.append(poly.index)
+        if any(_escapes(bvh, p + normal * eps, normal) or _escapes(bvh, p - normal * eps, -normal)
+               for p in pts):
+            continue
+        own = face_island[poly.index] if poly.index < len(face_island) else -1
+        if not all(_inside_other_island(p + normal * eps, own, islands, eps)
+                   or _inside_other_island(p - normal * eps, own, islands, eps) for p in pts):
+            continue
+        if any(_sees_outside_fine(bvh, p, normal, eps) for p in pts):
+            continue
+        hidden.append(poly.index)
     return hidden
 
 
@@ -73,7 +194,11 @@ def find_hidden_faces(objs) -> dict:
     bvh = _build_world_bvh(objs)
     if bvh is None:
         return {}
-    return {obj: _hidden_face_indices(obj, bvh) for obj in objs}
+    face_island, islands = _closed_islands(objs)
+    if not any(island[0] is not None for island in islands):
+        return {obj: [] for obj in objs}   # 닫힌 파트가 없으면 파묻힐 곳도 없다
+    eps = _ray_offset(objs)
+    return {obj: _hidden_face_indices(obj, bvh, islands, face_island[obj], eps) for obj in objs}
 
 
 def count_hidden_faces(objs) -> int:
@@ -82,7 +207,7 @@ def count_hidden_faces(objs) -> int:
 
 
 def cull_hidden_faces(objs) -> int:
-    """겹친 파트 안에 완전히 파묻힌 면을 삭제한다. 삭제한 면 수를 반환.
+    """다른 파트 안에 완전히 파묻힌 면을 삭제한다. 삭제한 면 수를 반환.
 
     join(union)을 거치지 않은 잔여 겹침의 안전망. 메시를 공유하는 인스턴스는
     (인스턴스별 은면이 달라 공유 데이터를 훼손하므로) 건너뛴다."""

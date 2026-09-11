@@ -12,22 +12,24 @@ import os
 import struct
 import zlib
 
-# ---------- 팔레트 상수 (영구 고정 — 변경 금지) ----------
-GRID = 32          # 32x32 = 1024 셀
-CELL_PX = 8        # 셀당 픽셀
-SIZE = GRID * CELL_PX  # 256x256
+# ---------- 팔레트 상수 ----------
+# 레이아웃: 열(좌→우) = 색상 다양성, 행(아래→위) = 명도. 한 색상은 채도 4단(선명→탁함)이
+# 이웃한 4열 한 덩어리(군집)를 이루므로, UV를 옆으로 옮기면 채도/색상이, 위아래로
+# 옮기면 밝기가 바뀐다. 텍스처 위쪽이 밝고 아래쪽이 어둡다.
+SIZE = 256                 # 텍스처 한 변 (정사각 유지)
+CELL_W, CELL_H = 4, 8      # 셀 픽셀 크기 (가로 4 x 세로 8)
+COLS, ROWS = SIZE // CELL_W, SIZE // CELL_H   # 64열 x 32행 = 2048 셀
 
-NEUTRAL_ROWS = 2   # 하단 2행 = 무채색 램프
-HUE_COUNT = 15     # 유채색: 색상 15개 x 2행(64칸)
-CHROMA_STEPS = 4
-L_STEPS = 16
-L_MIN, L_MAX = 0.16, 0.97          # 유채색 명도 범위
+HUE_COUNT = 15             # 유채색 색상 수 (24도 간격)
+HUE_START_DEG = 30.0       # 첫 색상(빨강)의 Oklab 색상각 — 좌측부터 빨강→주황→노랑→…→자홍
+CHROMA_FRACTIONS = (0.92, 0.64, 0.38, 0.16)   # 군집 내 좌→우: 선명 → 탁함
+L_MIN, L_MAX = 0.14, 0.97  # 유채색 명도 범위 (행 32단)
 NEUTRAL_L_MIN, NEUTRAL_L_MAX = 0.06, 0.99
 # 채도는 절대값이 아니라 해당 (명도, 색상)에서 sRGB 안에 들어가는 최대 채도의 비율.
 # 절대값을 쓰면 게멋 밖 조합이 클램핑되어 같은 색이 여러 칸에 중복 생성된다.
-CHROMA_FRACTIONS = (0.16, 0.38, 0.64, 0.92)
-# 무채색 램프 2종: (채도, 색상 각도) — 순수 그레이 / 따뜻한 그레이
-NEUTRAL_TINTS = ((0.0, 0.0), (0.018, 70.0))
+# 무채색 4열: (채도, 색상 각도) — 순수 그레이 / 웜 그레이 / 세피아 / 쿨 그레이
+NEUTRAL_TINTS = ((0.0, 0.0), (0.012, 70.0), (0.03, 75.0), (0.015, 250.0))
+assert len(NEUTRAL_TINTS) + HUE_COUNT * len(CHROMA_FRACTIONS) == COLS
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PNG_PATH = os.path.join(_ROOT, "lowpoly", "LP3D_Palette.png")
@@ -83,25 +85,46 @@ def _quantize(rgb):
 
 # ---------- 셀 생성 ----------
 
-def build_cells():
-    """1024개 셀의 RGB 정수 튜플 리스트를 만든다. 셀 0 = 좌하단, 행 우선."""
-    cells = []
-    # 하단 2행: 무채색 램프
-    for row in range(NEUTRAL_ROWS):
-        chroma, hue_deg = NEUTRAL_TINTS[row]
+def _column_colors(chroma_fn, hue):
+    """한 열(명도 ROWS단, 아래=어두움)의 RGB 정수 튜플 목록. chroma_fn(light) → 채도."""
+    out = []
+    for row in range(ROWS):
+        light = chroma_fn.l_min + (chroma_fn.l_max - chroma_fn.l_min) * row / (ROWS - 1)
+        out.append(_quantize(_srgb_of(light, chroma_fn(light), hue)))
+    return out
+
+
+class _Chroma:
+    """열의 채도 규칙: 절대 채도(무채색) 또는 최대 채도 비율(유채색)."""
+
+    def __init__(self, l_min, l_max, hue, absolute=None, fraction=None):
+        self.l_min, self.l_max, self.hue = l_min, l_max, hue
+        self.absolute, self.fraction = absolute, fraction
+
+    def __call__(self, light):
+        limit = _max_chroma(light, self.hue)
+        if self.fraction is not None:
+            return self.fraction * limit
+        return min(self.absolute, limit)
+
+
+def build_columns():
+    """열 순서대로 (열 색상 목록)을 만든다. 무채색 4열 → 색상별 채도 4단 군집."""
+    columns = []
+    for chroma, hue_deg in NEUTRAL_TINTS:
         hue = math.radians(hue_deg)
-        for col in range(GRID):
-            light = NEUTRAL_L_MIN + (NEUTRAL_L_MAX - NEUTRAL_L_MIN) * col / (GRID - 1)
-            cells.append(_quantize(_srgb_of(light, min(chroma, _max_chroma(light, hue)), hue)))
-    # 나머지 30행: 색상 15개 x (채도 4단 x 명도 16단)
+        columns.append(_column_colors(_Chroma(NEUTRAL_L_MIN, NEUTRAL_L_MAX, hue, absolute=chroma), hue))
     for index in range(HUE_COUNT):
-        hue = 2 * math.pi * index / HUE_COUNT
+        hue = math.radians(HUE_START_DEG + 360.0 * index / HUE_COUNT)
         for fraction in CHROMA_FRACTIONS:
-            for step in range(L_STEPS):
-                light = L_MIN + (L_MAX - L_MIN) * step / (L_STEPS - 1)
-                chroma = fraction * _max_chroma(light, hue)
-                cells.append(_quantize(_srgb_of(light, chroma, hue)))
-    return cells
+            columns.append(_column_colors(_Chroma(L_MIN, L_MAX, hue, fraction=fraction), hue))
+    return columns
+
+
+def build_cells():
+    """COLS*ROWS개 셀의 RGB 정수 튜플 리스트. 셀 0 = 좌하단, 행 우선(cell = row*COLS + col)."""
+    columns = build_columns()
+    return [columns[col][row] for row in range(ROWS) for col in range(COLS)]
 
 
 # ---------- PNG 출력 ----------
@@ -113,15 +136,15 @@ def _chunk(tag: bytes, data: bytes) -> bytes:
 
 
 def render_png(cells) -> bytes:
-    """셀 리스트를 256x256 8비트 트루컬러 PNG 바이트로 렌더링한다.
+    """셀 리스트를 SIZE x SIZE 8비트 트루컬러 PNG 바이트로 렌더링한다.
 
     셀 0이 좌하단이므로 PNG 행(위->아래)을 뒤집어 기록한다."""
     rows = []
     for py in range(SIZE):
-        cell_y = GRID - 1 - (py // CELL_PX)
+        cell_y = ROWS - 1 - (py // CELL_H)
         line = bytearray([0])   # 필터 타입 0 (None) — 압축 결과를 결정적으로 유지
         for px in range(SIZE):
-            line += bytes(cells[cell_y * GRID + (px // CELL_PX)])
+            line += bytes(cells[cell_y * COLS + (px // CELL_W)])
         rows.append(bytes(line))
     header = struct.pack(">IIBBBBB", SIZE, SIZE, 8, 2, 0, 0, 0)
     return (b"\x89PNG\r\n\x1a\n"
@@ -139,10 +162,13 @@ def render_data_module(cells) -> str:
         "# 재생성: python scripts/gen_palette.py",
         "#",
         "# 고정 팔레트 텍스처(LP3D_Palette.png)의 셀별 색상값.",
-        "# 셀 0 = 좌하단, 행 우선으로 증가한다.",
+        "# 셀 0 = 좌하단, 행 우선(cell = row*COLS + col)으로 증가한다.",
+        "# 열 = 색상(무채색 4열 + 색상 15개 x 채도 4단 군집), 행 = 명도(위가 밝음).",
         "",
-        "GRID = %d" % GRID,
-        "CELL_PX = %d" % CELL_PX,
+        "COLS = %d" % COLS,
+        "ROWS = %d" % ROWS,
+        "CELL_W = %d" % CELL_W,
+        "CELL_H = %d" % CELL_H,
         "SIZE = %d" % SIZE,
         "",
         "CELLS = [",

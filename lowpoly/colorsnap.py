@@ -6,9 +6,9 @@
 import math
 
 try:                      # 애드온으로 로드될 때
-    from .palette_data import CELLS, GRID
+    from .palette_data import CELLS, COLS, ROWS
 except ImportError:       # 파일 단위로 직접 로드될 때 (테스트)
-    from palette_data import CELLS, GRID
+    from palette_data import CELLS, COLS, ROWS
 
 
 def _srgb_to_linear(value: float) -> float:
@@ -35,14 +35,14 @@ def _cbrt(value: float) -> float:
     return value ** (1 / 3) if value >= 0 else -((-value) ** (1 / 3))
 
 
-# 팔레트 1024색의 Oklab 좌표를 임포트 시 한 번만 계산해 캐시한다
+# 팔레트 2048색의 Oklab 좌표를 임포트 시 한 번만 계산해 캐시한다
 _CELL_LAB = tuple(srgb_to_oklab(tuple(c / 255 for c in rgb)) for rgb in CELLS)
 
 
 def snap_cell(color) -> int:
-    """0~1 범위 RGB를 받아 Oklab 최근접 셀 인덱스(0~1023)를 반환한다.
+    """0~1 범위 RGB를 받아 Oklab 최근접 셀 인덱스(0~2047)를 반환한다.
 
-    1024개 선형 탐색이지만 모델당 색이 10개 안팎이라 비용은 무시할 수준이다."""
+    2048개 선형 탐색이지만 모델당 색이 10개 안팎이라 비용은 무시할 수준이다."""
     target_l, target_a, target_b = srgb_to_oklab(color)
     best_cell, best_distance = 0, None
     for cell, (light, a_axis, b_axis) in enumerate(_CELL_LAB):
@@ -58,4 +58,4 @@ def cell_uv(cell: int):
     """셀 중앙의 UV 좌표를 반환한다.
 
     페이스의 UV를 셀 중앙 한 점으로 모으므로 텍스처 필터링 번짐이 없다."""
-    return (cell % GRID + 0.5) / GRID, (cell // GRID + 0.5) / GRID
+    return (cell % COLS + 0.5) / COLS, (cell // COLS + 0.5) / ROWS

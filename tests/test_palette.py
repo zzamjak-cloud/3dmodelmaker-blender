@@ -78,19 +78,39 @@ class TestPaletteArtifacts(unittest.TestCase):
     # 셀 구성이 스펙과 일치하는지
     def test_cell_count_and_uniqueness(self):
         cells = gen.build_cells()
-        self.assertEqual(len(cells), 1024)
-        # 게멋 클램핑 대신 비율 채도를 쓰므로 1022색 이상이 고유해야 한다
-        self.assertGreaterEqual(len(set(cells)), 1022)
+        self.assertEqual(len(cells), gen.COLS * gen.ROWS)
+        self.assertEqual(len(cells), 2048)
+        # 게멋 클램핑 대신 비율 채도를 쓰므로 거의 전부 고유해야 한다 (최하단 무채색만 겹침)
+        self.assertGreaterEqual(len(set(cells)), 2040)
 
     # 공식이 고정이므로 특정 셀의 색이 못 박혀 있어야 한다
     def test_reference_cells(self):
         cells = gen.build_cells()
-        self.assertEqual(cells[0], (1, 1, 1))
-        self.assertEqual(cells[31], (252, 252, 252))
-        self.assertEqual(cells[32], (1, 1, 0))
-        self.assertEqual(cells[63], (255, 251, 247))
-        self.assertEqual(cells[64], (17, 11, 13))
-        self.assertEqual(cells[1023], (254, 240, 250))
+        cols = gen.COLS
+        self.assertEqual(cells[0], (1, 1, 1))                       # 그레이 최하단
+        self.assertEqual(cells[(gen.ROWS - 1) * cols], (252, 252, 252))   # 그레이 최상단
+        self.assertEqual(cells[4], (26, 1, 0))                      # 빨강 선명 최하단
+        self.assertEqual(cells[16 * cols + 4], (215, 41, 25))       # 빨강 선명 중간 명도
+        self.assertEqual(cells[16 * cols + 7], (139, 111, 106))     # 빨강 탁함 중간 명도
+        self.assertEqual(cells[len(cells) - 1], (247, 244, 245))    # 자홍 탁함 최상단
+
+    # 열=색상, 행=명도 레이아웃: 같은 열은 위로 갈수록 밝고, 군집 안은 좌→우로 채도가 준다
+    def test_layout_axes(self):
+        import math
+        data = _load("palette_data", "lowpoly/palette_data.py")
+        snap = _load("colorsnap", "lowpoly/colorsnap.py")
+        cols, rows = data.COLS, data.ROWS
+        for col in range(cols):
+            lights = [snap.srgb_to_oklab(tuple(c / 255 for c in data.CELLS[row * cols + col]))[0]
+                      for row in range(rows)]
+            self.assertEqual(lights, sorted(lights), "열 %d의 명도가 위로 갈수록 밝지 않음" % col)
+        first_hue_col = len(gen.NEUTRAL_TINTS)
+        for cluster in range(gen.HUE_COUNT):
+            base = first_hue_col + cluster * len(gen.CHROMA_FRACTIONS)
+            mid = (rows // 2) * cols
+            chromas = [math.hypot(*snap.srgb_to_oklab(tuple(c / 255 for c in data.CELLS[mid + base + k]))[1:])
+                       for k in range(len(gen.CHROMA_FRACTIONS))]
+            self.assertEqual(chromas, sorted(chromas, reverse=True), "군집 %d의 채도가 좌→우로 줄지 않음" % cluster)
 
     # 같은 입력에서 항상 같은 바이트가 나와야 한다
     def test_png_is_reproducible(self):
@@ -121,12 +141,12 @@ class TestPaletteArtifacts(unittest.TestCase):
     def test_data_module_matches_png_pixels(self):
         data = _load("palette_data", "lowpoly/palette_data.py")
         pixels = _decode_png(os.path.join(_ROOT, "lowpoly", "LP3D_Palette.png"))
-        self.assertEqual(len(data.CELLS), data.GRID * data.GRID)
+        self.assertEqual(len(data.CELLS), data.COLS * data.ROWS)
         for cell, expected in enumerate(data.CELLS):
-            col, row = cell % data.GRID, cell // data.GRID
-            x = col * data.CELL_PX + data.CELL_PX // 2
+            col, row = cell % data.COLS, cell // data.COLS
+            x = col * data.CELL_W + data.CELL_W // 2
             # 셀 0이 좌하단이므로 PNG 행 좌표로 뒤집는다
-            y = (data.GRID - 1 - row) * data.CELL_PX + data.CELL_PX // 2
+            y = (data.ROWS - 1 - row) * data.CELL_H + data.CELL_H // 2
             self.assertEqual(pixels[y * data.SIZE + x], expected, "셀 %d 불일치" % cell)
 
 
@@ -164,10 +184,10 @@ class TestColorSnap(unittest.TestCase):
 
     # UV는 셀 중앙을 가리켜야 필터링 번짐이 없다
     def test_cell_uv_is_cell_center(self):
-        self.assertAlmostEqual(self.snap.cell_uv(0)[0], 0.5 / 32)
+        self.assertAlmostEqual(self.snap.cell_uv(0)[0], 0.5 / 64)
         self.assertAlmostEqual(self.snap.cell_uv(0)[1], 0.5 / 32)
-        self.assertAlmostEqual(self.snap.cell_uv(1023)[0], 31.5 / 32)
-        self.assertAlmostEqual(self.snap.cell_uv(1023)[1], 31.5 / 32)
+        self.assertAlmostEqual(self.snap.cell_uv(2047)[0], 63.5 / 64)
+        self.assertAlmostEqual(self.snap.cell_uv(2047)[1], 31.5 / 32)
 
 
 if __name__ == "__main__":

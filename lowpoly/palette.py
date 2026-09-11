@@ -5,15 +5,16 @@
 #
 # 팔레트는 읽기 전용이다. 색→셀 매핑이 공식으로 결정되므로 생성 순서와 무관하게
 # 항상 같은 텍스처가 나오고, 사용자는 에셋 라이브러리에서 머티리얼만 교체해도
-# 색이 그대로 유지된다. 그리드/셀 크기는 영구 고정이며 변경하지 않는다.
-# 설계 근거: docs/superpowers/specs/2026-08-28-fixed-palette-design.md
+# 색이 그대로 유지된다. 레이아웃: 열 = 색상(무채색 4열 + 색상 15개 x 채도 4단 군집),
+# 행 = 명도(위가 밝음). 셀 배치를 바꾸면 기존 에셋의 UV가 다른 색을 가리키게 된다.
+# 설계 근거: docs/superpowers/specs/2026-08-28-fixed-palette-design.md (2026-09-12 개정)
 import os
 import shutil
 
 import bpy
 
 from .colorsnap import cell_uv, snap_cell
-from .palette_data import CELLS, SIZE
+from .palette_data import CELLS, CELL_H, CELL_W, COLS, ROWS, SIZE
 
 PALETTE_IMAGE = "LP3D_Palette"     # executor의 롤백 예외 처리에서 참조한다
 PALETTE_MATERIAL = "LP3D_Palette"
@@ -32,12 +33,11 @@ def _expected_pixels() -> list:
     쓴다. Blender의 이미지 픽셀은 선형이므로 sRGB 정수값을 선형으로 변환해
     채운다(이미지 컬러스페이스는 sRGB로 설정되어 있다)."""
     from .colorsnap import _srgb_to_linear
-    grid = SIZE // 8
     buffer = [0.0] * (SIZE * SIZE * 4)
     for py in range(SIZE):
-        cell_y = py // 8
+        cell_y = py // CELL_H
         for px in range(SIZE):
-            red, green, blue = CELLS[cell_y * grid + (px // 8)]
+            red, green, blue = CELLS[cell_y * COLS + (px // CELL_W)]
             offset = (py * SIZE + px) * 4
             buffer[offset:offset + 4] = [_srgb_to_linear(red / 255),
                                          _srgb_to_linear(green / 255),
@@ -51,13 +51,12 @@ def _is_stale(img) -> bool:
         return True
     if any(prop in img.keys() for prop in _LEGACY_PROPS):
         return True
-    grid = SIZE // 8
     buffer = [0.0] * len(img.pixels)
     img.pixels.foreach_get(buffer)
     # 대표 셀 몇 개만 대조한다 (전체 대조는 불필요하게 비싸다)
-    for cell in (0, grid + 1, len(CELLS) - 1):
-        col, row = cell % grid, cell // grid
-        x, y = col * 8 + 4, row * 8 + 4
+    for cell in (0, COLS + 5, len(CELLS) // 2 + 20, len(CELLS) - 1):
+        col, row = cell % COLS, cell // COLS
+        x, y = col * CELL_W + CELL_W // 2, row * CELL_H + CELL_H // 2
         offset = (y * SIZE + x) * 4
         expected = CELLS[cell]
         for channel in range(3):

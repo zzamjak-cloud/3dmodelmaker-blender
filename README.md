@@ -37,6 +37,7 @@ Codex CLI의 GPT-6 Astra로 캐주얼 게임용 로우폴리 3D 모델(프랍·�
 
 ## 변경 이력
 
+- **0.10.0**: 은면 컬링 정밀도 개선 — 다른 닫힌 파트 안에 완전히 파묻힌 면만 삭제(노멀 반전 파트·오목 공간·테두리 노출 면 보존). 팔레트 텍스처를 열=색상 군집 / 행=명도 레이아웃(64x32 셀)으로 전환 — 기존 에셋 UV의 색이 바뀌는 파괴적 변경.
 - **0.9.0**: GPT-6 Astra 기본 생성 및 1턴 완료 고정. Claude 생성, 추가 비평·개선과 반복 설정 제거. Astra 사용 불가 시 Codex 기본 모델 폴백 유지.
 
 ## 개발
@@ -68,6 +69,12 @@ macOS 백그라운드 검증:
 모든 생성 모델은 고정된 256x256 팔레트 텍스처 하나를 공유한다. 색은 Oklab
 좌표에서 공식으로 결정되므로 생성 순서와 무관하게 항상 동일하다 — 덕분에
 에셋 라이브러리에서 머티리얼만 교체해도 색이 그대로 유지된다.
+
+레이아웃은 셀 4x8px, 64열 x 32행(2048색)이다. **열(좌→우) = 색상**: 무채색 4열
+(그레이·웜 그레이·세피아·쿨 그레이) 다음에 색상 15개가 빨강→주황→노랑→…→자홍
+순으로 놓이고, 한 색상은 채도 4단(선명→탁함)이 이웃한 4열 한 군집을 이룬다.
+**행(아래→위) = 명도**: 텍스처 위쪽이 밝고 아래쪽이 어둡다. 손으로 UV를 옮겨
+색을 바꿀 때 옆으로 가면 색상/채도, 위아래로 가면 밝기만 바뀐다.
 
 - 텍스처: `lowpoly/LP3D_Palette.png` (자동 생성, 커밋됨)
 - 색 데이터: `lowpoly/palette_data.py` (자동 생성, 커밋됨)
@@ -112,4 +119,13 @@ scripts\dev_run.bat -LinkOnly
 .\scripts\dev_run.ps1 -Background -PythonFile tests\verify_palette_in_blender.py
 ```
 
-`RESULT: ALL PASS`가 나와야 한다.
+`RESULT: ALL PASS`가 나와야 한다. macOS는 `./scripts/dev_run.sh --background --python tests/verify_palette_in_blender.py`.
+
+### 실제 Blender에서 은면 컬링·기하 검증
+
+애드온 설치 없이 factory Blender로 바로 돈다 (`lowpoly` 패키지를 직접 임포트).
+
+```bash
+blender --background --factory-startup --python tests/verify_cull_in_blender.py      # 은면 판정 (보이는 면 보존·파묻힌 면 삭제)
+blender --background --factory-startup --python tests/verify_geometry_in_blender.py  # 대칭도 등 QA 지표
+```

@@ -11,7 +11,7 @@ import bpy
 
 _PREF_KEYS = ("codex_path", "timeout", "ai_concurrency",
               "use_multiview", "use_library",
-              "asset_library_path")
+              "asset_library_path", "texture_resolution")
 # 제거된 모델·턴 설정은 복원하지 않아 구버전 파일도 현재 생성 정책을 따른다.
 _SCENE_KEYS = ("export_dir",)
 

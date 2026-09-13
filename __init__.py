@@ -9,7 +9,7 @@ from .ui import operators, panel, previews
 
 # 등록 순서를 보장하는 모듈 목록 (의존성 순)
 _MODULES = (preferences, properties, previews, operators, panel)
-_SUBPACKAGES = ("lowpoly", "agents", "core", "pipeline")
+_SUBPACKAGES = ("lowpoly", "agents", "core", "pipeline", "texturing")
 
 
 def _discover_submodules():

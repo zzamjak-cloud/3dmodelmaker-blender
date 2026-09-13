@@ -89,7 +89,7 @@ def _load_targets():
     root.preferences = prefs
 
     for name in ("capture", "executor", "lanes", "library", "loop",
-                 "multiview", "prompts", "runner", "scheduler", "snapshots"):
+                 "multiview", "prompts", "runner", "scheduler", "snapshots", "texgen"):
         module = types.ModuleType(f"{PACKAGE}.core.{name}")
         sys.modules[module.__name__] = module
         setattr(core, name, module)

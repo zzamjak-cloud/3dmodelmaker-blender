@@ -14,9 +14,32 @@ from .. import preferences
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
 from . import (errors, executor, jobs, library, models, multiview,
-               prompts, runner, scheduler, snapshots)
+               prompts, runner, scheduler, snapshots, texgen)
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
+
+
+class _bake_context:
+    """타이머 콜백에서 렌더·depsgraph를 쓰기 위한 컨텍스트 — 창이 있으면 그 창과 씬으로 override."""
+
+    def __init__(self, scene_name):
+        self.scene = bpy.data.scenes.get(scene_name)
+        self._override = None
+
+    def __enter__(self):
+        if self.scene is None:
+            raise RuntimeError("세션 씬을 찾을 수 없습니다")  # 다른 씬에서 렌더하지 않는다
+        wm = bpy.context.window_manager
+        window = wm.windows[0] if wm and wm.windows else None
+        if window is not None and self.scene is not None:
+            self._override = bpy.context.temp_override(window=window, scene=self.scene)
+            self._override.__enter__()
+        return bpy.context
+
+    def __exit__(self, *exc):
+        if self._override is not None:
+            self._override.__exit__(*exc)
+        return False
 
 
 def is_active(uid=None) -> bool:
@@ -153,10 +176,15 @@ class GenerationSession:
         self._initial_dispatch_started = False
         self._model_fallback_eligible = False
         job = self._job()
+        # 항목은 실행 중 삭제될 수 있으므로 타입은 시작 시점에 고정한다
+        self.modeling_type = getattr(job, "modeling_type", 'PALETTE') if job else 'PALETTE'
+        self.texture_path = None    # 개별 매핑 결과 PNG (보관 폴더)
+        self._final_note = ""       # 마무리 통계 문구 (텍스처 단계 뒤에 붙인다)
         if job:
             job.requested_model = self.requested_model_label
             job.effective_model = self.effective_model_label
             job.model_fallback = False
+            job.texture_path = ""
         # 런타임 상태
         self.session_id = None
         self.iteration = 1
@@ -602,9 +630,147 @@ class GenerationSession:
             for obj in mesh_objs:
                 game_ready(obj)
             tris = collection_tri_count(coll)
-            # 배치 실행 결과가 원점에 겹치지 않도록 레인만큼 옆으로 민다
+            # 배치 실행 결과가 원점에 겹치지 않도록 레인만큼 옆으로 민다 (텍스처 대기 중에도)
             jobs.apply_lane_offset(self.collection_name, self.lane)
             note = f", 은면 {removed}개 제거" if removed else ""
-            self._finish(f"완료 — {self.collection_name} ({tris} tris{note})", ok=True)
+            self._final_note = f"{tris} tris{note}"
+            if self.modeling_type == 'TEXTURE' and mesh_objs:
+                if not texgen.is_available():
+                    self._set_status("텍스처 생략: codex CLI 없음",
+                                     "개별 매핑 생략 — codex CLI를 찾을 수 없어 팔레트로 마감")
+                else:
+                    # 언랩·렌더·베이크는 각각 한 틱을 통째로 막으므로 스텝을 나눠
+                    # 상태줄이 실제로 갱신되고 다른 잡의 큐도 사이사이 진행되게 한다
+                    self._set_status("UV 언랩 대기중...", phase='TEX')
+                    self._submit_blender(self._blender_unwrap)
+                    return
+            self._finish_placed()
         else:
             self._finish("실패: 생성된 오브젝트 없음", ok=False)
+
+    def _finish_placed(self, extra: str = ""):
+        """성공 마감. extra는 텍스처 단계 결과 문구."""
+        jobs.apply_lane_offset(self.collection_name, self.lane)  # 표식으로 이중 적용을 막는다
+        self._finish(f"완료 — {self.collection_name} ({self._final_note}{extra})", ok=True)
+
+    # ---------- 개별 매핑 (언랩 → 6면도 가이드 → AI 텍스처 → 베이크) ----------
+    #
+    # 텍스처 단계 실패는 비치명이다 — 기하는 이미 완성됐으므로 팔레트 재질을 그대로
+    # 두고 원인만 상태·로그에 남긴다.
+    def _texture_fallback(self, reason: str, error: str = None):
+        from ..texturing import apply as tex_apply
+        coll = bpy.data.collections.get(self.collection_name)
+        if coll:
+            tex_apply.discard([o for o in coll.objects if o.type == 'MESH'])
+        lines = [f"개별 매핑 실패 — 팔레트 재질을 유지합니다: {reason}"]
+        if error:
+            todo = errors.action(error, 'codex')
+            if todo:
+                lines.append(f"  → {todo}")
+            lines += [f"  · {l}" for l in errors.detail_lines(error)]
+        self._set_status(f"텍스처 실패: {reason}", "\n".join(lines))
+        self._finish_placed(extra=", 텍스처 실패 — 팔레트 유지")
+
+    def _mesh_objs(self):
+        coll = bpy.data.collections.get(self.collection_name)
+        return [o for o in coll.objects if o.type == 'MESH'] if coll else []
+
+    def _texture_step(self, fn, stage: str):
+        """텍스처 단계 하나를 실행한다 — 예외는 세션 실패가 아니라 팔레트 폴백으로 흡수한다."""
+        try:
+            fn()
+        except Exception as e:
+            _log.exception("LP3D 텍스처 %s 실패", stage)
+            self._texture_fallback(f"{stage} 오류 {type(e).__name__}: {e}")
+
+    def _submit_ai_texture(self, fn):
+        """_submit_ai와 같지만 제출 자체가 터져도 잡을 FAILED로 만들지 않는다."""
+        def _step():
+            if self._stale():
+                scheduler.release_ai(self.uid)
+                return
+            try:
+                fn()
+            except Exception as e:
+                scheduler.release_ai(self.uid)
+                _log.exception("LP3D 텍스처 제출 실패")
+                self._texture_fallback(f"제출 오류 {type(e).__name__}: {e}")
+
+        scheduler.submit_ai(self.uid, _step)
+
+    def _blender_unwrap(self):
+        def _run():
+            from ..texturing import unwrap as tex_unwrap
+            self._set_status("UV 언랩중 (박스 투영)...", phase='TEX')
+            info = tex_unwrap.unwrap_objects(self._mesh_objs())
+            self._set_status("6면도 가이드 렌더 대기중...",
+                             f"언랩 완료: 아일랜드 {info['islands']}개, 면 {info['faces']}개", phase='TEX')
+            self._submit_blender(self._blender_guide)
+        self._texture_step(_run, "언랩")
+
+    def _blender_guide(self):
+        def _run():
+            from ..texturing import capture as tex_capture
+            self._set_status("6면도 가이드 렌더중...", phase='TEX')
+            guide_dir = os.path.join(self.workdir, "texture")
+            with _bake_context(self.scene_name) as ctx:
+                views = tex_capture.render_views(ctx, self._mesh_objs(), guide_dir)
+            guide = tex_capture.join_sheet(views, os.path.join(guide_dir, "guide_sheet.png"))
+            self._set_status("텍스처 6면도 생성중 (codex image_gen)...",
+                             "텍스처 가이드 시트 생성 완료", phase='TEX')
+            self._submit_ai_texture(lambda: texgen.generate(
+                self.request, guide, self.workdir, self.prefs.timeout,
+                self._on_texture_sheet, job_key=self.uid))
+        self._texture_step(_run, "가이드 렌더")
+
+    def _on_texture_sheet(self, path, error=None):
+        if self._stale():
+            return
+        scheduler.release_ai(self.uid)
+        # 펌프는 콜백 예외를 삼키므로 여기서 잡지 않으면 세션이 영원히 끝나지 않는다
+        try:
+            if not path:
+                reason = errors.describe(error, 'codex') if error else "원인 불명"
+                self._submit_blender(lambda: self._texture_fallback(reason, error))
+                return
+            self._set_status("텍스처 베이크 대기중...", "텍스처 시트 수신", phase='TEX')
+            self._submit_blender(lambda: self._blender_bake_texture(path))
+        except Exception as e:
+            _log.exception("LP3D 텍스처 콜백 처리 실패")
+            self._submit_blender(lambda: self._texture_fallback(f"콜백 오류 {type(e).__name__}: {e}"))
+
+    def _blender_bake_texture(self, sheet_path: str):
+        def _run():
+            from ..texturing import apply as tex_apply, bake as tex_bake, capture as tex_capture
+            mesh_objs = self._mesh_objs()
+            if not mesh_objs:
+                raise RuntimeError("생성된 오브젝트 없음")
+            resolution = int(getattr(self.prefs, "texture_resolution", "1024"))
+            name = tex_apply.texture_name(self.collection_name, mesh_objs)
+            self._set_status(f"텍스처 베이크중 ({resolution}px, CPU)...", phase='TEX')
+            views = tex_capture.split_sheet(sheet_path)
+            png = os.path.join(self.workdir, "texture", f"{name}.png")
+            with _bake_context(self.scene_name) as ctx:
+                stats = tex_bake.rasterize_to_png(
+                    ctx, mesh_objs, views, png, resolution, padding=8,
+                    uv_layer_names=[tex_apply.TEXTURE_UV] * len(mesh_objs))
+            self._set_status("텍스처 적용 대기중...",
+                             f"베이크 완료: 채움 {stats.get('filled_pixels', 0)}px", phase='TEX')
+            self._submit_blender(lambda: self._blender_apply_texture(png, name, resolution))
+        self._texture_step(_run, "베이크")
+
+    def _blender_apply_texture(self, png: str, name: str, resolution: int):
+        def _run():
+            from ..texturing import apply as tex_apply
+            mesh_objs = self._mesh_objs()
+            # 세션 임시 폴더는 사라지므로 보관 폴더에 복사한 파일을 이미지 원본으로 삼는다
+            saved = multiview.unique_path(multiview.archive_dir(), name)
+            shutil.copy(png, saved)
+            result = tex_apply.finalize(mesh_objs, saved, name)
+            self.texture_path = saved
+            job = self._job()
+            if job:
+                job.texture_path = saved
+            self._set_status("텍스처 적용 완료", f"텍스처 저장: {saved} (머티리얼 {result['material']})")
+            self._finish_placed(extra=f", 텍스처 {result['image']} {resolution}px")
+        self._texture_step(_run, "적용")

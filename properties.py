@@ -41,6 +41,15 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         subtype='FILE_PATH',
         default="",
     )
+    modeling_type: EnumProperty(
+        name="모델링 타입",
+        description="결과 모델의 재질 방식",
+        items=[
+            ('PALETTE', "컬러 스와치", "공유 팔레트 텍스처의 색 셀에 면을 매핑 (드로우콜 1개)"),
+            ('TEXTURE', "개별 매핑", "모델을 언랩하고 6면도 AI 텍스처를 모델 이름의 개별 텍스처로 베이크"),
+        ],
+        default='PALETTE',
+    )
 
     # --- 실행 상태 ---
     state: EnumProperty(
@@ -68,6 +77,7 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     code: StringProperty(default="")
     entry_id: StringProperty(default="")       # 라이브러리에 축적된 결과의 id
     multiview_path: StringProperty(default="")  # 이 잡의 멀티뷰 시트 경로
+    texture_path: StringProperty(default="")    # 개별 매핑 결과 텍스처 PNG 경로
     lane: IntProperty(default=0)                # 결과를 Y축으로 밀어둘 레인 번호
     requested_model: StringProperty(default="")           # 생성 요청 모델 snapshot
     effective_model: StringProperty(default="")           # 실제 생성 모델 snapshot

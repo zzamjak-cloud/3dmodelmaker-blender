@@ -3,7 +3,7 @@ import os
 import shutil
 
 import bpy
-from bpy.props import BoolProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 
 # macOS Finder로 실행한 Blender는 사용자 PATH를 상속하지 않으므로 흔한 설치 경로를 직접 탐색
 _EXTRA_PATHS = (
@@ -69,6 +69,17 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=True,
         update=_persist_cb,
     )
+    texture_resolution: EnumProperty(
+        name="개별 매핑 텍스처 크기",
+        description="개별 매핑 타입의 베이크 텍스처 한 변 픽셀 수 — 클수록 CPU 베이크가 오래 걸린다",
+        items=[
+            ('512', "512", "빠름 — 소품용"),
+            ('1024', "1024", "기본 — 품질과 베이크 시간의 균형"),
+            ('2048', "2048", "느림 — 큰 건물용"),
+        ],
+        default='1024',
+        update=_persist_cb,
+    )
     asset_library_path: StringProperty(
         name="에셋 라이브러리 경로",
         description="Asset Browser 라이브러리 루트 (카탈로그 파일 위치)",
@@ -84,6 +95,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col.prop(self, "ai_concurrency")
         col.prop(self, "use_multiview")
         col.prop(self, "use_library")
+        col.prop(self, "texture_resolution")
         from .core import library
         try:
             info = library.stats()
@@ -101,6 +113,7 @@ class _Defaults:
     use_multiview = True
     use_library = True
     asset_library_path = ""
+    texture_resolution = '1024'
 
 
 _DEFAULTS = _Defaults()

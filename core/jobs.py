@@ -58,6 +58,7 @@ def duplicate_job(props, index: int):
     src = props.jobs[index]
     values = {
         "ref_image_path": src.ref_image_path,
+        "modeling_type": src.modeling_type,
     }
     job = add_job(props, src.prompt)
     for key, value in values.items():

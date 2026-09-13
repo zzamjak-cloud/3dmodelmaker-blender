@@ -5,6 +5,7 @@ import re
 import bpy
 
 from ..lowpoly.palette import save_palette_png
+from ..texturing.apply import save_texture_pngs
 
 
 def _select_only(coll):
@@ -31,6 +32,7 @@ def export_collection(coll, out_dir: str, fmt: str = 'FBX') -> str:
         raise RuntimeError("내보낼 메시 오브젝트가 없습니다")
     base = _safe_name(coll.name)
     save_palette_png(out_dir)
+    save_texture_pngs(out_dir=out_dir, coll=coll)  # 개별 매핑 텍스처도 동봉
 
     if fmt == 'FBX':
         path = os.path.join(out_dir, f"{base}.fbx")

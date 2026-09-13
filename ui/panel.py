@@ -8,7 +8,7 @@ from ..core import models, scheduler, session
 from . import previews
 
 # 진행 단계 정의 (session.py의 phase 식별자와 일치)
-_PHASES = ('GEN', 'EXEC', 'FINAL')
+_PHASES = ('GEN', 'EXEC', 'FINAL', 'TEX')
 
 
 def _model_label(job):
@@ -94,6 +94,7 @@ class LP3D_PT_main(bpy.types.Panel):
         # 주의: 입력 필드에 scale을 주면 macOS IME(한글 조합)가 더 불안정해짐.
         # 한글은 필드 직접 입력 대신 [프롬프트 입력] 버튼의 OS 네이티브 팝업을 쓴다.
         box.operator("lp3d.edit_prompt", text="프롬프트 입력", icon='TEXT')
+        box.prop(job, "modeling_type", text="모델링 타입")
         box.prop(job, "ref_image_path", text="참조 이미지")
         ref_row = box.row(align=True)
         ref_row.operator("lp3d.paste_ref_image", text="클립보드에서 붙여넣기", icon='PASTEDOWN')
@@ -163,11 +164,13 @@ class LP3D_PT_main(bpy.types.Panel):
         elapsed = int(time.time() - job.started_at) if job.started_at else 0
         box.label(text=f"경과 {elapsed // 60}:{elapsed % 60:02d}",
                   icon='TIME')
-        steps = (
+        steps = [
             ('GEN', f"코드 생성 — {generation_model}"),
             ('EXEC', "Blender 실행"),
             ('FINAL', "마무리 정리"),
-        )
+        ]
+        if getattr(job, "modeling_type", 'PALETTE') == 'TEXTURE':
+            steps.append(('TEX', "언랩·6면도 텍스처 베이크"))
         cur_idx = _PHASES.index(job.phase) if job.phase in _PHASES else -1
         sub = box.column(align=True)
         sub.scale_y = 0.85
@@ -212,6 +215,8 @@ class LP3D_PT_output(bpy.types.Panel):
             return
 
         col.label(text=f"결과: {job.collection_name}", icon='OUTLINER_COLLECTION')
+        if job.texture_path:
+            col.label(text=f"텍스처: {os.path.basename(job.texture_path)}", icon='TEXTURE')
 
         if job.entry_id and not session.is_active(job.uid):
             rate = layout.row(align=True)

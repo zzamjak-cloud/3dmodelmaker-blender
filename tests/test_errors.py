@@ -39,6 +39,14 @@ class TestClassify(unittest.TestCase):
     def test_auth_from_real_codex_stderr(self):
         self.assertEqual(errors.classify(CODEX_AUTH), errors.AUTH)
 
+    def test_capacity_is_not_quota(self):
+        # 서버측 일시 혼잡 — 사용량 소진으로 분류하면 모델 폴백이 막힌다
+        capacity = ('{"type":"turn.failed","error":{"message":"Selected model '
+                    'is at capacity. Please try a different model."}}')
+        self.assertEqual(errors.classify(capacity), errors.CAPACITY)
+        self.assertEqual(errors.describe(capacity, "codex"), "선택 모델 혼잡")
+        self.assertTrue(errors.action(capacity, "codex"))
+
     def test_quota_and_network_and_timeout(self):
         self.assertEqual(errors.classify("HTTP 429 rate_limit"), errors.QUOTA)
         self.assertEqual(errors.classify("error: connection refused"), errors.NETWORK)

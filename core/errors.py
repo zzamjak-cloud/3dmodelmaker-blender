@@ -11,6 +11,7 @@ QUOTA = 'QUOTA'      # 사용량·크레딧 소진
 NETWORK = 'NETWORK'  # 연결 실패
 TIMEOUT = 'TIMEOUT'  # 시간 초과
 MISSING = 'MISSING'  # 실행 파일 없음
+CAPACITY = 'CAPACITY'  # 모델 혼잡 (서버측 일시 용량 부족 — 재시도/폴백 가능)
 UNKNOWN = ''
 
 # 분류 규칙 — 위에서부터 먼저 맞는 것을 쓴다 (구체적인 패턴이 앞)
@@ -21,6 +22,9 @@ _RULES = (
         "please log out and sign in again", "your session has ended",
         "not logged in", "please run /login", "oauth token",
     )),
+    # 혼잡은 사용량 소진이 아니라 서버측 일시 문제다. QUOTA보다 먼저 판정해야
+    # 폴백이 막히지 않는다 (session._try_model_fallback은 QUOTA를 종결로 본다).
+    (CAPACITY, ("at capacity",)),
     (QUOTA, (
         "insufficient_quota", "rate_limit", "quota exceeded", "credit balance",
         "usage limit", "429",
@@ -42,6 +46,7 @@ _HINTS = {
     NETWORK: ("네트워크 연결 실패", "인터넷·프록시 설정을 확인하세요"),
     TIMEOUT: ("{cli} 응답 시간 초과", "환경설정에서 타임아웃을 늘려보세요"),
     MISSING: ("{cli} 실행 파일 없음", "환경설정에서 CLI 경로를 지정하세요"),
+    CAPACITY: ("선택 모델 혼잡", "잠시 후 다시 시도하거나 다른 모델을 선택하세요"),
 }
 
 _LOGIN_CMD = {"codex": "codex login"}

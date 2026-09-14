@@ -36,6 +36,10 @@ _MODEL_UNAVAILABLE_PHRASES = (
     "no access to model",
 )
 
+# 서버측 일시적 용량 부족 — 모델명을 언급하지 않고 "Selected model is at capacity."
+# 처럼만 오므로 모델 컨텍스트 요구를 면제하고 곧바로 폴백 대상으로 본다.
+_MODEL_CAPACITY_PHRASES = ("at capacity",)
+
 _MCP_NOISE_PHRASES = ("rmcp::transport", "mcp client", "worker quit with fatal")
 
 
@@ -73,6 +77,9 @@ def is_model_unavailable(error: str, model_id: str) -> bool:
     )
     if not model or any(phrase in text for phrase in _TERMINAL_FAILURE_PHRASES):
         return False
+    # 혼잡 오류는 어느 줄에 있든 지정 모델(-m)의 문제다 — 모델명이 안 실려 온다
+    if any(phrase in text for phrase in _MODEL_CAPACITY_PHRASES):
+        return True
     for line in text.splitlines():
         has_model_context = model in line or (model == ASTRA_ID and "astra" in line)
         if not has_model_context:

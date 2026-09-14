@@ -49,6 +49,21 @@ class TestModelUnavailable(unittest.TestCase):
             "gpt-6-astra",
         ))
 
+    def test_capacity_error_without_model_name_is_unavailable(self):
+        # 실제 관측된 stdout 이벤트 — 모델명이 실려 오지 않는다
+        error = (
+            "CLI 종료 코드 1\n"
+            '{"type":"error","message":"Selected model is at capacity. '
+            'Please try a different model."}'
+        )
+
+        self.assertTrue(models.is_model_unavailable(error, models.ASTRA_ID))
+
+    def test_capacity_error_still_requires_a_selected_model(self):
+        error = '{"type":"error","message":"Selected model is at capacity."}'
+
+        self.assertFalse(models.is_model_unavailable(error, ""))
+
     def test_metadata_warning_does_not_pair_with_unrelated_access_error(self):
         error = (
             "Model metadata for `gpt-6-astra` not found. "

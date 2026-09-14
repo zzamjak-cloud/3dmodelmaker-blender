@@ -41,6 +41,15 @@ class TestRefImage(unittest.TestCase):
         for old in ("≤ 1500", "≤ 5000", "프랍 1500"):
             self.assertNotIn(old, sys_md)
 
+    def test_system_prompt_forbids_reading_external_skill_files(self):
+        # codex가 모델링 전에 SKILL.md를 읽으려다 샌드박스 접근 거부로 턴을 낭비했다
+        # build_system_prompt()는 bpy에 의존하므로 소스 md를 직접 읽는다
+        with open(os.path.join(_ROOT, "prompts", "system_lowpoly.md"), encoding="utf-8") as f:
+            sys_md = f.read()
+        self.assertIn("작업 방식 (도구 사용)", sys_md)
+        for needle in ("SKILL.md", "셸 명령을 실행하지 마라"):
+            self.assertIn(needle, sys_md)
+
 
 if __name__ == "__main__":
     unittest.main()

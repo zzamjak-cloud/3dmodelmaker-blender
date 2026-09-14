@@ -64,7 +64,8 @@ def similarity(a: str, b: str) -> float:
 
 
 def save_entry(request: str, code: str, stats: dict = None,
-               thumbnail: str = None, multiview: str = None, agent: str = "") -> str:
+               thumbnail: str = None, multiview: str = None, agent: str = "",
+               mode: str = "OBJECT") -> str:
     """성공한 생성 결과를 라이브러리에 저장하고 항목 id를 반환한다."""
     if not (request or "").strip() or not (code or "").strip():
         return ""
@@ -90,6 +91,7 @@ def save_entry(request: str, code: str, stats: dict = None,
         "agent": agent,
         "tris": (stats or {}).get("tris", 0),
         "rating": 0,          # 0=미평가, 1=합격(개선 종료), 2=우수(사용자 지정)
+        "mode": mode or "OBJECT",  # 제작 모드 — 오브젝트 예시가 배경 프롬프트에 섞이면 안 된다
         "created": entry_id,
     })
     _write_index(entries)
@@ -114,13 +116,20 @@ def read_code(entry_id: str) -> str:
         return ""
 
 
-def find_similar(request: str, limit: int = 2, min_score: float = 0.15) -> list:
+def find_similar(request: str, limit: int = 3, min_score: float = 0.15,
+                 mode: str = None) -> list:
     """요청과 비슷한 과거 성공 항목을 점수 순으로 반환한다.
 
     같은 점수면 평가 높은 것 → 최신 순. 유사도가 낮으면 아예 반환하지 않는다
-    (엉뚱한 예시를 주면 오히려 생성을 망친다)."""
+    (엉뚱한 예시를 주면 오히려 생성을 망친다).
+
+    mode를 주면 그 제작 모드의 항목만 본다 — 오브젝트 코드와 배경 배치 코드는
+    규칙이 정반대라 섞어 주입하면 오히려 생성을 망친다. mode 필드가 없는
+    구버전 항목은 오브젝트로 간주한다."""
     scored = []
     for e in load_index():
+        if mode and (e.get("mode") or "OBJECT") != mode:
+            continue
         score = similarity(request, e.get("request", ""))
         if score >= min_score:
             scored.append((score, e.get("rating", 0), e.get("id", ""), e))
@@ -128,10 +137,10 @@ def find_similar(request: str, limit: int = 2, min_score: float = 0.15) -> list:
     return [e for _, _, _, e in scored[:limit]]
 
 
-def fewshot_examples(request: str, limit: int = 2) -> list:
+def fewshot_examples(request: str, limit: int = 1, mode: str = "OBJECT") -> list:
     """few-shot 주입용 (요청, 코드) 목록. 코드가 너무 길면 제외한다."""
     out = []
-    for entry in find_similar(request, limit=limit):
+    for entry in find_similar(request, limit=limit, mode=mode):
         code = read_code(entry.get("id", ""))
         if code and len(code) <= MAX_FEWSHOT_CHARS:
             out.append((entry.get("request", ""), code))

@@ -106,5 +106,81 @@ class TestLegacySettings(unittest.TestCase):
         self.assertEqual(props.export_dir, "/blend-specific")
 
 
+def _fake_bpy_modules():
+    """properties.py를 Blender 밖에서 읽어들이는 데 필요한 최소 bpy 대역."""
+    import types
+
+    def _property(**kwargs):
+        # 선언 인자를 그대로 보존해 기본값·항목 구성을 검사할 수 있게 한다
+        return kwargs
+
+    bpy = types.ModuleType("bpy")
+    bpy.data = SimpleNamespace(scenes=[], collections={})
+    bpy.types = SimpleNamespace(PropertyGroup=object, Scene=SimpleNamespace())
+    bpy.utils = SimpleNamespace(register_class=lambda cls: None,
+                                unregister_class=lambda cls: None)
+    props = types.ModuleType("bpy.props")
+    for name in ("BoolProperty", "CollectionProperty", "EnumProperty",
+                 "FloatProperty", "IntProperty", "PointerProperty", "StringProperty"):
+        setattr(props, name, _property)
+    handlers = types.ModuleType("bpy.app.handlers")
+    handlers.persistent = lambda fn: fn
+    app = types.ModuleType("bpy.app")
+    app.handlers = handlers
+    app.timers = SimpleNamespace(register=lambda *a, **k: None)
+    bpy.app = app
+    return {"bpy": bpy, "bpy.props": props, "bpy.app": app,
+            "bpy.app.handlers": handlers}
+
+
+def _load_properties():
+    spec = importlib.util.spec_from_file_location(
+        "scene_mode_properties", os.path.join(_ROOT, "properties.py"))
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, _fake_bpy_modules()):
+        spec.loader.exec_module(module)
+    return module
+
+
+class TestCreationModeFields(unittest.TestCase):
+    """제작 모드 필드 — 기본값이 기존 동작(오브젝트 생성)과 같아야 한다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.annotations = _load_properties().LP3DJobItem.__annotations__
+
+    def test_creation_mode_defaults_to_object(self):
+        field = self.annotations["creation_mode"]
+        self.assertEqual(field["default"], 'OBJECT')
+        self.assertEqual([item[0] for item in field["items"]], ['OBJECT', 'SCENE'])
+
+    def test_scene_size_defaults_to_medium(self):
+        field = self.annotations["scene_size"]
+        self.assertEqual(field["default"], 'M')
+        self.assertEqual([item[0] for item in field["items"]], ['S', 'M', 'L'])
+
+    def test_parent_uid_defaults_to_empty(self):
+        self.assertEqual(self.annotations["parent_uid"]["default"], "")
+
+    def test_creation_mode_is_declared_above_modeling_type(self):
+        # 패널이 선언 순서를 따라가지는 않지만, 읽는 사람이 헷갈리지 않도록 순서를 고정한다
+        order = list(self.annotations)
+        self.assertLess(order.index("creation_mode"), order.index("modeling_type"))
+
+    def test_existing_defaults_unchanged(self):
+        self.assertEqual(self.annotations["modeling_type"]["default"], 'PALETTE')
+        self.assertEqual(self.annotations["phase"]["default"], "")
+
+
+class TestNewJobFieldsNotOnScene(unittest.TestCase):
+    """새 필드는 잡 항목의 것이다 — 씬 프로퍼티에 대입하면 가드가 잡아야 한다."""
+
+    def test_new_fields_are_job_scoped(self):
+        module = _load_properties()
+        scene_fields = module.LP3DSceneProps.__annotations__
+        for name in ("creation_mode", "scene_size", "parent_uid"):
+            self.assertNotIn(name, scene_fields)
+
+
 if __name__ == "__main__":
     unittest.main()

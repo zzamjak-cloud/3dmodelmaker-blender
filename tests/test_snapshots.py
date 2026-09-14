@@ -122,5 +122,27 @@ class TestArchiveDir(unittest.TestCase):
         self.assertEqual(multiview.archive_dir(), multiview.archive_dir())
 
 
+class TestLaneSpacing(unittest.TestCase):
+    """레인 간격 파라미터화. 배경 공간은 결과가 수십 미터라 기본 4m로는 겹친다."""
+
+    def test_default_spacing_unchanged(self):
+        for lane in range(4):
+            self.assertEqual(lanes.lane_dy(lane), lanes.LANE_SPACING * lane)
+
+    def test_custom_spacing_scales_offset(self):
+        self.assertEqual(lanes.lane_dy(3, 20.0), 60.0)
+        self.assertEqual(lanes.lane_dy(0, 20.0), 0.0)
+
+    def test_custom_spacing_clamps_negative_lane(self):
+        self.assertEqual(lanes.lane_dy(-2, 20.0), 0.0)
+
+    def test_shift_uses_same_spacing_for_both_ends(self):
+        self.assertEqual(lanes.lane_shift(1, 3, 20.0), 40.0)
+        self.assertEqual(lanes.lane_shift(3, 3, 20.0), 0.0)
+
+    def test_shift_default_spacing_unchanged(self):
+        self.assertEqual(lanes.lane_shift(1, 3), lanes.lane_shift(1, 3, lanes.LANE_SPACING))
+
+
 if __name__ == "__main__":
     unittest.main()

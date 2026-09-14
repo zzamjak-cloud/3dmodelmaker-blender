@@ -5,8 +5,11 @@ import bmesh
 import bpy
 from mathutils import Matrix, Vector
 
+from .names import safe_id_name
+
 
 def _new_object(name: str, bm: bmesh.types.BMesh, location, rotation, scale) -> bpy.types.Object:
+    name = safe_id_name(name)
     mesh = bpy.data.meshes.new(name)
     bm.to_mesh(mesh)
     bm.free()
@@ -265,6 +268,7 @@ def join(objects, name="Joined", mode='fast') -> bpy.types.Object:
                 plain_objects = objects
 
     bm = bmesh.new()
+    name = safe_id_name(name, "Joined")
     merged_mesh = bpy.data.meshes.new(name)
     materials = []  # 머티리얼 슬롯 병합 목록
 

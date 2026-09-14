@@ -9,6 +9,26 @@ from . import previews
 
 # 진행 단계 정의 (session.py의 phase 식별자와 일치)
 _PHASES = ('GEN', 'EXEC', 'FINAL', 'TEX')
+# 배경 공간 모드는 3면도 대신 컨셉 시트 → 플랜 → 에셋 키트 → 배치 순으로 진행한다
+_SCENE_PHASES = ('VIEW', 'PLAN', 'KIT', 'PLACE', 'FINAL')
+_SCENE_STEPS = (
+    ("VIEW", "컨셉"),
+    ("PLAN", "플랜"),
+    ("KIT", "에셋"),
+    ("PLACE", "배치"),
+    ("FINAL", "마무리"),
+)
+
+
+def _parent_job(props, job):
+    """자식 에셋 잡의 부모 배경 잡. 부모가 아니거나 못 찾으면 None."""
+    parent_uid = getattr(job, "parent_uid", "")
+    if not parent_uid:
+        return None
+    for candidate in props.jobs:
+        if str(candidate.uid) == parent_uid:
+            return candidate
+    return None
 
 
 def _model_label(job):
@@ -28,8 +48,14 @@ class LP3D_UL_jobs(bpy.types.UIList):
 
         row = layout.row(align=True)
         row.alert = item.state == 'FAILED'  # 실패는 눈에 띄어야 한다
+        is_child = bool(getattr(item, "parent_uid", ""))
+        if is_child:
+            # 배경 잡이 스폰한 에셋은 부모에 딸린 항목임이 한눈에 보여야 한다
+            row.separator()
+            row.label(text="", icon='LINKED')
         row.label(text="", icon=STATE_ICONS.get(item.state, 'DOT'))
-        row.label(text=item.prompt or "(빈 프롬프트)")
+        label = item.prompt or "(빈 프롬프트)"
+        row.label(text=f"└ {label}" if is_child else label)
         if item.state == 'RUNNING':
             model = _model_label(item)
             if model == "GPT-6 Astra":
@@ -94,7 +120,7 @@ class LP3D_PT_main(bpy.types.Panel):
         # 주의: 입력 필드에 scale을 주면 macOS IME(한글 조합)가 더 불안정해짐.
         # 한글은 필드 직접 입력 대신 [프롬프트 입력] 버튼의 OS 네이티브 팝업을 쓴다.
         box.operator("lp3d.edit_prompt", text="프롬프트 입력", icon='TEXT')
-        box.prop(job, "modeling_type", text="모델링 타입")
+        self._draw_mode(box, props, job)
         box.prop(job, "ref_image_path", text="참조 이미지")
         ref_row = box.row(align=True)
         ref_row.operator("lp3d.paste_ref_image", text="클립보드에서 붙여넣기", icon='PASTEDOWN')
@@ -103,6 +129,21 @@ class LP3D_PT_main(bpy.types.Panel):
 
         self._draw_multiview(box, props, job)
         self._draw_status(layout, job)
+
+    def _draw_mode(self, layout, props, job):
+        """제작 모드 선택 — 배경 공간은 머티리얼이 팔레트로 고정되고 씬 규모를 대신 고른다."""
+        parent = _parent_job(props, job)
+        if getattr(job, "parent_uid", ""):
+            # 에셋 잡의 모드는 부모 플랜이 정한다 — 사용자가 바꿀 값이 아니다
+            owner = (parent.prompt[:20] if parent else "")
+            layout.label(text=f"배경 '{owner}'의 에셋", icon='LINKED')
+            return
+        layout.prop(job, "creation_mode", text="제작 모드")
+        if job.creation_mode == 'SCENE':
+            layout.prop(job, "scene_size", text="씬 규모")
+            layout.label(text="머티리얼: 컬러 스와치 (고정)")
+        else:
+            layout.prop(job, "modeling_type", text="모델링 타입")
 
     def _draw_multiview(self, layout, props, job):
         """AI가 만든 멀티뷰(3면도) 시트 — 패널에서 바로 확인하고 참조로 재사용할 수 있게 한다.
@@ -164,14 +205,19 @@ class LP3D_PT_main(bpy.types.Panel):
         elapsed = int(time.time() - job.started_at) if job.started_at else 0
         box.label(text=f"경과 {elapsed // 60}:{elapsed % 60:02d}",
                   icon='TIME')
-        steps = [
-            ('GEN', f"코드 생성 — {generation_model}"),
-            ('EXEC', "Blender 실행"),
-            ('FINAL', "마무리 정리"),
-        ]
-        if getattr(job, "modeling_type", 'PALETTE') == 'TEXTURE':
-            steps.append(('TEX', "언랩·6면도 텍스처 베이크"))
-        cur_idx = _PHASES.index(job.phase) if job.phase in _PHASES else -1
+        if getattr(job, "creation_mode", 'OBJECT') == 'SCENE':
+            steps = list(_SCENE_STEPS)
+            phases = _SCENE_PHASES
+        else:
+            steps = [
+                ('GEN', f"코드 생성 — {generation_model}"),
+                ('EXEC', "Blender 실행"),
+                ('FINAL', "마무리 정리"),
+            ]
+            if getattr(job, "modeling_type", 'PALETTE') == 'TEXTURE':
+                steps.append(('TEX', "언랩·6면도 텍스처 베이크"))
+            phases = _PHASES
+        cur_idx = phases.index(job.phase) if job.phase in phases else -1
         sub = box.column(align=True)
         sub.scale_y = 0.85
         for i, (_pid, label) in enumerate(steps):
@@ -209,7 +255,11 @@ class LP3D_PT_output(bpy.types.Panel):
         job = props.active_job()
         col = layout.column()
         if job is None or not job.collection_name:
-            col.label(text="완료된 항목을 선택하세요", icon='INFO')
+            # 에셋 잡의 결과는 마무리 단계에서 부모 키트로 병합되어 단독 컬렉션이 없다
+            if job is not None and getattr(job, "parent_uid", "") and job.state == 'DONE':
+                col.label(text="부모 배경 키트에 병합됨", icon='LINKED')
+            else:
+                col.label(text="완료된 항목을 선택하세요", icon='INFO')
             col.separator()
             col.operator("lp3d.dev_reload", icon='FILE_REFRESH')
             return

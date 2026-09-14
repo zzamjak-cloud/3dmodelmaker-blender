@@ -53,11 +53,15 @@ def active_count() -> int:
     return len(_sessions)
 
 
-def start_job(scene_name, uid, variation_of=None, variation_count=3):
+def start_job(scene_name, uid, variation_of=None, variation_count=3,
+              multiview_override=None):
     """잡 항목 하나의 생성 세션을 시작한다. 오류 메시지 또는 None을 반환한다.
 
     프롬프트·참조 이미지는 씬이 아니라 잡 항목에서 읽는다 —
-    여러 항목이 서로 다른 설정으로 동시에 돌 수 있어야 하기 때문이다."""
+    여러 항목이 서로 다른 설정으로 동시에 돌 수 있어야 하기 때문이다.
+
+    multiview_override를 주면 이 세션만 멀티뷰 사용 여부를 환경설정과 다르게 쓴다.
+    배경 모드의 에셋 자식 잡은 랜드마크만 멀티뷰를 쓰기 때문이다(시간·호출 절감)."""
     if uid in _sessions:
         return "이미 진행 중인 항목입니다"
     scene = bpy.data.scenes.get(scene_name)
@@ -84,7 +88,7 @@ def start_job(scene_name, uid, variation_of=None, variation_count=3):
 
     # 환경설정 변경이 즉시 반영되도록 세션 시작 때마다 한도를 갱신한다
     scheduler.set_ai_limit(getattr(preferences.get_prefs(), "ai_concurrency", 3))
-    session = GenerationSession(
+    kwargs = dict(
         scene_name=scene_name,
         uid=uid,
         request=request,
@@ -93,7 +97,16 @@ def start_job(scene_name, uid, variation_of=None, variation_count=3):
         variation_count=variation_count,
         ref_image=ref_image,
         lane=job.lane,
+        multiview_override=multiview_override,
     )
+    # 최상위 배경 잡만 배경 상태머신을 쓴다 — 자식 에셋 잡은 기존 오브젝트 경로다
+    is_scene = (getattr(job, "creation_mode", 'OBJECT') == 'SCENE'
+                and not getattr(job, "parent_uid", ""))
+    if is_scene and not variation_of:
+        from .scene_session import SceneSession
+        session = SceneSession(scene_size=getattr(job, "scene_size", 'M'), **kwargs)
+    else:
+        session = GenerationSession(**kwargs)
     _sessions[uid] = session
     session.start()
     return None
@@ -144,13 +157,16 @@ def _slug(text: str) -> str:
 
 
 class GenerationSession:
+    system_mode = 'OBJECT'  # prompts.build_system_prompt에 넘길 제작 모드
+
     def __init__(self, scene_name, uid, request, exe,
                  variation_code=None, variation_count=3,
-                 ref_image=None, lane=0):
+                 ref_image=None, lane=0, multiview_override=None):
         self.scene_name = scene_name
         self.uid = uid
         self.lane = lane
         self.request = request
+        self.multiview_override = multiview_override
         self.max_iterations = 1
         self.variation_code = variation_code
         self.variation_count = variation_count
@@ -178,6 +194,8 @@ class GenerationSession:
         job = self._job()
         # 항목은 실행 중 삭제될 수 있으므로 타입은 시작 시점에 고정한다
         self.modeling_type = getattr(job, "modeling_type", 'PALETTE') if job else 'PALETTE'
+        # 배경 잡이 스폰한 에셋이면 부모 uid 문자열 — 완료 시 부모에게 알린다
+        self.parent_uid = str(getattr(job, "parent_uid", "") or "") if job else ""
         self.texture_path = None    # 개별 매핑 결과 PNG (보관 폴더)
         self._final_note = ""       # 마무리 통계 문구 (텍스처 단계 뒤에 붙인다)
         if job:
@@ -323,7 +341,8 @@ class GenerationSession:
         scheduler.submit_ai(self.uid, _step)
 
     # ---------- 라이프사이클 ----------
-    def start(self):
+    def _begin(self):
+        """잡 상태 초기화 + keepalive + 시스템 프롬프트 준비 — 모드별 start가 공유한다."""
         job = self._job()
         if job:
             job.state = 'RUNNING'
@@ -333,7 +352,16 @@ class GenerationSession:
             job.status = "대기 중 (순서 기다리는 중)"
         self._set_status("대기 중 (순서 기다리는 중)", self._model_log())
         runner.add_keepalive(self.uid)
-        self.backend.prepare_workdir(prompts.build_system_prompt())
+        self.backend.prepare_workdir(prompts.build_system_prompt(self.system_mode))
+
+    def _use_multiview(self) -> bool:
+        """이 세션이 참조 시트를 만들지 여부 — 오버라이드가 있으면 환경설정보다 우선."""
+        if self.multiview_override is not None:
+            return bool(self.multiview_override)
+        return bool(getattr(self.prefs, "use_multiview", True))
+
+    def start(self):
+        self._begin()
         if self.variation_code:
             first = prompts.build_variation_prompt(self.request, self.variation_code,
                                                    self.variation_count)
@@ -343,7 +371,7 @@ class GenerationSession:
             self._dispatch(first)
             return
         # 신규 생성: 멀티뷰 참조 시트를 먼저 생성 (codex image_gen — 없으면 스킵)
-        if getattr(self.prefs, "use_multiview", True) and multiview.is_available():
+        if self._use_multiview() and multiview.is_available():
             self._set_status("멀티뷰 참조 생성중 (codex image_gen)...",
                              "멀티뷰 참조 시트 생성 시작", phase='GEN')
             # 멀티뷰도 CLI 호출이므로 AI 슬롯을 점유한다
@@ -439,6 +467,28 @@ class GenerationSession:
             log_text += "\n" + "\n".join(f"  · {line}" for line in detail)
         self._set_status(status, log_text, phase="", hint=hint)
         _end_session(self.uid)
+        self._notify_parent(ok)
+
+    def _parent_session(self):
+        """이 세션을 스폰한 배경 세션. 부모가 아니거나 이미 끝났으면 None."""
+        if not self.parent_uid:
+            return None
+        for session in _sessions.values():
+            if str(session.uid) == self.parent_uid:
+                return session
+        return None
+
+    def _notify_parent(self, ok: bool):
+        """에셋 자식이 끝났음을 부모 배경 세션에 알린다 (집계는 부모가 한다)."""
+        parent = self._parent_session()
+        report = getattr(parent, "on_child_done", None)
+        if report is None:
+            return
+        try:
+            report(self.uid, bool(ok))
+        except Exception:
+            # 여기서 터지면 자식 마감이 부모 세션을 통째로 잠근다 — 로그만 남긴다
+            _log.exception("LP3D 부모 배경 세션 통지 실패")
 
     def _archive(self, code: str) -> str:
         """성공 결과를 라이브러리에 축적한다 — 실패해도 세션 결과에는 영향을 주지 않는다."""
@@ -503,25 +553,7 @@ class GenerationSession:
 
     def _handle_response(self, stdout, error):
         if error:
-            if "사용자 취소" in error:
-                return  # cancel()이 이미 정리함
-            if self._try_model_fallback(error):
-                return
-            kind = errors.classify(error)
-            reason = errors.describe(error, self.backend.name)
-            # 인증·사용량 문제는 재시도해도 똑같이 실패한다 — 폴백을 건너뛰고
-            # 바로 조치 문구를 보여준다 (예전에는 "CLI 종료 코드 1"만 보였다)
-            retryable = kind not in (errors.AUTH, errors.QUOTA, errors.MISSING)
-            # resume이 깨졌으면 stateless 폴백으로 1회 재시도
-            if retryable and getattr(self, "_was_resume", False) and not self.fallback_used:
-                self.fallback_used = True
-                self.stateless = True
-                self._set_status("세션 이어가기 실패, 폴백 재시도...",
-                                 f"resume 실패: {reason}", phase='GEN')
-                self._dispatch("직전 지시를 계속 수행하라. 전체 코드를 다시 작성하라.")
-                return
-            self._finish(f"실패: {reason}", ok=False, detail=errors.detail_lines(error),
-                         hint=errors.action(error, self.backend.name))
+            self._handle_error(error)
             return
 
         try:
@@ -531,8 +563,40 @@ class GenerationSession:
             return
         if reply.session_id:
             self.session_id = reply.session_id
+        self._handle_reply(reply.text)
 
-        status, code = parse_agent_reply(reply.text)
+    def _handle_error(self, error):
+        """CLI 실패 처리 — 폴백·재시도 규칙은 제작 모드와 무관하게 같다."""
+        if "사용자 취소" in error:
+            return  # cancel()이 이미 정리함
+        if self._try_model_fallback(error):
+            return
+        kind = errors.classify(error)
+        reason = errors.describe(error, self.backend.name)
+        # 인증·사용량 문제는 재시도해도 똑같이 실패한다 — 폴백을 건너뛰고
+        # 바로 조치 문구를 보여준다 (예전에는 "CLI 종료 코드 1"만 보였다)
+        retryable = kind not in (errors.AUTH, errors.QUOTA, errors.MISSING)
+        # resume이 깨졌으면 stateless 폴백으로 1회 재시도
+        if retryable and getattr(self, "_was_resume", False) and not self.fallback_used:
+            self.fallback_used = True
+            self.stateless = True
+            self._set_status("세션 이어가기 실패, 폴백 재시도...",
+                             f"resume 실패: {reason}", phase='GEN')
+            self._resume_fallback_dispatch()
+            return
+        self._finish(f"실패: {reason}", ok=False, detail=errors.detail_lines(error),
+                     hint=errors.action(error, self.backend.name))
+
+    def _resume_fallback_dispatch(self):
+        """resume이 깨져 대화 맥락을 잃었을 때 보낼 요청.
+
+        배경 모드는 턴마다 요구하는 출력 형식이 달라(플랜은 JSON, 배치는 python)
+        이 문구를 그대로 쓸 수 없다 — SceneSession이 단계별로 갈아끼운다."""
+        self._dispatch("직전 지시를 계속 수행하라. 전체 코드를 다시 작성하라.")
+
+    def _handle_reply(self, text: str):
+        """성공 응답 처리 — 배경 모드는 플랜 턴에서 이 단계를 갈아끼운다."""
+        status, code = parse_agent_reply(text)
         if code is None:
             if self.format_retries < 1:
                 self.format_retries += 1
@@ -631,7 +695,7 @@ class GenerationSession:
                 game_ready(obj)
             tris = collection_tri_count(coll)
             # 배치 실행 결과가 원점에 겹치지 않도록 레인만큼 옆으로 민다 (텍스처 대기 중에도)
-            jobs.apply_lane_offset(self.collection_name, self.lane)
+            self._apply_lane()
             note = f", 은면 {removed}개 제거" if removed else ""
             self._final_note = f"{tris} tris{note}"
             if self.modeling_type == 'TEXTURE' and mesh_objs:
@@ -648,9 +712,18 @@ class GenerationSession:
         else:
             self._finish("실패: 생성된 오브젝트 없음", ok=False)
 
+    def _apply_lane(self):
+        """레인 오프셋 적용 (표식으로 이중 적용을 막는다).
+
+        에셋 자식 잡은 부모 씬 컬렉션 안에서 조립되므로 옮기지 않는다 —
+        부모가 마무리 단계에서 씬 전체를 한 번에 민다."""
+        if self.parent_uid:
+            return
+        jobs.apply_lane_offset(self.collection_name, self.lane)
+
     def _finish_placed(self, extra: str = ""):
         """성공 마감. extra는 텍스처 단계 결과 문구."""
-        jobs.apply_lane_offset(self.collection_name, self.lane)  # 표식으로 이중 적용을 막는다
+        self._apply_lane()
         self._finish(f"완료 — {self.collection_name} ({self._final_note}{extra})", ok=True)
 
     # ---------- 개별 매핑 (언랩 → 6면도 가이드 → AI 텍스처 → 베이크) ----------
@@ -737,7 +810,9 @@ class GenerationSession:
             self._submit_blender(lambda: self._blender_bake_texture(path))
         except Exception as e:
             _log.exception("LP3D 텍스처 콜백 처리 실패")
-            self._submit_blender(lambda: self._texture_fallback(f"콜백 오류 {type(e).__name__}: {e}"))
+            # except 블록을 벗어나면 e가 사라지므로 문구를 먼저 만들어 람다에 넘긴다
+            detail = f"콜백 오류 {type(e).__name__}: {e}"
+            self._submit_blender(lambda: self._texture_fallback(detail))
 
     def _blender_bake_texture(self, sheet_path: str):
         def _run():

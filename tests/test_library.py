@@ -113,5 +113,45 @@ class TestFewshot(LibraryTestCase):
         self.assertNotIn("합격한 유사 모델", prompts.build_initial_prompt("파란 승용차"))
 
 
+class TestModeFilter(LibraryTestCase):
+    """제작 모드 분리 — 오브젝트 코드와 배경 배치 코드는 규칙이 정반대라 섞이면 안 된다."""
+
+    def test_mode_defaults_to_object(self):
+        library.save_entry("빨간 승용차", "car_code")
+        self.assertEqual(library.load_index()[0]["mode"], "OBJECT")
+
+    def test_scene_entry_records_mode(self):
+        library.save_entry("낡은 포로 수용소", "scene_code", mode="SCENE")
+        self.assertEqual(library.load_index()[0]["mode"], "SCENE")
+
+    def test_find_similar_filters_by_mode(self):
+        library.save_entry("빨간 승용차", "car_code")
+        library.save_entry("빨간 승용차 주차장", "scene_code", mode="SCENE")
+        objects = library.find_similar("파란 승용차", mode="OBJECT")
+        scenes = library.find_similar("파란 승용차", mode="SCENE")
+        self.assertEqual([e["request"] for e in objects], ["빨간 승용차"])
+        self.assertEqual([e["request"] for e in scenes], ["빨간 승용차 주차장"])
+
+    def test_find_similar_without_mode_sees_all(self):
+        library.save_entry("빨간 승용차", "car_code")
+        library.save_entry("빨간 승용차 주차장", "scene_code", mode="SCENE")
+        self.assertEqual(len(library.find_similar("파란 승용차")), 2)
+
+    def test_legacy_entry_without_mode_counts_as_object(self):
+        library.save_entry("빨간 승용차", "car_code")
+        entries = library.load_index()
+        del entries[0]["mode"]  # mode 필드가 없던 구버전 인덱스
+        library._write_index(entries)
+        self.assertEqual(len(library.find_similar("파란 승용차", mode="OBJECT")), 1)
+        self.assertEqual(library.find_similar("파란 승용차", mode="SCENE"), [])
+
+    def test_fewshot_defaults_to_object_only(self):
+        library.save_entry("빨간 승용차 주차장", "scene_code", mode="SCENE")
+        self.assertEqual(library.fewshot_examples("파란 승용차 주차장"), [])
+        library.save_entry("빨간 승용차 주차장", "car_code")
+        self.assertEqual(library.fewshot_examples("파란 승용차 주차장"),
+                         [("빨간 승용차 주차장", "car_code")])
+
+
 if __name__ == "__main__":
     unittest.main()

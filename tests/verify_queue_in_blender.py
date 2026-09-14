@@ -8,8 +8,16 @@
 # 실행:
 #   .\scripts\dev_run.ps1 -Background -PythonFile tests\verify_queue_in_blender.py
 #   ./scripts/dev_run.sh --background --python tests/verify_queue_in_blender.py
+import os
+import shutil
+import tempfile
+
 import bpy
-from bl_ext.user_default.lp3d_modelmaker.core import jobs, lanes, scheduler, session
+from bl_ext.user_default.lp3d_modelmaker import lowpoly, preferences
+from bl_ext.user_default.lp3d_modelmaker.core import (jobs, lanes, scene_kit,
+                                                      scene_session, scheduler,
+                                                      session)
+from bl_ext.user_default.lp3d_modelmaker.pipeline import export
 
 fails = []
 
@@ -119,6 +127,231 @@ try:
     # 10) 유휴 상태 shutdown — Dev Reload가 살아있는 세션 없이도 안전해야 한다
     session.shutdown()
     check("유휴 shutdown 무해", session.active_count() == 0)
+
+    # 11) 배경 잡 라우팅 — SCENE 최상위 잡만 배경 상태머신을 써야 한다.
+    # CLI는 부르지 않는다: start()를 무력화하고 어떤 세션 객체가 만들어지는지만 본다.
+    original_resolve = preferences.resolve_cli_path
+    original_start = session.GenerationSession.start
+    original_scene_start = scene_session.SceneSession.start
+    preferences.resolve_cli_path = lambda agent='CODEX': "/usr/bin/true"
+    session.GenerationSession.start = lambda self: None
+    scene_session.SceneSession.start = lambda self: None
+    try:
+        scene_job = jobs.add_job(props, "포로 수용소")
+        scene_job.creation_mode = 'SCENE'
+        scene_job.scene_size = 'L'
+        scene_uid = scene_job.uid
+        error = session.start_job(probe_scene.name, scene_uid)
+        routed = session._sessions.get(scene_uid)
+        check("SCENE 잡은 SceneSession으로 라우팅",
+              isinstance(routed, scene_session.SceneSession), repr(error))
+        check("배경 세션이 씬 규모를 고정",
+              getattr(routed, "scene_size", "") == 'L')
+        check("배경 세션 타임아웃 배수 적용",
+              getattr(routed, "timeout", 0) >= preferences.get_prefs().timeout,
+              str(getattr(routed, "timeout", 0)))
+        session._sessions.pop(scene_uid, None)
+
+        obj_uid = jobs.add_job(props, "나무 상자").uid
+        session.start_job(probe_scene.name, obj_uid)
+        plain = session._sessions.get(obj_uid)
+        check("OBJECT 잡은 기존 세션 유지",
+              plain is not None and not isinstance(plain, scene_session.SceneSession))
+        session._sessions.pop(obj_uid, None)
+
+        # add_child_job은 부모 뒤로 항목을 옮긴다 — 옮긴 뒤의 참조가 맞아야
+        # 부모 세션이 엉뚱한 잡을 자식으로 구동하지 않는다
+        child = jobs.add_child_job(props, scene_uid, "감시탑")
+        child_uid = child.uid
+        check("자식 항목이 부모를 가리킴", child.parent_uid == str(scene_uid),
+              f"{child.parent_uid} vs {scene_uid}")
+        check("자식이 부모 바로 뒤에 놓임",
+              [j.uid for j in props.jobs] == [scene_uid, child_uid, obj_uid],
+              str([j.uid for j in props.jobs]))
+        session.start_job(probe_scene.name, child_uid, multiview_override=True)
+        child_session = session._sessions.get(child_uid)
+        check("에셋 자식은 오브젝트 세션",
+              child_session is not None
+              and not isinstance(child_session, scene_session.SceneSession))
+        check("자식 세션이 부모 uid를 기억",
+              getattr(child_session, "parent_uid", "") == str(scene_uid))
+        check("멀티뷰 오버라이드 적용", child_session._use_multiview() is True)
+        session._sessions.pop(child_uid, None)
+    finally:
+        preferences.resolve_cli_path = original_resolve
+        session.GenerationSession.start = original_start
+        scene_session.SceneSession.start = original_scene_start
+    jobs.remove_job(bpy.context, next(i for i, j in enumerate(props.jobs)
+                                      if j.uid == scene_uid))
+    check("부모 삭제로 자식도 사라짐",
+          [j.uid for j in props.jobs] == [obj_uid], str([j.uid for j in props.jobs]))
+    jobs.remove_job(bpy.context, next(i for i, j in enumerate(props.jobs)
+                                      if j.uid == obj_uid))
+
+    # 12) 키트 정리 — 자식 결과를 합쳐 키트 컬렉션으로 옮기고 명단을 만든다.
+    # 배치 턴(_start_place)은 CLI 호출이므로 막아두고 bpy 경로만 확인한다.
+    parent = jobs.add_job(props, "포로 수용소")
+    parent.creation_mode = 'SCENE'
+    parent.scene_size = 'M'
+    parent_uid = parent.uid
+    # 앞선 세션이 크래시로 남긴 동명의 키트를 재사용하면 남의 에셋을 배치하게 된다
+    stale_kit = bpy.data.collections.new("LP3D_Model" + scene_session.KIT_SUFFIX)
+    probe_scene.collection.children.link(stale_kit)
+    kit_session = scene_session.SceneSession(
+        scene_name=probe_scene.name, uid=parent_uid, request="포로 수용소",
+        exe="/usr/bin/true", lane=1, scene_size='M')
+    check("잔존 키트 컬렉션을 재사용하지 않음",
+          kit_session.kit_collection_name != stale_kit.name,
+          kit_session.kit_collection_name)
+    bpy.data.collections.remove(stale_kit)
+    kit_session.stage = 'KIT'
+    kit_session._start_place = lambda: None  # 배치 턴 진입 차단
+    kit_session.plan = {
+        "scene": {"size": "M", "palette": ["#6f7a5a", "#8a7a5c", "#b8ae95"]},
+        "zones": [{"name": "yard", "center": [0, 0], "extent": [20, 20], "purpose": "연병장"}],
+        "assets": [
+            {"key": "watchtower", "prompt": "감시탑", "count": 1, "size_class": "L",
+             "zone": "yard", "landmark": True},
+            {"key": "barrel", "prompt": "드럼통", "count": 4, "size_class": "S",
+             "zone": "yard", "landmark": False},
+            {"key": "crate", "prompt": "나무 상자", "count": 2, "size_class": "S",
+             "zone": "yard", "landmark": False},
+        ],
+        "rules": [],
+    }
+
+    def make_child(key, part_count):
+        """자식 에셋 잡 하나가 끝난 상태를 만들고 uid를 돌려준다."""
+        item = jobs.add_child_job(props, parent_uid, key)
+        coll_name = f"LP3D_child_{key}"
+        coll = bpy.data.collections.new(coll_name)
+        probe_scene.collection.children.link(coll)
+        for i in range(part_count):
+            mesh = bpy.data.meshes.new(f"{coll_name}_{i}")
+            mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)], [],
+                             [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)])
+            mesh.update()
+            part = bpy.data.objects.new(f"{coll_name}_{i}", mesh)
+            part.location = (i * 2.0, 0.0, 0.0)
+            coll.objects.link(part)
+        item.collection_name = coll_name
+        item.state = 'DONE'
+        return item.uid
+
+    tower = make_child("watchtower", 3)   # 여러 파트 → join으로 1개가 되어야 한다
+    barrel = make_child("barrel", 1)
+    crate = make_child("crate", 1)
+    kit_session.children = {tower: "watchtower", barrel: "barrel", crate: "crate"}
+    kit_session.landmark_uids = [tower]
+    kit_session.child_results = {tower: True, barrel: True, crate: False}
+
+    kit_session._blender_collect_kit()
+    kit_coll = bpy.data.collections.get(kit_session.kit_collection_name)
+    check("키트 컬렉션 생성", kit_coll is not None, kit_session.kit_collection_name)
+    check("키트 컬렉션은 씬 최상위(세션 컬렉션의 형제)",
+          kit_coll is not None and kit_coll.name in probe_scene.collection.children)
+    names = sorted(o.name for o in kit_coll.objects) if kit_coll else []
+    check("성공 에셋만 키트에 들어감", names == ["barrel", "watchtower"], str(names))
+    check("여러 파트는 1개로 병합",
+          kit_coll is not None
+          and len([o for o in kit_coll.objects if o.name == "watchtower"]) == 1)
+    check("실패 에셋은 명단에서 제외",
+          sorted(scene_kit.manifest_keys(kit_session.kit_manifest)) == ["barrel", "watchtower"],
+          str(kit_session.kit_manifest))
+    check("명단에 크기·트라이 기록",
+          all(item["tri"] > 0 and max(item["size"]) > 0 for item in kit_session.kit_manifest),
+          str(kit_session.kit_manifest))
+    check("배치용 플랜에서 실패 에셋 제거",
+          [a["key"] for a in kit_session.place_plan["assets"]] == ["watchtower", "barrel"])
+    check("자식 컬렉션 전부 제거 (실패 에셋 포함)",
+          all(bpy.data.collections.get(f"LP3D_child_{k}") is None
+              for k in ("watchtower", "barrel", "crate")))
+    # 자식 결과 이름을 키트로 바꿔두면 자식 항목 익스포트가 키트 전체를 내보낸다
+    check("자식 항목 결과 이름은 비워둠",
+          all(props.job_by_uid(u).collection_name == ""
+              for u in (tower, barrel, crate)),
+          str([props.job_by_uid(u).collection_name for u in (tower, barrel, crate)]))
+    check("lp.kit이 키트에서 원본을 찾음",
+          lowpoly.kit("barrel").name == "barrel")
+
+    # 인스턴스는 메시를 공유해야 예산과 드로우콜이 늘지 않는다
+    lowpoly.set_session(kit_session.collection_name)
+    inst = lowpoly.instance(lowpoly.kit("barrel"), location=(3.0, 0.0, 0.0))
+    check("인스턴스가 메시를 공유", inst.data.users > 1, str(inst.data.users))
+
+    # 키트는 결과가 아니라 재료다 — 마무리 뒤 뷰 레이어에서 빠져야 한다
+    kit_session._hide_kit()
+    layer = scene_session._find_layer(probe_scene.view_layers[0].layer_collection,
+                                      kit_session.kit_collection_name)
+    check("키트 컬렉션 뷰 레이어 제외", layer is not None and layer.exclude is True)
+    # 지정을 남겨두면 다음 오브젝트 잡의 lp.kit()이 남의 키트를 본다
+    check("마무리 후 키트 조회 대상 해제", lowpoly._kit_collection_name is None)
+
+    kit_session._remove_kit()
+    check("키트 정리 후 컬렉션 제거",
+          bpy.data.collections.get(kit_session.kit_collection_name) is None)
+    check("인스턴스 메시는 남는다", inst.data is not None and len(inst.data.polygons) > 0)
+
+    # 실패로 끝나면 키트는 참조할 배치가 없다 — .blend에 남기지 않아야 한다
+    fail_session = scene_session.SceneSession(
+        scene_name=probe_scene.name, uid=parent_uid, request="실패 확인",
+        exe="/usr/bin/true", lane=0, scene_size='S')
+    fail_session._kit_collection()
+    fail_kit_name = fail_session.kit_collection_name
+    fail_session._finish("실패: 배치 코드 실행 오류 반복", ok=False)
+    check("실패 종료 시 키트 제거",
+          bpy.data.collections.get(fail_kit_name) is None, fail_kit_name)
+    shutil.rmtree(fail_session.workdir, ignore_errors=True)
+
+    # 자식 잡 단독 조작 금지 — 부모만이 자식을 구동하고 결과를 거둬간다
+    child_index = next(i for i, j in enumerate(props.jobs) if j.uid == tower)
+    check("자식 잡 단독 재시도 거부", bool(jobs.retry_job(bpy.context, child_index)))
+    before = [j.uid for j in props.jobs]
+    jobs.move_job(props, child_index, -1)
+    check("자식 잡 이동 금지", [j.uid for j in props.jobs] == before,
+          str([j.uid for j in props.jobs]))
+
+    # 13) 배경 레인 간격 — 씬 한 변보다 넓게 벌어져야 옆 레인과 겹치지 않는다
+    # 인스턴스를 만들 때 lowpoly.root()가 세션 컬렉션을 이미 만들어 두었다
+    lane_coll = bpy.data.collections.get(kit_session.collection_name)
+    check("세션 컬렉션 생성", lane_coll is not None, kit_session.collection_name)
+    lane_obj = bpy.data.objects.new("LP3D_SceneLaneProbe",
+                                    bpy.data.meshes.new("LP3D_SceneLaneProbeMesh"))
+    lane_coll.objects.link(lane_obj)
+    kit_session._apply_lane()
+    check("배경 레인 간격은 씬 크기 기준",
+          abs(lane_obj.location.y - scene_kit.scene_spacing('M')) < 1e-6,
+          f"y={lane_obj.location.y}")
+    check("기본 레인 간격보다 넓음", scene_kit.scene_spacing('M') > lanes.LANE_SPACING)
+
+    # 14) 익스포트 — 인스턴스(공유 메시)가 나가고 키트 컬렉션은 따라가지 않아야 한다
+    export_kit = bpy.data.collections.new(kit_session.kit_collection_name)
+    probe_scene.collection.children.link(export_kit)
+    kit_only = bpy.data.objects.new("LP3D_KitOnlyProbe", inst.data)
+    export_kit.objects.link(kit_only)
+    out_dir = tempfile.mkdtemp(prefix="lp3d_export_probe_")
+    try:
+        fbx = export.export_collection(lane_coll, out_dir, 'FBX')
+        check("FBX 익스포트 성공", os.path.isfile(fbx) and os.path.getsize(fbx) > 0, fbx)
+        glb = export.export_collection(lane_coll, out_dir, 'GLTF')
+        check("glTF 익스포트 성공", os.path.isfile(glb) and os.path.getsize(glb) > 0, glb)
+        check("익스포트 대상은 세션 컬렉션뿐",
+              kit_only.name not in {o.name for o in lane_coll.objects})
+        check("익스포트 후에도 인스턴스 메시 공유 유지", inst.data.users > 1,
+              str(inst.data.users))
+    except Exception as e:
+        check("익스포트 예외 없음", False, f"{type(e).__name__}: {e}")
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        bpy.data.objects.remove(kit_only)
+        bpy.data.collections.remove(export_kit)
+
+    for obj in (inst, lane_obj):
+        bpy.data.objects.remove(obj)
+    bpy.data.collections.remove(lane_coll)
+    shutil.rmtree(kit_session.workdir, ignore_errors=True)
+    while len(props.jobs):
+        jobs.remove_job(bpy.context, 0)
 
     print(("실패 " + ", ".join(fails)) if fails else "모두 통과")
     if fails:

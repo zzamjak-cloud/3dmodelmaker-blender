@@ -3,7 +3,8 @@ import os
 import shutil
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
+from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
+                       StringProperty)
 
 # macOS Finder로 실행한 Blender는 사용자 PATH를 상속하지 않으므로 흔한 설치 경로를 직접 탐색
 _EXTRA_PATHS = (
@@ -80,6 +81,24 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default='1024',
         update=_persist_cb,
     )
+    scene_tri_budget: IntProperty(
+        name="배경 씬 트라이 예산",
+        description="배경 공간 하나가 쓸 수 있는 전체 삼각형 수 상한 — 플랜의 에셋 개수·밀도를 여기에 맞춰 줄인다",
+        default=80000, min=10000, max=500000,
+        update=_persist_cb,
+    )
+    scene_max_assets: IntProperty(
+        name="배경 에셋 종류 상한",
+        description="배경 플랜이 요청할 수 있는 고유 에셋 종류 수 — 많을수록 키트 생성 시간이 길어진다",
+        default=12, min=4, max=24,
+        update=_persist_cb,
+    )
+    scene_timeout_scale: FloatProperty(
+        name="배경 턴 타임아웃 배수",
+        description="배경 모드의 플랜·배치 턴은 오브젝트 한 개보다 오래 걸린다 — CLI 타임아웃에 이 배수를 곱한다",
+        default=2.0, min=1.0, max=5.0,
+        update=_persist_cb,
+    )
     asset_library_path: StringProperty(
         name="에셋 라이브러리 경로",
         description="Asset Browser 라이브러리 루트 (카탈로그 파일 위치)",
@@ -96,6 +115,11 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col.prop(self, "use_multiview")
         col.prop(self, "use_library")
         col.prop(self, "texture_resolution")
+        scene_box = self.layout.box()
+        scene_box.label(text="배경 공간", icon='WORLD')
+        scene_box.prop(self, "scene_tri_budget")
+        scene_box.prop(self, "scene_max_assets")
+        scene_box.prop(self, "scene_timeout_scale")
         from .core import library
         try:
             info = library.stats()
@@ -114,6 +138,9 @@ class _Defaults:
     use_library = True
     asset_library_path = ""
     texture_resolution = '1024'
+    scene_tri_budget = 80000
+    scene_max_assets = 12
+    scene_timeout_scale = 2.0
 
 
 _DEFAULTS = _Defaults()

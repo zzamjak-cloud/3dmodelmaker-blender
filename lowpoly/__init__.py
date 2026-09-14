@@ -9,6 +9,8 @@ from .modeling import (bevel, mirror_x, array, scatter, taper, shade_flat,
                        bend, bulge, shear, stretch_at, jitter)
 from .palette import set_color
 from .cleanup import game_ready
+from .scene import (terrain, instance, place_grid, place_along, place_scatter,
+                    wall_run, path_strip, ground_snap, kit)
 
 __all__ = [
     "root", "box", "cylinder", "cone", "sphere", "plane", "lathe", "prism", "tube", "join",
@@ -17,13 +19,39 @@ __all__ = [
     "set_color", "game_ready",
 ]
 
+# 배경(SCENE) 모드 프롬프트에만 노출되는 씬 헬퍼 어휘 — __all__과 분리해 둔다
+SCENE_API = [
+    "terrain", "instance", "place_grid", "place_along", "place_scatter",
+    "wall_run", "path_strip", "ground_snap", "kit",
+]
+
 # 현재 생성 세션의 전용 컬렉션 이름 — executor가 실행 전에 설정
 _session_collection_name = "LP3D_Model"
+
+
+# kit()이 원본 에셋을 찾는 컬렉션 이름 — None이면 세션 컬렉션에서 찾는다
+_kit_collection_name = None
 
 
 def set_session(collection_name: str):
     global _session_collection_name
     _session_collection_name = collection_name
+
+
+def set_kit_collection(name):
+    """kit()이 조회할 에셋 키트 컬렉션 이름을 지정한다. None이면 세션 컬렉션을 쓴다."""
+    global _kit_collection_name
+    _kit_collection_name = name
+
+
+def clear_kit_collection(name=None):
+    """키트 조회 대상을 해제한다.
+
+    name을 주면 현재 지정값이 그 이름일 때만 해제한다 — 배경 세션이 여럿이면
+    먼저 끝난 쪽이 다른 세션이 막 지정해 둔 키트를 빼앗으면 안 된다."""
+    global _kit_collection_name
+    if name is None or _kit_collection_name == name:
+        _kit_collection_name = None
 
 
 def root() -> bpy.types.Collection:

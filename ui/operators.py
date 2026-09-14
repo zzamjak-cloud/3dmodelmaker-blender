@@ -12,6 +12,20 @@ from ..core import (clipboard_image, jobs, library, multiview, native_input,
                     session)
 
 
+def _is_child_job(job) -> bool:
+    """배경 잡이 스폰한 에셋 잡인지.
+
+    에셋 잡의 결과는 마무리 단계에서 부모 키트 컬렉션으로 병합되므로
+    단독 익스포트·에셋 등록·변형·재시도 대상이 아니다."""
+    return bool(job is not None and getattr(job, "parent_uid", ""))
+
+
+def _standalone_job(context):
+    """단독으로 다룰 수 있는 선택 항목. 자식 에셋 잡이면 None."""
+    job = context.scene.lp3d.active_job()
+    return None if _is_child_job(job) else job
+
+
 class LP3D_OT_job_add(bpy.types.Operator):
     bl_idname = "lp3d.job_add"
     bl_label = "항목 추가"
@@ -92,7 +106,7 @@ class LP3D_OT_job_retry(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        job = context.scene.lp3d.active_job()
+        job = _standalone_job(context)
         return job is not None and job.state in ('FAILED', 'CANCELLED')
 
     def execute(self, context):
@@ -364,7 +378,7 @@ class LP3D_OT_variation(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        job = context.scene.lp3d.active_job()
+        job = _standalone_job(context)
         return job is not None and bool(job.code)
 
     def execute(self, context):
@@ -398,7 +412,7 @@ class LP3D_OT_export(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        job = context.scene.lp3d.active_job()
+        job = _standalone_job(context)
         return job is not None and bool(job.collection_name)
 
     def execute(self, context):
@@ -427,7 +441,7 @@ class LP3D_OT_mark_asset(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        job = context.scene.lp3d.active_job()
+        job = _standalone_job(context)
         return job is not None and bool(job.collection_name)
 
     def execute(self, context):

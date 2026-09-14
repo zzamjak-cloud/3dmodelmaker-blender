@@ -9,15 +9,18 @@
 LANE_SPACING = 4.0  # 레인 간 Y축 간격(미터)
 
 
-def lane_dy(lane) -> float:
-    """레인 번호에 대응하는 Y 오프셋. 음수 레인은 원점으로 클램프한다."""
-    return LANE_SPACING * max(int(lane or 0), 0)
+def lane_dy(lane, spacing: float = LANE_SPACING) -> float:
+    """레인 번호에 대응하는 Y 오프셋. 음수 레인은 원점으로 클램프한다.
+
+    spacing은 레인 간격(m)이다. 배경 공간처럼 결과가 수십 미터에 걸치는 잡은
+    기본 4m로는 서로 겹치므로 호출 쪽에서 씬 크기에 맞는 간격을 넘긴다."""
+    return spacing * max(int(lane or 0), 0)
 
 
-def lane_shift(applied, lane) -> float:
+def lane_shift(applied, lane, spacing: float = LANE_SPACING) -> float:
     """applied 레인에 놓인 오브젝트를 lane으로 옮기는 이동량.
 
     오브젝트 이동은 상대 이동이라 매번 더하면 누적된다 — 개선 세션은 같은 컬렉션을
     재사용하고, 에이전트가 코드 없이 STATUS: DONE으로 끝내면 오브젝트가 다시
     만들어지지 않은 채 마무리에 도달한다. 그때 또 밀리지 않도록 차분만 낸다."""
-    return lane_dy(lane) - lane_dy(applied)
+    return lane_dy(lane, spacing) - lane_dy(applied, spacing)

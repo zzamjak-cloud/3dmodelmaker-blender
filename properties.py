@@ -41,6 +41,28 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         subtype='FILE_PATH',
         default="",
     )
+    creation_mode: EnumProperty(
+        name="제작 모드",
+        description="이 항목으로 무엇을 만들지 — 단일 오브젝트인지, 여러 에셋으로 구성된 배경 공간인지",
+        items=[
+            ('OBJECT', "오브젝트", "단일 오브젝트 생성 (멀티뷰 3면도 기반)"),
+            ('SCENE', "배경 공간", "여러 에셋으로 구성된 배경 공간 생성 (플랜 → 에셋 키트 → 배치)"),
+        ],
+        default='OBJECT',
+    )
+    scene_size: EnumProperty(
+        name="씬 규모",
+        description="배경 공간의 한 변 기준 크기 — 트라이 예산과 에셋 밀도의 기준이 된다",
+        items=[
+            ('S', "소형", "약 20m 규모"),
+            ('M', "중형", "약 40m 규모"),
+            ('L', "대형", "약 80m 규모"),
+        ],
+        default='M',
+    )
+    # 배경 잡이 플랜에 따라 스폰한 에셋 잡은 부모 uid를 문자열로 들고 있다.
+    # 빈 문자열이면 사용자가 직접 만든 최상위 잡이다.
+    parent_uid: StringProperty(default="")
     modeling_type: EnumProperty(
         name="모델링 타입",
         description="결과 모델의 재질 방식",
@@ -66,7 +88,8 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     # 실패 시 사용자가 할 일 (예: "터미널에서 `codex login` 실행 후 다시 시도").
     # 상태줄에 함께 넣으면 사이드바 폭에서 가운데가 잘려 정작 조치가 사라진다.
     status_hint: StringProperty(default="")
-    phase: StringProperty(default="")        # GEN/EXEC/FINAL
+    # 오브젝트 모드: GEN/EXEC/FINAL/TEX, 배경 모드: VIEW/PLAN/KIT/PLACE/FINAL
+    phase: StringProperty(default="")
     started_at: FloatProperty(default=0.0)   # 경과 시간 표시용
     iteration: IntProperty(default=0)
     total_turns: IntProperty(default=0)

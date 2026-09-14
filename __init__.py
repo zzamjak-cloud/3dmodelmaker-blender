@@ -58,11 +58,15 @@ def dev_reload():
     원인을 찾기 어려운 오류를 낸다."""
     unregister()
     failed = []
-    for mod in _reload_targets():
-        try:
-            importlib.reload(mod)
-        except Exception as e:
-            failed.append(f"{mod.__name__}: {e}")
+    # 같은 깊이의 형제 모듈이 서로 임포트하면(예: scene_session → session) 한 번의
+    # 리로드로는 먼저 갱신된 모듈이 구버전 객체를 물고 있으므로 정순·역순 두 번 돌린다.
+    targets = _reload_targets()
+    for pass_targets in (targets, list(reversed(targets))):
+        for mod in pass_targets:
+            try:
+                importlib.reload(mod)
+            except Exception as e:
+                failed.append(f"{mod.__name__}: {e}")
     for mod in _MODULES:
         try:
             importlib.reload(mod)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # AI LowPoly ModelMaker — GPT-6 Astra로 로우폴리 모델을 생성하는 애드온
 import importlib
 import pkgutil

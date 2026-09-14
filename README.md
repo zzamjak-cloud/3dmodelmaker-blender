@@ -157,3 +157,7 @@ blender --background --factory-startup --python tests/verify_cull_in_blender.py 
 blender --background --factory-startup --python tests/verify_geometry_in_blender.py  # 대칭도 등 QA 지표
 blender --background --factory-startup --python tests/verify_texturing_in_blender.py # 개별 매핑: 언랩·6면도 렌더·베이크·재질 교체
 ```
+
+## 라이선스
+
+GPL-3.0-or-later. 자세한 내용은 [LICENSE](LICENSE)를 확인하세요.

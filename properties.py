@@ -5,6 +5,19 @@ from bpy.props import (BoolProperty, CollectionProperty, EnumProperty,
                        FloatProperty, IntProperty, PointerProperty,
                        StringProperty)
 
+# 스타일 목록은 콜백으로 넘긴다 — properties.py는 bpy만 대역으로 세워 두고
+# 패키지 컨텍스트 없이 로드되는 경로(유닛 테스트)가 있어 상위 패키지를 모듈 로드
+# 시점에 import할 수 없다. 반환 리스트는 반드시 파이썬 쪽에서 참조를 붙들어야
+# 한다 — Blender는 동적 enum의 문자열 수명을 보장하지 않아 라벨이 깨진다.
+_STYLE_ITEMS = []
+
+
+def _style_items(self, context):
+    if not _STYLE_ITEMS:
+        from .core import styles
+        _STYLE_ITEMS.extend(styles.enum_items())
+    return _STYLE_ITEMS
+
 
 def _persist_cb(self, context):
     # 익스포트 폴더는 파일이 바뀌어도 유지되도록 JSON에 저장
@@ -63,6 +76,11 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     # 배경 잡이 플랜에 따라 스폰한 에셋 잡은 부모 uid를 문자열로 들고 있다.
     # 빈 문자열이면 사용자가 직접 만든 최상위 잡이다.
     parent_uid: StringProperty(default="")
+    style: EnumProperty(
+        name="스타일",
+        description="결과 모델의 아트 스타일 — 형태 규칙·폴리 버짓·배색과 참조 시트 스타일을 함께 정한다",
+        items=_style_items,
+    )
     modeling_type: EnumProperty(
         name="모델링 타입",
         description="결과 모델의 재질 방식",

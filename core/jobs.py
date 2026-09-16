@@ -33,11 +33,14 @@ def add_job(props, prompt: str = ""):
     return job
 
 
-def add_child_job(props, parent_uid, prompt: str = ""):
+def add_child_job(props, parent_uid, prompt: str = "", style: str = None):
     """배경 잡이 플랜에 따라 스폰하는 에셋 잡을 만든다.
 
     부모(와 이미 만들어진 형제들) 바로 뒤에 놓아 큐에서 묶여 보이게 한다.
-    에셋은 부모 씬 컬렉션 안에서 조립되므로 레인 오프셋을 적용하지 않는다(lane 0)."""
+    에셋은 부모 씬 컬렉션 안에서 조립되므로 레인 오프셋을 적용하지 않는다(lane 0).
+
+    style은 부모 배경 잡의 스타일을 물려주기 위한 것이다 — 물려주지 않으면 씬은
+    스타일리쉬인데 그 안의 프랍만 로우폴리로 나와 한 공간에서 스타일이 섞인다."""
     parent_uid = str(parent_uid)
     selected_uid = _selected_uid(props)
     job = props.jobs.add()
@@ -47,6 +50,8 @@ def add_child_job(props, parent_uid, prompt: str = ""):
     job.parent_uid = parent_uid
     job.creation_mode = 'OBJECT'
     job.modeling_type = 'PALETTE'
+    if style:
+        job.style = style
     job.lane = 0
 
     source = len(props.jobs) - 1
@@ -156,6 +161,7 @@ def duplicate_job(props, index: int):
         "modeling_type": src.modeling_type,
         "creation_mode": src.creation_mode,
         "scene_size": src.scene_size,
+        "style": src.style,
     }
     job = add_job(props, src.prompt)
     for key, value in values.items():

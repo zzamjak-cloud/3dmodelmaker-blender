@@ -7,6 +7,7 @@ import bpy
 from .primitives import box, cylinder, cone, sphere, plane, lathe, prism, tube, join
 from .modeling import (bevel, mirror_x, array, scatter, taper, shade_flat,
                        bend, bulge, shear, stretch_at, jitter)
+from .voxel import voxel, voxel_box, voxel_column
 from .palette import set_color
 from .cleanup import game_ready
 from .scene import (terrain, instance, place_grid, place_along, place_scatter,
@@ -18,6 +19,9 @@ __all__ = [
     "stretch_at", "jitter", "shade_flat",
     "set_color", "game_ready",
 ]
+
+# 복셀 스타일 프롬프트에만 노출되는 격자 헬퍼 — 다른 스타일에서는 어휘를 늘리지 않는다
+VOXEL_API = ["voxel", "voxel_box", "voxel_column"]
 
 # 배경(SCENE) 모드 프롬프트에만 노출되는 씬 헬퍼 어휘 — __all__과 분리해 둔다
 SCENE_API = [

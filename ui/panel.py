@@ -4,7 +4,7 @@ import time
 
 import bpy
 
-from ..core import models, scheduler, session
+from ..core import models, scheduler, session, styles
 from . import previews
 
 # 진행 단계 정의 (session.py의 phase 식별자와 일치)
@@ -134,10 +134,13 @@ class LP3D_PT_main(bpy.types.Panel):
         """제작 모드 선택 — 배경 공간은 머티리얼이 팔레트로 고정되고 씬 규모를 대신 고른다."""
         parent = _parent_job(props, job)
         if getattr(job, "parent_uid", ""):
-            # 에셋 잡의 모드는 부모 플랜이 정한다 — 사용자가 바꿀 값이 아니다
+            # 에셋 잡의 모드·스타일은 부모 플랜이 정한다 — 사용자가 바꿀 값이 아니다
             owner = (parent.prompt[:20] if parent else "")
             layout.label(text=f"배경 '{owner}'의 에셋", icon='LINKED')
+            if parent is not None:
+                layout.label(text=f"스타일: {styles.style_def(parent.style)['label']} (부모 승계)")
             return
+        layout.prop(job, "style", text="스타일")
         layout.prop(job, "creation_mode", text="제작 모드")
         if job.creation_mode == 'SCENE':
             layout.prop(job, "scene_size", text="씬 규모")

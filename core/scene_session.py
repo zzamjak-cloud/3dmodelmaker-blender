@@ -15,7 +15,7 @@ import os
 import bpy
 
 from . import (errors, jobs, library, prompts, runner, scene_kit, scene_plan,
-               sceneview, scheduler)
+               sceneview, scheduler, styles)
 from .session import GenerationSession, cancel_session, is_active
 
 _log = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ class SceneSession(GenerationSession):
     def start(self):
         self._begin()
         if self._use_multiview() and sceneview.is_available():
-            self._set_status("컨셉 시트 생성 중 (codex image_gen)...",
+            self._set_status("컨셉 시트 생성 중...",
                              "씬 컨셉 시트 생성 시작", phase='VIEW')
             self._submit_ai(self._run_sceneview)
             return
@@ -100,7 +100,8 @@ class SceneSession(GenerationSession):
 
     def _run_sceneview(self):
         sceneview.generate(self.request, self.scene_size, self.workdir, self.timeout,
-                           self._on_sceneview, ref_image=self.ref_image, job_key=self.uid)
+                           self._on_sceneview, ref_image=self.ref_image, job_key=self.uid,
+                           style_note=styles.image_note(self.style))
 
     def _on_sceneview(self, path, error=None):
         if self._stale():
@@ -201,7 +202,9 @@ class SceneSession(GenerationSession):
         for asset in self.plan["assets"]:
             prompt = prompts.build_scene_asset_prompt(
                 asset, palette, scene_plan.asset_tri_limit(asset.get("size_class")))
-            child = jobs.add_child_job(props, self.uid, prompt)
+            # 자식 에셋은 부모 씬의 스타일을 그대로 물려받는다 — 물려주지 않으면
+            # 씬과 그 안의 프랍이 서로 다른 스타일로 나온다
+            child = jobs.add_child_job(props, self.uid, prompt, style=self.style)
             specs.append((child.uid, asset))
         if not specs:
             self._finish("실패: 플랜에 만들 에셋이 없습니다", ok=False)

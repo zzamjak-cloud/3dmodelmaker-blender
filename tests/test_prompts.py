@@ -34,17 +34,17 @@ class TestRefImage(unittest.TestCase):
         self.assertFalse(hasattr(prompts, "build_improve_prompt"))
 
     def test_budget_is_10k(self):
-        # 첫 생성의 기존 품질 기준은 유지한다.
-        with open(os.path.join(_ROOT, "prompts", "system_lowpoly.md"), encoding="utf-8") as f:
-            sys_md = f.read()
-        self.assertIn("10000", sys_md)
+        # 로우폴리 스타일의 기존 품질 기준은 유지한다 (스타일 분리 전 값과 동일).
+        with open(os.path.join(_ROOT, "prompts", "styles", "lowpoly.md"), encoding="utf-8") as f:
+            style_md = f.read()
+        self.assertIn("10000", style_md)
         for old in ("≤ 1500", "≤ 5000", "프랍 1500"):
-            self.assertNotIn(old, sys_md)
+            self.assertNotIn(old, style_md)
 
     def test_system_prompt_forbids_reading_external_skill_files(self):
         # codex가 모델링 전에 SKILL.md를 읽으려다 샌드박스 접근 거부로 턴을 낭비했다
-        # build_system_prompt()는 bpy에 의존하므로 소스 md를 직접 읽는다
-        with open(os.path.join(_ROOT, "prompts", "system_lowpoly.md"), encoding="utf-8") as f:
+        # 스타일과 무관한 지침이므로 공통 골격(system_base.md)에 있어야 한다
+        with open(os.path.join(_ROOT, "prompts", "system_base.md"), encoding="utf-8") as f:
             sys_md = f.read()
         self.assertIn("작업 방식 (도구 사용)", sys_md)
         for needle in ("SKILL.md", "셸 명령을 실행하지 마라"):
@@ -70,7 +70,8 @@ class TestSystemPromptModes(unittest.TestCase):
 
     def test_object_mode_is_default_and_unchanged(self):
         self.assertEqual(prompts.build_system_prompt(), prompts.build_system_prompt("OBJECT"))
-        self.assertIn("로우폴리 모델링 규칙", prompts.build_system_prompt())
+        # 스타일을 지정하지 않으면 예전과 같은 로우폴리 캐주얼 지침이 붙는다
+        self.assertIn("스타일 지침 — 로우폴리 캐주얼", prompts.build_system_prompt())
 
     def test_scene_api_falls_back_when_lowpoly_unavailable(self):
         # bpy가 없는 환경에서도 씬 어휘 목록은 비어서는 안 된다

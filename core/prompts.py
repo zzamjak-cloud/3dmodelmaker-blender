@@ -11,6 +11,8 @@ _SCENE_API_FALLBACK = ["terrain", "instance", "place_grid", "place_along", "plac
                        "wall_run", "path_strip", "ground_snap", "kit"]
 # 배치 턴에서도 필요한 최소 모델링 헬퍼 (단순 구조물과 배색용)
 _SCENE_BASE_API = ["set_color", "box", "cylinder", "cone", "plane", "join", "array"]
+# 복셀 스타일에만 노출하는 격자 헬퍼 (bpy 없는 유닛 테스트용 복제 목록)
+_VOXEL_API_FALLBACK = ["voxel", "voxel_box", "voxel_column"]
 
 
 def _read(filename: str) -> str:
@@ -25,6 +27,28 @@ def _helpers():
         return lowpoly
     except Exception:
         return None
+
+
+def _styles():
+    """styles 모듈 — 이 파일이 패키지 없이 로드되는 경로(유닛 테스트)에서는 경로로 읽는다.
+
+    styles.py는 bpy에 의존하지 않으므로 _helpers()와 달리 None으로 물러설 수 없다 —
+    스타일 지침이 빠지면 프롬프트에서 아트 디렉션이 통째로 사라진다."""
+    try:
+        from . import styles
+        return styles
+    except ImportError:
+        import importlib.util
+        import sys
+        cached = sys.modules.get("_lp3d_styles")
+        if cached is not None:
+            return cached
+        spec = importlib.util.spec_from_file_location(
+            "_lp3d_styles", os.path.join(os.path.dirname(os.path.abspath(__file__)), "styles.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["_lp3d_styles"] = module
+        spec.loader.exec_module(module)
+        return module
 
 
 def _api_reference(names=None) -> str:
@@ -55,12 +79,30 @@ def _scene_api_names() -> list:
     return (names or list(_SCENE_API_FALLBACK)) + list(_SCENE_BASE_API)
 
 
-def build_system_prompt(mode: str = "OBJECT") -> str:
-    """모드별 시스템 프롬프트. OBJECT는 기존과 동일하고, SCENE은 배경용 지침+씬 API만 노출한다."""
-    if str(mode or "").strip().upper() == "SCENE":
-        return (_read("system_scene.md") + "\n\n## lp 헬퍼 API 레퍼런스\n\n"
-                + _api_reference(_scene_api_names()))
-    return _read("system_lowpoly.md") + "\n\n## lp 헬퍼 API 레퍼런스\n\n" + _api_reference()
+def _voxel_api_names() -> list:
+    lowpoly = _helpers()
+    names = list(getattr(lowpoly, "VOXEL_API", None) or []) if lowpoly else []
+    return names or list(_VOXEL_API_FALLBACK)
+
+
+def build_system_prompt(mode: str = "OBJECT", style: str = None) -> str:
+    """모드·스타일별 시스템 프롬프트.
+
+    공통 골격(system_base.md / system_scene.md) 뒤에 스타일 지침을 붙이고, 그 뒤에
+    API 레퍼런스를 둔다. 스타일이 API보다 앞에 와야 "이 스타일에서는 이 헬퍼를
+    쓰지 마라" 같은 지시가 레퍼런스를 읽기 전에 걸린다."""
+    styles = _styles()
+
+    names = _scene_api_names() if str(mode or "").strip().upper() == "SCENE" else None
+    if names is None:
+        names = list(_helpers().__all__) if _helpers() else []
+    if styles.uses_voxel_api(style):
+        names = names + [n for n in _voxel_api_names() if n not in names]
+
+    base = (_read("system_scene.md") if str(mode or "").strip().upper() == "SCENE"
+            else _read("system_base.md"))
+    return (base + "\n\n" + styles.guide(style)
+            + "\n\n## lp 헬퍼 API 레퍼런스\n\n" + _api_reference(names))
 
 
 def _ref_note(ref_image: str) -> str:

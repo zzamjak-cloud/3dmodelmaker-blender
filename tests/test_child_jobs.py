@@ -59,6 +59,7 @@ class _Job:
         self.scene_size = 'M'
         self.parent_uid = ""
         self.modeling_type = 'PALETTE'
+        self.style = 'LOWPOLY'
         self.state = 'PENDING'
         self.status = "대기 중"
         self.status_hint = ""

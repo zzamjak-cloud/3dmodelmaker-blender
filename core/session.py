@@ -14,7 +14,7 @@ from .. import preferences
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
 from . import (errors, executor, jobs, library, models, multiview,
-               prompts, runner, scheduler, snapshots, texgen)
+               prompts, runner, scheduler, snapshots, styles, texgen)
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
 
@@ -194,6 +194,8 @@ class GenerationSession:
         job = self._job()
         # 항목은 실행 중 삭제될 수 있으므로 타입은 시작 시점에 고정한다
         self.modeling_type = getattr(job, "modeling_type", 'PALETTE') if job else 'PALETTE'
+        # 스타일도 같은 이유로 고정한다 — 실행 중 드롭다운을 바꿔도 이 세션은 영향받지 않는다
+        self.style = getattr(job, "style", styles.DEFAULT_STYLE) if job else styles.DEFAULT_STYLE
         # 배경 잡이 스폰한 에셋이면 부모 uid 문자열 — 완료 시 부모에게 알린다
         self.parent_uid = str(getattr(job, "parent_uid", "") or "") if job else ""
         self.texture_path = None    # 개별 매핑 결과 PNG (보관 폴더)
@@ -352,7 +354,7 @@ class GenerationSession:
             job.status = "대기 중 (순서 기다리는 중)"
         self._set_status("대기 중 (순서 기다리는 중)", self._model_log())
         runner.add_keepalive(self.uid)
-        self.backend.prepare_workdir(prompts.build_system_prompt(self.system_mode))
+        self.backend.prepare_workdir(prompts.build_system_prompt(self.system_mode, self.style))
 
     def _use_multiview(self) -> bool:
         """이 세션이 참조 시트를 만들지 여부 — 오버라이드가 있으면 환경설정보다 우선."""
@@ -382,6 +384,7 @@ class GenerationSession:
     def _run_multiview(self):
         multiview.generate(self.request, self.workdir, self.prefs.timeout,
                            self._on_multiview, ref_image=self.ref_image,
+                           style_note=styles.image_note(self.style),
                            job_key=self.uid)
 
     def _on_multiview(self, path, error=None):

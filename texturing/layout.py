@@ -111,11 +111,9 @@ def output_rules() -> str:
     )
 
 
-def build_prompt(request: str, filename: str) -> str:
-    """codex image_gen용 paint-over 프롬프트 — 첨부한 6면도 가이드 위에 손맵 디테일을 입힌다."""
+def _body(request: str) -> str:
+    """백엔드와 무관한 paint-over 지시 본문 — codex/OpenRouter 양쪽이 공유한다."""
     return (
-        "image_gen 도구를 사용해 첨부한 이미지를 입력(참조)으로 삼아 편집한 이미지 1장을 생성하고, "
-        f"반드시 현재 디렉토리에 {filename} 파일로 저장하라. 크기는 {SHEET_WIDTH}x{SHEET_HEIGHT}({ASPECT_RATIO})로 한다.\n"
         f"대상: {request}\n"
         "목적: 캐주얼 게임용 로우폴리 3D 모델의 손맵(hand-painted) diffuse 텍스처 소스가 되는 6시점도. "
         "첨부 이미지는 이 모델을 FRONT/RIGHT/BACK/LEFT/TOP/BOTTOM 6시점에서 직교 렌더한 것이다.\n\n"
@@ -125,6 +123,25 @@ def build_prompt(request: str, filename: str) -> str:
         "출력 계약:\n"
         "- 최종 이미지는 정확히 한 장만 생성한다.\n"
         f"{layout_contract()}\n"
-        f"{output_rules()}\n"
+        f"{output_rules()}"
+    )
+
+
+def build_prompt(request: str, filename: str) -> str:
+    """codex image_gen용 paint-over 프롬프트 — 첨부한 6면도 가이드 위에 손맵 디테일을 입힌다."""
+    return (
+        "image_gen 도구를 사용해 첨부한 이미지를 입력(참조)으로 삼아 편집한 이미지 1장을 생성하고, "
+        f"반드시 현재 디렉토리에 {filename} 파일로 저장하라. "
+        f"크기는 {SHEET_WIDTH}x{SHEET_HEIGHT}({ASPECT_RATIO})로 한다.\n"
+        + _body(request) + "\n"
         "저장 완료 후 텍스트로는 SAVED 한 단어만 답하라."
+    )
+
+
+def build_image_prompt(request: str) -> str:
+    """OpenRouter Image API용 — 가이드 시트는 input_references로 따로 넘어가므로
+    파일 저장·도구 호출 지시가 필요 없다."""
+    return (
+        f"첨부한 참조 이미지를 그대로 덮어 칠한(paint-over) {ASPECT_RATIO} 이미지 1장을 생성하라.\n"
+        + _body(request)
     )

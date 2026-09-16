@@ -6,6 +6,8 @@ import bpy
 from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
                        StringProperty)
 
+from .core import imagegen
+
 # macOS Finder로 실행한 Blender는 사용자 PATH를 상속하지 않으므로 흔한 설치 경로를 직접 탐색
 _EXTRA_PATHS = (
     "~/.local/bin",
@@ -60,8 +62,51 @@ class LP3DPreferences(bpy.types.AddonPreferences):
     )
     use_multiview: BoolProperty(
         name="멀티뷰 참조 생성",
-        description="생성 시작 시 codex image_gen으로 정면/측면/상면/쿼터뷰 참조 시트를 먼저 만들어 모델링 기준으로 사용",
+        description="생성 시작 시 정면/측면/상면/쿼터뷰 참조 시트를 먼저 만들어 모델링 기준으로 사용 (생성 백엔드는 아래 '참조 이미지 생성'에서 고른다)",
         default=True,
+        update=_persist_cb,
+    )
+    image_backend: EnumProperty(
+        name="이미지 생성 백엔드",
+        description=("참조 시트(멀티뷰·씬 컨셉·텍스처 6면도)를 무엇으로 만들지 — "
+                     "OpenRouter는 이미지 1장에 HTTP 1회만 쓰므로 Codex 세션보다 "
+                     "토큰 소모가 훨씬 적고 모델을 고를 수 있다. Astra는 어느 쪽이든 "
+                     "모델링 턴에만 쓰인다"),
+        items=[
+            ('OPENROUTER', "OpenRouter API", "OpenRouter Image API로 직접 생성 (API 키 필요)"),
+            ('CODEX', "Codex CLI", "codex CLI의 image_gen 도구로 생성 (API 키 불필요)"),
+        ],
+        default='OPENROUTER',
+        update=_persist_cb,
+    )
+    openrouter_api_key: StringProperty(
+        name="OpenRouter API 키",
+        description=("openrouter.ai/settings/keys 에서 발급한 키. "
+                     "비워두면 OPENROUTER_API_KEY 환경변수를 쓰고, 그것도 없으면 "
+                     "Codex CLI 경로로 자동 폴백한다"),
+        subtype='PASSWORD',
+        default="",
+        update=_persist_cb,
+    )
+    image_model: EnumProperty(
+        name="이미지 모델",
+        description="참조 시트를 생성할 OpenRouter 이미지 모델",
+        items=imagegen.enum_items(),
+        default=imagegen.DEFAULT_MODEL,
+        update=_persist_cb,
+    )
+    image_quality: EnumProperty(
+        name="이미지 품질",
+        description=("gpt-image(덕테이프) 계열 전용 품질 티어 — 높을수록 느리고 비싸다. "
+                     "나노바나나 계열은 이 값을 무시한다"),
+        items=[
+            ('low', "낮음", "빠르고 저렴"),
+            ('medium', "보통", ""),
+            ('high', "높음", "기본 — 시트 판독성과 비용의 균형"),
+            ('xhigh', "매우 높음", "2.5 계열 전용"),
+            ('max', "최대", "2.5 계열 전용 — 가장 느리고 비싸다"),
+        ],
+        default='high',
         update=_persist_cb,
     )
     use_library: BoolProperty(
@@ -115,6 +160,18 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col.prop(self, "use_multiview")
         col.prop(self, "use_library")
         col.prop(self, "texture_resolution")
+        img_box = self.layout.box()
+        img_box.label(text="참조 이미지 생성", icon='IMAGE_DATA')
+        img_box.prop(self, "image_backend")
+        if self.image_backend == 'OPENROUTER':
+            img_box.prop(self, "openrouter_api_key")
+            img_box.prop(self, "image_model")
+            if imagegen.model_def(self.image_model)["qualities"]:
+                img_box.prop(self, "image_quality")
+            if not imagegen.api_key():
+                warn = img_box.column()
+                warn.alert = True
+                warn.label(text="키가 없어 Codex CLI로 폴백합니다", icon='ERROR')
         scene_box = self.layout.box()
         scene_box.label(text="배경 공간", icon='WORLD')
         scene_box.prop(self, "scene_tri_budget")
@@ -138,6 +195,10 @@ class _Defaults:
     use_library = True
     asset_library_path = ""
     texture_resolution = '1024'
+    image_backend = 'OPENROUTER'
+    openrouter_api_key = ""
+    image_model = imagegen.DEFAULT_MODEL
+    image_quality = 'high'
     scene_tri_budget = 80000
     scene_max_assets = 12
     scene_timeout_scale = 2.0

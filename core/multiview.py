@@ -20,7 +20,20 @@ ARCHIVE_PREFIX = "LP3D_multiview_"  # 보관 폴더에 남는 시트 파일명 �
 
 def is_available() -> bool:
     from .. import preferences
-    return bool(preferences.resolve_cli_path('CODEX'))
+    from . import imagegen
+    return bool(imagegen.is_available() or preferences.resolve_cli_path('CODEX'))
+
+
+def use_openrouter() -> bool:
+    """OpenRouter 경로를 쓸지 — 백엔드 설정이 OPENROUTER이고 키가 있을 때만.
+
+    키가 없으면 조용히 codex로 폴백한다. 세 시트 모듈이 같은 판단을 공유해야
+    한 세션 안에서 백엔드가 섞이지 않는다."""
+    from .. import preferences
+    from . import imagegen
+    prefs = preferences.get_prefs()
+    return (getattr(prefs, "image_backend", 'OPENROUTER') == 'OPENROUTER'
+            and imagegen.is_available())
 
 
 def _slug(text: str, limit: int = 30) -> str:
@@ -126,22 +139,35 @@ def build_command(exe: str, work_dir: str, ref_image: str = None) -> list:
     return cmd
 
 
-def build_prompt(request: str, has_ref: bool = False) -> str:
+def _body(request: str, has_ref: bool = False, style_note: str = "") -> str:
+    """백엔드 공용 지시 본문 — 시트 구성·스타일."""
     base = (
-        "image_gen 도구를 사용해 3D 로우폴리 모델링용 멀티뷰 참조 시트 이미지 1장을 생성하고, "
-        f"반드시 현재 디렉토리에 {MULTIVIEW_FILENAME} 파일로 저장하라.\n"
         f"대상: {request}\n"
         "구성: 2x2 그리드 — 좌상=정면(FRONT), 우상=측면(SIDE), 좌하=상면(TOP), 우하=3/4뷰. "
         "각 뷰에 라벨을 표기하고, 네 뷰 모두 동일한 대상을 일관된 비율로 그려라.\n"
-        "스타일: 로우폴리 게임 에셋, 플랫 셰이딩, 단순한 색 팔레트, 흰 배경.\n"
+        + (style_note or "스타일: 로우폴리 게임 에셋, 플랫 셰이딩, 단순한 색 팔레트, 흰 배경.\n")
     )
     if has_ref:
         base += "첨부한 참조 이미지와 동일한 대상·색·특징을 유지하라.\n"
-    return base + "저장 완료 후 텍스트로는 SAVED 한 단어만 답하라."
+    return base
+
+
+def build_prompt(request: str, has_ref: bool = False, style_note: str = "") -> str:
+    return (
+        "image_gen 도구를 사용해 3D 모델링용 멀티뷰 참조 시트 이미지 1장을 생성하고, "
+        f"반드시 현재 디렉토리에 {MULTIVIEW_FILENAME} 파일로 저장하라.\n"
+        + _body(request, has_ref, style_note)
+        + "저장 완료 후 텍스트로는 SAVED 한 단어만 답하라.")
+
+
+def build_image_prompt(request: str, has_ref: bool = False, style_note: str = "") -> str:
+    """OpenRouter Image API용 — 파일 저장·도구 호출 지시가 필요 없다."""
+    return ("3D 모델링용 멀티뷰 참조 시트 이미지 1장을 생성하라.\n"
+            + _body(request, has_ref, style_note))
 
 
 def generate(request: str, session_workdir: str, timeout: int, on_done, ref_image: str = None,
-             job_key=None):
+             job_key=None, style_note: str = ""):
     """멀티뷰 시트를 비동기로 생성한다.
 
     완료 시 메인 스레드에서 on_done(경로 or None, 오류 문자열 or None)을 호출한다.
@@ -151,7 +177,16 @@ def generate(request: str, session_workdir: str, timeout: int, on_done, ref_imag
     job_key는 잡 단위 취소용 식별자다 — 이걸 넘기지 않으면 세션을 취소해도
     codex 프로세스가 살아남아 AI 동시 실행 한도를 초과한 채로 돈다."""
     from .. import preferences
-    from . import runner
+    from . import imagegen, runner
+
+    final_path = os.path.join(session_workdir, MULTIVIEW_FILENAME)
+    if use_openrouter():
+        # OpenRouter는 결과를 바로 최종 경로에 쓴다 — 임시 디렉토리도, AGENTS.md 충돌도 없다
+        imagegen.generate(
+            build_image_prompt(request, has_ref=bool(ref_image), style_note=style_note),
+            final_path, timeout, on_done,
+            refs=[ref_image] if ref_image else None, aspect_ratio="1:1", job_key=job_key)
+        return
 
     exe = preferences.resolve_cli_path('CODEX')
     if not exe:
@@ -159,7 +194,6 @@ def generate(request: str, session_workdir: str, timeout: int, on_done, ref_imag
         return
     work = tempfile.mkdtemp(prefix="lp3d_mv_")
     out_path = os.path.join(work, MULTIVIEW_FILENAME)
-    final_path = os.path.join(session_workdir, MULTIVIEW_FILENAME)
 
     def _cb(stdout, error):
         path, failure = None, error
@@ -180,5 +214,6 @@ def generate(request: str, session_workdir: str, timeout: int, on_done, ref_imag
 
     cmd = build_command(exe, work, ref_image=ref_image)
     runner.run_cli_async(cmd, work, timeout, _cb,
-                         stdin_text=build_prompt(request, has_ref=bool(ref_image)),
+                         stdin_text=build_prompt(request, has_ref=bool(ref_image),
+                                                 style_note=style_note),
                          job_key=job_key)

@@ -15,8 +15,8 @@ SHEET_FILENAME = "texture_sheet.png"
 
 
 def is_available() -> bool:
-    from .. import preferences
-    return bool(preferences.resolve_cli_path('CODEX'))
+    from . import multiview
+    return multiview.is_available()
 
 
 def build_command(exe: str, work_dir: str, guide_image: str) -> list:
@@ -40,7 +40,16 @@ def generate(request: str, guide_image: str, session_workdir: str, timeout: int,
              job_key=None):
     """6면도 텍스처 시트를 비동기로 생성한다. 완료 시 on_done(경로 or None, 오류 or None)."""
     from .. import preferences
-    from . import runner
+    from . import imagegen, multiview, runner
+
+    if multiview.use_openrouter():
+        # 가이드 시트는 input_references로 넘어간다 — 임시 디렉토리 복사가 필요 없다.
+        # 비율은 6면도 3x2 격자에 맞춰 layout.ASPECT_RATIO(3:2)로 고정한다.
+        imagegen.generate(
+            layout.build_image_prompt(request),
+            os.path.join(session_workdir, SHEET_FILENAME), timeout, on_done,
+            refs=[guide_image], aspect_ratio=layout.ASPECT_RATIO, job_key=job_key)
+        return
 
     exe = preferences.resolve_cli_path('CODEX')
     if not exe:

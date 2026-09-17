@@ -57,6 +57,37 @@ def _pair(value, default_ratio=1.0):
     return float(value), float(value) * default_ratio
 
 
+def _point_in_polygon(x: float, y: float, poly) -> bool:
+    """짝홀 교차 판정. poly는 [(x,y), ...] 3점 이상."""
+    inside = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if (yi > y) != (yj > y):
+            x_cross = (xj - xi) * (y - yi) / ((yj - yi) or 1e-12) + xi
+            if x < x_cross:
+                inside = not inside
+        j = i
+    return inside
+
+
+def _dist_to_polygon_edge(x: float, y: float, poly) -> float:
+    """점에서 다각형 경계까지의 최단 거리(m)."""
+    best = float("inf")
+    n = len(poly)
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        seg = dx * dx + dy * dy
+        t = 0.0 if seg < 1e-12 else max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / seg))
+        px, py = ax + dx * t, ay + dy * t
+        best = min(best, math.hypot(x - px, y - py))
+    return best
+
+
 def _polyline(points):
     """(x,y) 목록을 Vector 2D 목록으로 만들고 중복점을 제거한다."""
     pts = [Vector((float(p[0]), float(p[1]))) for p in points]
@@ -100,21 +131,39 @@ def _kit_root() -> bpy.types.Collection:
 # --- 공개 API ---
 
 def terrain(name="Terrain", size=(40.0, 40.0), cells=(16, 16), heights=None,
-            relief=0.4, seed=0) -> bpy.types.Object:
-    """원점 중심의 XY 그리드 지형 판을 만든다(미터 단위). 생성된 오브젝트를 반환.
+            relief=0.4, seed=0, outline=None) -> bpy.types.Object:
+    """원점 중심의 XY 지형 판을 만든다(미터 단위). 생성된 오브젝트를 반환.
 
-    size=(x,y)는 지형 전체 크기, cells=(열,행)은 분할 수로 각 축 최대 48까지만
-    허용된다(면수 = 열x행). relief는 기복의 전체 높이 폭(m)이며 seed를 바꾸면
-    다른 지형이 나온다. 가장자리 한 줄은 z=0으로 눌러 씬 경계가 평평해진다.
+    size=(x,y)는 지형 전체 크기 — **정사각형일 필요가 없다.** 강가 마을은 (60, 28),
+    골짜기 요새는 (36, 70)처럼 부지 성격에 맞는 비율로 잡아라.
+    cells=(열,행)은 분할 수로 각 축 최대 48까지만 허용된다(면수 = 열x행).
+    relief는 기복의 전체 높이 폭(m)이며 seed를 바꾸면 다른 지형이 나온다.
+    가장자리는 z=0으로 눌러 씬 경계가 평평해진다.
+    **outline=[(x,y), ...]**(6~12점 다각형, m)을 주면 그 윤곽 안쪽만 남긴 비정형
+    지형이 된다 — 해안선·절벽 끝·숲 경계처럼 부지가 직사각형이 아닐 때 쓴다.
+    이때 size는 무시되고 outline의 경계 상자를 덮는 격자에서 바깥 면을 지운다.
     heights를 주면 노이즈 대신 그 값을 그대로 쓴다 — heights[행][열] 순서의
     2D 리스트(크기 (행+1)x(열+1), 단위 m)이고 이때 relief/seed는 무시된다.
-    비어 있거나 숫자가 아닌 heights는 무시하고 노이즈 지형을 만든다.
     배경 씬에서는 지형을 먼저 1개 만들고 그 위에 구조물·인스턴스를 올린 뒤
     lp.ground_snap으로 높이를 맞추는 순서를 권장한다.
-    예: ground = lp.terrain("Ground", size=(40, 40), cells=(16, 16), relief=0.5)"""
+    예: ground = lp.terrain("Ground", size=(64, 40), cells=(24, 15), relief=0.5)
+    예: ground = lp.terrain("Isle", outline=[(-30,-18), (-8,-26), (24,-20), (34,4),
+                            (18,22), (-12,26), (-32,8)], cells=(24, 20), relief=0.4)"""
     cx = max(1, min(int(cells[0]), _MAX_CELLS))
     cy = max(1, min(int(cells[1]), _MAX_CELLS))
-    sx, sy = float(size[0]), float(size[1])
+    poly = None
+    if outline is not None:
+        poly = [(float(p[0]), float(p[1])) for p in outline]
+        if len(poly) < 3:
+            raise ValueError("terrain outline은 점이 3개 이상이어야 한다")
+        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+        # 경계 상자를 격자로 덮고 원점은 상자 중심으로 옮긴다
+        sx, sy = max(xs) - min(xs), max(ys) - min(ys)
+        ox, oy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+        poly = [(x - ox, y - oy) for x, y in poly]
+    else:
+        sx, sy = float(size[0]), float(size[1])
+        ox, oy = 0.0, 0.0
 
     grid = []
     given = _height_grid(heights)
@@ -134,10 +183,18 @@ def terrain(name="Terrain", size=(40.0, 40.0), cells=(16, 16), heights=None,
         flat = [z for row in raw for z in row]
         lo, hi = min(flat), max(flat)
         span = (hi - lo) or 1.0
+        ramp = max(1.0, min(sx, sy) * 0.12)  # 비정형 윤곽은 경계까지의 거리로 감쇠
         for iy in range(cy + 1):
-            grid.append([((raw[iy][ix] - lo) / span - 0.5) * relief
-                         * _edge_falloff(ix, iy, cx, cy)
-                         for ix in range(cx + 1)])
+            row = []
+            for ix in range(cx + 1):
+                if poly is None:
+                    fall = _edge_falloff(ix, iy, cx, cy)
+                else:
+                    px = -sx / 2 + sx * ix / cx
+                    py = -sy / 2 + sy * iy / cy
+                    fall = _smoothstep(min(_dist_to_polygon_edge(px, py, poly) / ramp, 1.0))
+                row.append(((raw[iy][ix] - lo) / span - 0.5) * relief * fall)
+            grid.append(row)
 
     bm = bmesh.new()
     verts = []
@@ -146,12 +203,25 @@ def terrain(name="Terrain", size=(40.0, 40.0), cells=(16, 16), heights=None,
         y = -sy / 2 + sy * iy / cy
         for ix in range(cx + 1):
             x = -sx / 2 + sx * ix / cx
-            row.append(bm.verts.new((x, y, grid[iy][ix])))
+            # 윤곽 지형은 정점을 월드 좌표로 두고 오브젝트 원점은 (0,0)에 남긴다 —
+            # ground_snap이 지형 오브젝트의 변환을 따로 고려하지 않아도 되게
+            row.append(bm.verts.new((x + ox, y + oy, grid[iy][ix])))
         verts.append(row)
     for iy in range(cy):
         for ix in range(cx):
+            if poly is not None:
+                # 면 중심이 윤곽 밖이면 만들지 않는다 — 비정형 부지
+                fx = -sx / 2 + sx * (ix + 0.5) / cx
+                fy = -sy / 2 + sy * (iy + 0.5) / cy
+                if not _point_in_polygon(fx, fy, poly):
+                    continue
             bm.faces.new((verts[iy][ix], verts[iy][ix + 1],
                           verts[iy + 1][ix + 1], verts[iy + 1][ix]))
+    if poly is not None:
+        bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context='VERTS')
+        if not bm.faces:
+            bm.free()
+            raise ValueError("terrain outline 안에 들어가는 면이 없다 — 윤곽이 너무 작거나 cells가 너무 적다")
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     obj = _new_object(name, bm, (0, 0, 0), (0, 0, 0), (1, 1, 1))
     for poly in obj.data.polygons:
@@ -209,24 +279,31 @@ def place_grid(src, cols, rows, spacing, origin=(0.0, 0.0), jitter=0.0,
     return out
 
 
-def place_along(src, points, spacing, align=True, rotate_offset=0.0) -> list:
-    """폴리라인을 따라 src의 인스턴스를 등간격으로 배치한다. 오브젝트 리스트를 반환.
+def place_along(src, points, spacing, align=True, rotate_offset=0.0,
+                spacing_jitter=0.0, offset_jitter=0.0, rotate_jitter=0.0, seed=0) -> list:
+    """폴리라인을 따라 src의 인스턴스를 배치한다. 오브젝트 리스트를 반환.
 
     points는 [(x,y), ...] 꺾은선(m), spacing은 인스턴스 간 거리(m)로 시작점부터
     경로 끝까지 채운다. align=True면 각 인스턴스가 진행 방향을 향해 Z 회전하며
     rotate_offset(도)으로 방향을 추가 보정한다(모델이 +X를 보지 않을 때 사용).
-    울타리 기둥·가로등·성벽 망루·길가 나무처럼 선을 따르는 반복 요소에 쓴다.
-    예: lp.place_along(lp.kit("lamp"), [(-10, 0), (0, 4), (10, 0)], spacing=3.0)"""
+    **spacing_jitter**(0~0.5, 간격 비율)·**offset_jitter**(m, 선에서 좌우로 밀기)·
+    **rotate_jitter**(도)를 주면 등간격의 기계적인 느낌이 사라진다 — 길가 집·나무·
+    노점처럼 사람이 놓은 것에는 반드시 지터를 줘라. 가로등·성벽 망루·기둥처럼
+    의도적으로 규칙적인 것만 0으로 둔다.
+    예: lp.place_along(lp.kit("house"), lp.meander([(-30, -6), (0, 2), (28, -4)], 3.0),
+                       spacing=7.0, offset_jitter=1.5, spacing_jitter=0.25, rotate_jitter=10)"""
     pts = _polyline(points)
     if len(pts) < 2:
         raise ValueError("place_along은 서로 다른 점이 2개 이상 필요하다")
+    rng = random.Random(seed)
     step = max(float(spacing), 1e-3)
+    sj = max(0.0, min(float(spacing_jitter), 0.5))
     segs = list(zip(pts, pts[1:]))
     lengths = [(b - a).length for a, b in segs]
     total = sum(lengths)
     out = []
-    for k in range(int(total / step) + 1):
-        target = k * step
+    target = 0.0
+    while target <= total + 1e-9:
         acc = 0.0
         pos, direction = pts[-1], (segs[-1][1] - segs[-1][0])
         for (a, b), length in zip(segs, lengths):
@@ -235,11 +312,85 @@ def place_along(src, points, spacing, align=True, rotate_offset=0.0) -> list:
                 direction = b - a
                 break
             acc += length
+        if offset_jitter:
+            normal = Vector((-direction.y, direction.x))
+            if normal.length > 1e-9:
+                pos = pos + normal.normalized() * rng.uniform(-offset_jitter, offset_jitter)
         rz = rotate_offset
         if align:
             rz += math.degrees(math.atan2(direction.y, direction.x))
+        if rotate_jitter:
+            rz += rng.uniform(-rotate_jitter, rotate_jitter)
         out.append(instance(src, (pos.x, pos.y, 0.0), rotation_z=rz))
+        target += step * (1.0 + (rng.uniform(-sj, sj) if sj else 0.0))
     return out
+
+
+def place_cluster(src, count, centers, radius=6.0, min_dist=1.5, avoid=(),
+                  scale_jitter=0.15, seed=0) -> list:
+    """앵커 지점 주변에 src의 인스턴스를 **뭉쳐서** 배치한다. 오브젝트 리스트를 반환.
+
+    centers는 [(x,y), ...] 군집 중심들(m), count는 전체 개수로 중심들에 나눠 뿌린다.
+    radius는 군집 반경(m) — 중심 가까이 촘촘하고 멀어질수록 드물어진다(가우시안).
+    min_dist·avoid·scale_jitter는 place_scatter와 같다.
+    마을 집들·숲 덤불·잔해 더미·시장 노점처럼 **자연스럽게 모여 있는 것**은
+    격자(place_grid)나 균일 산포(place_scatter)가 아니라 이것으로 놓아라 —
+    실제 정착지는 격자로 서지 않고 우물·광장·길목 주변에 뭉친다.
+    예: lp.place_cluster(lp.kit("hut"), 14, centers=[(-12, 6), (9, -8)], radius=7.0, min_dist=3.5)"""
+    rng = random.Random(seed)
+    anchors = [(float(c[0]), float(c[1])) for c in centers]
+    if not anchors:
+        raise ValueError("place_cluster는 centers가 1개 이상 필요하다")
+    boxes = [(float(c[0]), float(c[1]), float(c[2]), float(c[3])) for c in avoid]
+    r = max(float(radius), 0.1)
+    placed, out = [], []
+    target = int(count)
+    attempts, limit = 0, max(1, target * 40)
+    while len(out) < target and attempts < limit:
+        attempts += 1
+        cx, cy = anchors[attempts % len(anchors)]
+        ang = rng.uniform(0.0, math.tau)
+        dist = abs(rng.gauss(0.0, r * 0.5))
+        x, y = cx + math.cos(ang) * dist, cy + math.sin(ang) * dist
+        if any(abs(x - bx) <= bw / 2 and abs(y - by) <= bh / 2 for bx, by, bw, bh in boxes):
+            continue
+        if any((x - px) ** 2 + (y - py) ** 2 < min_dist ** 2 for px, py in placed):
+            continue
+        placed.append((x, y))
+        sc = 1.0 + rng.uniform(-scale_jitter, scale_jitter) if scale_jitter else 1.0
+        # 군집 안의 집·노점은 대체로 중심을 향한다 — 완전 무작위 회전은 어색하다
+        face = math.degrees(math.atan2(cy - y, cx - x)) + rng.uniform(-25.0, 25.0)
+        out.append(instance(src, (x, y, 0.0), rotation_z=face, scale=max(sc, 0.05)))
+    return out
+
+
+def meander(points, amount=2.0, subdivisions=3, seed=0) -> list:
+    """직선 폴리라인을 자연스럽게 굽은 선으로 바꾼다. [(x,y), ...]를 반환.
+
+    points의 각 구간을 subdivisions번 나누고 중간점을 진행 방향의 수직으로 최대
+    amount(m)만큼 흔든다. 끝점은 그대로 둔다.
+    길(`path_strip`)·개천·울타리(`fence_run`)·성벽(`wall_run`)·`place_along` 경로에
+    넣어라 — 직선과 직각으로만 그은 동선은 도면처럼 보이고 원화의 느낌이 사라진다.
+    격자 계획도시를 명시적으로 요청한 경우만 예외다.
+    예: road = lp.path_strip(lp.meander([(-40, -10), (0, 0), (38, 12)], amount=3.0), width=4.0)"""
+    pts = _polyline(points)
+    if len(pts) < 2:
+        return [(p.x, p.y) for p in pts]
+    rng = random.Random(seed)
+    n = max(1, int(subdivisions))
+    out = [pts[0]]
+    for a, b in zip(pts, pts[1:]):
+        d = b - a
+        normal = Vector((-d.y, d.x))
+        if normal.length > 1e-9:
+            normal.normalize()
+        for i in range(1, n + 1):
+            t = i / (n + 1)
+            # 구간 양끝에서는 흔들림을 줄여 꺾이는 지점이 어긋나지 않게 한다
+            k = math.sin(math.pi * t)
+            out.append(a.lerp(b, t) + normal * rng.uniform(-amount, amount) * k)
+        out.append(b)
+    return [(p.x, p.y) for p in out]
 
 
 def place_scatter(src, count, area=(20.0, 20.0), center=(0.0, 0.0), avoid=(),

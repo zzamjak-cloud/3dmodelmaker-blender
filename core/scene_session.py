@@ -93,7 +93,7 @@ class SceneSession(GenerationSession):
     def _apply_lane(self):
         # 배경 결과는 수십 미터에 걸치므로 기본 4m 간격으로는 옆 레인과 겹친다
         jobs.apply_lane_offset(self.collection_name, self.lane,
-                               spacing=scene_kit.scene_spacing(self.scene_size))
+                               spacing=scene_kit.scene_spacing(self.scene_size, self.plan))
 
     # ---------- ① 컨셉 시트 ----------
     def start(self):

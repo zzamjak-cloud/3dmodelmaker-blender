@@ -49,15 +49,19 @@
 
 ```json
 {
-  "scene": {"size": "S|M|L", "palette": ["#rrggbb", "..."], "mood": "분위기 한 줄"},
+  "scene": {"size": "S|M|L", "palette": ["#rrggbb", "..."], "mood": "분위기 한 줄",
+            "extent": [폭, 깊이], "outline": [[x, y], "... 6~12점 (선택)"]},
   "terrain": {"relief": 0.0, "style": "지면 성격 한 줄"},
-  "zones": [{"name": "영문 슬러그", "center": [x, y], "extent": [w, h], "purpose": "구역 역할"}],
+  "zones": [{"name": "영문 슬러그", "center": [x, y], "extent": [w, h], "rotation": 도, "purpose": "구역 역할"}],
   "assets": [{"key": "영문 슬러그", "prompt": "모델링 요청문", "count": 1,
               "size_class": "L|M|S", "zone": "구역 name", "landmark": false}],
   "rules": ["배치 턴에서 지킬 규칙 한 줄씩"]
 }
 ```
 
+- `scene.extent`는 부지 [폭, 깊이](m)다. **정사각형으로 두지 마라** — 비율 1:1.3~1:2로 지형·강·길에 맞춘다. 규모의 한 변은 "긴 변의 기준"일 뿐이다.
+- `scene.outline`(선택)은 부지의 비정형 윤곽 다각형 6~12점이다. 해안선·능선·숲 경계·성벽 안쪽처럼 부지가 직사각형이 아닐 때 넣으면 배치 턴이 `lp.terrain(outline=...)`으로 그대로 쓴다. 넣을 수 있으면 넣어라.
+- `zones[].rotation`(도)은 그 구역의 배치 축이다. 구역마다 다르게 주어 축에 나란한 구역이 없게 하라(0이면 도면처럼 보인다).
 - `key`는 영문 소문자·숫자·밑줄만 쓴다(예: `watchtower`, `dead_tree`). 중복 금지.
 - `prompt`는 그 에셋 **하나**를 만드는 요청문이다. 개수·배치는 쓰지 마라 (`count`가 담당한다).
 - `size_class`는 에셋 1개의 트라이 상한 등급이다 (실제 수치는 유저 프롬프트가 스타일에 맞춰 알려준다). 이 상한은 **에셋 1개** 기준이지 씬 전체 예산이 아니다.
@@ -76,6 +80,7 @@
 6. **동선은 랜드마크로 향한다**: 길(`lp.path_strip`)은 씬 가장자리에서 시작해 랜드마크 입구에서 끝나게 하라. 길이 어디로도 가지 않으면 공간이 읽히지 않는다.
 7. **지면 과장 금지**: 지형 릴리프는 0.1~0.6 범위의 완만한 기복이다. 땅이 프랍보다 튀면 안 된다. 땅의 변화는 색 2톤과 완만한 기복으로만 준다.
 8. **구역마다 밀도를 다르게**: 밀집 구역(막사·시장)과 희박 구역(들판·연병장)을 대비시켜라. 전체가 고르게 차 있으면 어디를 봐야 할지 알 수 없다.
+9. **규칙성은 결함이다 (계획도시 요청 외)**: 정사각 부지, XY축에 나란한 구역, 직선·직각 동선, 등간격 격자 배치는 도면처럼 보여 원화의 느낌을 죽인다. 부지는 비정형 `outline`, 구역은 `rotation`, 길·성벽은 굽은 폴리라인(`lp.meander`), 집·노점은 군집(`lp.place_cluster`), 길가 배치는 지터(`place_along`의 `*_jitter`)로 깨라. 실제 마을은 길이 먼저 굽고 집이 그 길을 따라 불규칙하게 서며, 격자로 정렬되는 것은 군 막사·묘지·밭·근대 계획도시뿐이다.
 
 # 배치 규칙 (배치 턴)
 
@@ -102,14 +107,16 @@
   "scene": {
     "size": "M",
     "palette": ["#6f7a5a", "#8a7a5c", "#b8ae95", "#4f5a46", "#d1502f"],
-    "mood": "낮은 채도의 삭막한 수용소, 경고색 악센트 하나"
+    "mood": "낮은 채도의 삭막한 수용소, 경고색 악센트 하나",
+    "extent": [52, 34],
+    "outline": [[-26, -14], [-18, -19], [6, -17], [24, -11], [27, 6], [14, 17], [-9, 16], [-25, 8]]
   },
   "terrain": {"relief": 0.25, "style": "마른 흙바닥에 잔디 패치가 드문드문"},
   "zones": [
-    {"name": "gate", "center": [0, -16], "extent": [14, 8], "purpose": "정문과 검문소, 씬 진입 동선의 시작"},
-    {"name": "yard", "center": [0, 0], "extent": [26, 18], "purpose": "중앙 연병장 — 의도적으로 비워 둔다"},
-    {"name": "barracks", "center": [-12, 8], "extent": [14, 16], "purpose": "수감동 막사가 나란히 선 밀집 구역"},
-    {"name": "perimeter", "center": [0, 0], "extent": [36, 36], "purpose": "철조망 담장과 감시탑이 도는 외곽"}
+    {"name": "gate", "center": [-4, -15], "extent": [14, 8], "rotation": 12, "purpose": "정문과 검문소, 씬 진입 동선의 시작"},
+    {"name": "yard", "center": [2, -1], "extent": [24, 16], "rotation": -8, "purpose": "중앙 연병장 — 의도적으로 비워 둔다"},
+    {"name": "barracks", "center": [-13, 7], "extent": [16, 14], "rotation": 22, "purpose": "수감동 막사 구역 — 격자지만 비틀려 있다"},
+    {"name": "perimeter", "center": [0, 0], "extent": [52, 34], "rotation": 0, "purpose": "outline을 따라 도는 철조망과 감시탑"}
   ],
   "assets": [
     {"key": "watchtower", "prompt": "나무 기둥 감시탑, 경사 사다리, 지붕 덮인 전망대, 서치라이트 하나", "count": 2, "size_class": "L", "zone": "perimeter", "landmark": true},
@@ -120,11 +127,12 @@
     {"key": "crate", "prompt": "나무 보급 상자, 모서리 보강대", "count": 8, "size_class": "S", "zone": "yard", "landmark": false}
   ],
   "rules": [
-    "감시탑 2개는 대각 모서리에 두어 시선을 잡는다",
-    "연병장 중앙은 비워 빈 공간 40%를 유지한다",
-    "막사 3동은 같은 방향으로 6m 간격으로 나란히 세운다",
-    "철조망은 wall_run으로 외곽을 닫고 정문만 끊는다",
-    "길은 정문에서 시작해 연병장을 가로질러 감시탑 아래에서 끝난다"
+    "감시탑 2개는 outline의 서로 먼 꼭짓점 근처에 두어 시선을 잡는다",
+    "연병장(yard)만 비우고 나머지 구역은 채운다",
+    "막사 3동은 barracks 구역의 rotation(22도)을 따라 비틀린 격자로, 간격은 6m에 jitter 0.6",
+    "철조망은 fence_run(rails=3, rail_height=0.03)으로 outline 다각형을 따라 닫고 정문만 끊는다",
+    "길은 정문에서 시작해 meander로 굽어 연병장을 가로질러 감시탑 아래에서 끝난다",
+    "드럼통·상자는 place_cluster로 막사 뒤편과 검문소 옆에 뭉쳐 놓는다"
   ]
 }
 ```
@@ -132,23 +140,31 @@
 # 예시 2 — 배치 턴: "고대 성" (규모 L) 코드 요약
 
 ```python
-# 고대 성(L): 지형 → 성벽·길 → 키트 인스턴스 → ground_snap
-ground = lp.terrain("Ground", size=(80.0, 80.0), cells=(24, 24), relief=0.35, seed=7)
+# 고대 성(L): 비정형 부지 → 굽은 성벽·길 → 군집 배치 → ground_snap
+# 부지는 플랜의 scene.outline(능선 위 길쭉한 요새)을 그대로 쓴다 — 정사각형 지형 금지
+OUTLINE = [(-52, -20), (-30, -34), (12, -38), (48, -22), (56, 8), (30, 34), (-14, 36), (-50, 14)]
+ground = lp.terrain("Ground", outline=OUTLINE, cells=(30, 22), relief=0.5, seed=7)
 lp.set_color(ground, (0.42, 0.52, 0.30))
-wall = lp.wall_run([(-24, -24), (24, -24), (24, 24), (-24, 24)], height=6.0, thickness=1.6,
-                   name="Rampart", closed=True, post_size=2.4)      # 새로 만들어도 되는 구조물
+# 성벽은 outline을 안쪽으로 줄인 다각형을 meander로 살짝 굽혀 — 직각 사각 둘레가 아니다
+inner = [(x * 0.72, y * 0.72) for x, y in OUTLINE]
+wall = lp.wall_run(lp.meander(inner, amount=1.2, subdivisions=1, seed=2), height=6.0,
+                   thickness=1.6, name="Rampart", closed=True, post_size=2.4)
 lp.set_color(wall, (0.68, 0.65, 0.58))
-road = lp.path_strip([(0, -38), (0, -12), (-4, 2), (0, 13)], width=4.0, name="Road")  # 동선은 랜드마크로
+# 길: 정문 → 광장 → 성채. 직선 대신 meander
+road_pts = lp.meander([(-40, -30), (-14, -10), (4, 2), (18, 16)], amount=3.0, seed=4)
+road = lp.path_strip(road_pts, width=4.0, name="Road")
 lp.set_color(road, (0.58, 0.50, 0.40))
-keep = lp.instance(lp.kit("keep"), location=(0, 16, 0), rotation_z=180.0, scale=1.15, name="Keep")
-gate = lp.instance(lp.kit("gatehouse"), location=(0, -24, 0), name="Gatehouse")
-towers = lp.place_along(lp.kit("tower"), [(-24, -24), (24, -24), (24, 24), (-24, 24)],
-                        spacing=48.0, align=False)
-houses = lp.place_grid(lp.kit("house"), cols=3, rows=2, spacing=7.0, origin=(-14, -6),
-                       jitter=0.8, rotate_jitter=12.0, seed=3)       # 지터로 기계적 정렬을 푼다
-stalls = lp.place_scatter(lp.kit("stall"), count=6, area=(16, 10), center=(10, -4),
-                          avoid=[(0, -4, 6, 24)], min_dist=3.0, scale_jitter=0.1, seed=5)
-trees = lp.place_scatter(lp.kit("tree"), count=14, area=(70, 70), center=(0, 0),
-                         avoid=[(0, 0, 52, 52)], min_dist=4.0, scale_jitter=0.2, seed=11)
+keep = lp.instance(lp.kit("keep"), location=(22, 20, 0), rotation_z=205.0, scale=1.15, name="Keep")
+gate = lp.instance(lp.kit("gatehouse"), location=(-38, -27, 0), rotation_z=35.0, name="Gatehouse")
+# 망루는 성벽 꼭짓점에 — 의도적으로 규칙적인 요소라 지터 없음
+towers = [lp.instance(lp.kit("tower"), location=(x, y, 0)) for x, y in inner[::2]]
+# 집은 격자가 아니라 광장·길목 주변에 군집으로 — 실제 마을은 이렇게 선다
+houses = lp.place_cluster(lp.kit("house"), 18, centers=[(-16, -6), (6, -14), (-4, 14)],
+                          radius=9.0, min_dist=5.0, avoid=[(4, 2, 10, 10)], seed=3)
+# 길가 노점은 place_along + 지터 — 등간격이면 도면이다
+stalls = lp.place_along(lp.kit("stall"), road_pts[2:6], spacing=5.0, offset_jitter=3.0,
+                        spacing_jitter=0.3, rotate_jitter=20.0, seed=5)
+trees = lp.place_cluster(lp.kit("tree"), 30, centers=[(-44, 0), (40, -12), (10, 30)],
+                         radius=10.0, min_dist=3.5, scale_jitter=0.25, seed=11)
 lp.ground_snap([keep, gate, *towers, *houses, *stalls, *trees], ground)
 ```

@@ -8,8 +8,8 @@ _PROMPT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 # 배경 모드 프롬프트에만 노출하는 씬 헬퍼 — lowpoly.SCENE_API를 읽지 못하는 환경
 # (bpy 없는 유닛 테스트)에서도 프롬프트 형태를 검증할 수 있도록 이름 목록을 복제해 둔다.
 _SCENE_API_FALLBACK = ["terrain", "room", "instance", "place_grid", "place_along",
-                       "place_scatter", "wall_run", "fence_run", "path_strip",
-                       "ground_snap", "kit"]
+                       "place_scatter", "place_cluster", "meander", "wall_run", "fence_run",
+                       "path_strip", "ground_snap", "kit"]
 # 배치 턴에서도 필요한 최소 모델링 헬퍼 (단순 구조물과 배색용)
 _SCENE_BASE_API = ["set_color", "box", "cylinder", "cone", "plane", "join", "array"]
 # 복셀 스타일에만 노출하는 격자 헬퍼 (bpy 없는 유닛 테스트용 복제 목록)
@@ -222,7 +222,15 @@ def build_scene_plan_prompt(request: str, scene_size: str, tri_budget: int, max_
                 "구역(zones)은 옥외 구획이 아니라 **실내 영역**이다 "
                 "(계산대 주변 / 진열 구역 / 통로 / 창가 자리).\n"
                 if interior else
-                f"한 변 약 {int(meters)}m의 옥외 부지.\n"))
+                f"긴 변 약 {int(meters)}m 안팎의 옥외 부지.\n"
+                "**부지를 정사각형으로 잡지 마라.** `scene.extent`는 [폭, 깊이]로 비율 1:1.3~1:2 "
+                "사이에서 지형·강·길에 맞춰 정하고, 가능하면 `scene.outline`에 6~12점 다각형으로 "
+                "비정형 윤곽(해안선·능선·숲 경계)을 그려라. 구역(zones)에는 `rotation`(도)을 넣어 "
+                "축에 나란하지 않게 비틀고, 구역 크기(extent)도 서로 다르게 하라.\n"
+                "**격자·등간격·직각은 계획도시를 명시적으로 요청받았을 때만.** 그 외에는 실제 "
+                "정착지처럼 길이 굽고 건물이 길목·광장·우물 주변에 뭉치며 간격이 고르지 않아야 한다. "
+                "`rules`에 이 씬의 배치 성격(예: '집들은 굽은 큰길을 따라 불규칙하게, 뒤편은 군집')을 "
+                "한 줄 이상 적어라.\n"))
 
     budget_text = (f"씬 전체 트라이 예산: {tri_budget} — Σ(count × size_class 상한) + 지형 여유 "
                    f"{sp.TERRAIN_RESERVE_TRI} 이 예산을 넘지 않게 개수를 정하라.\n"
@@ -301,7 +309,22 @@ def build_scene_place_prompt(plan: dict, kit_manifest: list, tri_budget: int,
            if interior else "")
         + f"**배치 총량 기준: 인스턴스 합계 {target}개 안팎.** 플랜의 count를 임의로 줄이지 마라 — "
         "빈 공간 규칙은 '의도적으로 비운 구역 하나'를 뜻하지 전체를 성기게 깔라는 뜻이 아니다.\n\n"
-        "## 플랜 (확정본)\n"
+        + ("" if interior else
+           "**규칙적으로 보이면 실패다.** 결과가 도면처럼 격자·등간격·직각으로 읽히면 원화 느낌이 "
+           "사라진다. 다음을 지켜라:\n"
+           "- 지형은 플랜의 `scene.extent`(비정사각) 크기로 만들고, `scene.outline`이 있으면 "
+           "`lp.terrain(outline=...)`으로 그 윤곽을 그대로 써라. 정사각 지형 금지.\n"
+           "- 길·개천·성벽·울타리의 폴리라인은 반드시 `lp.meander`로 굽혀서 넘겨라. "
+           "직선 두 점으로 그은 길은 도면이다.\n"
+           "- 집·노점·덤불·잔해 같은 '모여 있는 것'은 `lp.place_cluster`로 광장·우물·길목 주변에 "
+           "뭉치게 놓아라. `lp.place_grid`는 막사·묘지·밭·주차장처럼 실제로 격자인 것에만 쓰고, "
+           "그때도 jitter·rotate_jitter를 넣어라.\n"
+           "- `lp.place_along`으로 길가에 놓을 때는 `spacing_jitter`·`offset_jitter`·`rotate_jitter`를 "
+           "반드시 준다(가로등·망루처럼 의도적으로 규칙적인 것만 예외).\n"
+           "- 구역의 `rotation`을 존중해 그 구역의 배치 축을 비틀어라. 모든 구역이 XY축에 "
+           "나란하면 안 된다.\n"
+           "- 같은 프랍을 여러 번 놓을 때 스케일 지터 0.1~0.25를 준다.\n\n")
+        + "## 플랜 (확정본)\n"
         f"```json\n{plan_text}\n```\n\n"
         "## 사용 가능한 키트 (이 key만 존재한다)\n"
         f"{_kit_manifest_table(kit_manifest)}\n\n"

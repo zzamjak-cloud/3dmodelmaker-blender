@@ -92,14 +92,30 @@ def plan_summary(plan: dict) -> str:
     zones = len((plan or {}).get("zones") or [])
     assets = (plan or {}).get("assets") or []
     total = sum(int(a.get("count") or 1) for a in assets)
-    return ("플랜 확정: 구역 %d개, 에셋 %d종(배치 %d개), 예상 %d tris"
-            % (zones, len(assets), total, scene_plan.estimated_tris(plan or {})))
+    scene = (plan or {}).get("scene") or {}
+    extent = scene.get("extent") or []
+    shape = ""
+    if len(extent) == 2:
+        shape = " 부지 %.0fx%.0fm%s," % (float(extent[0]), float(extent[1]),
+                                        " 비정형" if scene.get("outline") else "")
+    return ("플랜 확정:%s 구역 %d개, 에셋 %d종(배치 %d개), 예상 %d tris"
+            % (shape, zones, len(assets), total, scene_plan.estimated_tris(plan or {})))
 
 
-def scene_spacing(scene_size: str) -> float:
-    """배경 잡의 레인 간격(m) — 씬 한 변 + 여백. 기본 4m로는 옆 레인과 겹친다."""
+def scene_spacing(scene_size: str, plan: dict = None) -> float:
+    """배경 잡의 레인 간격(m) — 부지 긴 변 + 여백. 기본 4m로는 옆 레인과 겹친다.
+
+    플랜에 extent가 있으면 그 긴 변을 쓴다 — 부지가 더는 정사각형이 아니어서
+    규모의 한 변만으로는 옆 레인과 겹칠 수 있다."""
     size = str(scene_size or "M").strip().upper()
-    return scene_plan.SCENE_SIZE_M.get(size, scene_plan.SCENE_SIZE_M["M"]) + LANE_MARGIN_M
+    side = scene_plan.SCENE_SIZE_M.get(size, scene_plan.SCENE_SIZE_M["M"])
+    extent = ((plan or {}).get("scene") or {}).get("extent") or []
+    if len(extent) == 2:
+        try:
+            side = max(side, float(extent[0]), float(extent[1]))
+        except (TypeError, ValueError):
+            pass
+    return side + LANE_MARGIN_M
 
 
 def scaled_timeout(base_timeout, scale) -> int:

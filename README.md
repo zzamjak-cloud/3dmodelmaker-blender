@@ -97,6 +97,10 @@ Codex CLI의 GPT-6 Astra로 게임용 3D 모델(프랍·건물·자연물)을 �
 
 **트라이 상한은 씬 전체에 걸지 않는다** (환경설정 기본값 0 = 상한 없음). 스타일이 정하는 트라이 상한은 모델 1개 기준이라 에셋이 여러 종 들어가는 배경에 그대로 씌우면 밀도를 만들 수 없기 때문이다. 특정 기기 한도에 맞춰야 할 때만 값을 넣으면 기존처럼 초과 시 밀도 축소 재요청이 돈다. 에셋 1개의 상한에는 스타일 배수가 곱해진다 (로우폴리 L 6,000 → 사실적 L 36,000).
 
+**부지는 정사각형이 아니다.** 플랜 JSON의 `scene.extent`([폭, 깊이], 비율 자유)와 `scene.outline`(6~12점 비정형 다각형)이 부지 형태를 정하고, 배치 턴은 그 윤곽을 `lp.terrain(outline=...)`으로 그대로 쓴다. 구역에는 `rotation`(도)이 있어 배치 축이 XY축에 나란하지 않다. 예전에는 규모에서 정사각형 한 변만 나와 결과가 늘 정사각형이었다.
+
+**규칙적인 배치는 결함으로 취급한다** (계획도시를 명시적으로 요청한 경우 제외). 길·성벽·울타리 폴리라인은 `lp.meander`로 굽히고, 집·노점·덤불처럼 모여 있는 것은 `lp.place_cluster`로 광장·길목 주변에 뭉치게 놓고, `lp.place_along`에는 `spacing_jitter`/`offset_jitter`/`rotate_jitter`를 준다. `lp.place_grid`는 막사·묘지·밭처럼 실제로 격자인 것에만 쓴다. 시스템 프롬프트의 배치 예시도 정사각 성벽 + 격자 주택에서 비정형 요새 + 군집 마을로 바꿨다 — 예시가 곧 결과의 성격을 정한다.
+
 **울타리는 `lp.fence_run`으로 만든다.** `lp.wall_run`은 속이 꽉 찬 벽면이라 울타리에 쓰면 판때기가 된다 — 기둥·가로대·세로 살대를 실제로 세우는 별도 헬퍼를 두고, 프롬프트에서 둘의 용도를 갈랐다 (`wall_run`은 성벽·건물 외벽·막힌 담장 전용).
 
 ## 이미지 생성 백엔드
@@ -125,6 +129,7 @@ API 키는 Blender 설정 폴더의 `lp3d_settings.json`에 평문으로 저장�
 
 ## 변경 이력
 
+- **0.16.0**: 배경 배치의 규칙성 제거 — 플랜에 부지 `extent`/`outline`(비정형 윤곽)과 구역 `rotation` 추가, `lp.terrain(outline=...)`·`lp.meander`(굽은 폴리라인)·`lp.place_cluster`(군집 배치)·`place_along` 지터 헬퍼 추가. 정사각 부지·격자·직각 동선을 결함으로 규정하고 배치 예시를 비정형 요새로 교체.
 - **0.15.1**: 참조 이미지 백엔드 표시 — 패널·상태줄·로그에 실제 사용 경로(OpenRouter 모델 / Codex / 폴백 / 미사용)를 보여준다.
 - **0.15.0**: 배경 규모를 용도 기준으로 재정의 — 실내(약 12m, 건물 내부) / 구역(약 40m) / 대규모(약 100m). 규모마다 에셋 종류·배치 총량·랜드마크 수를 함께 정하고 그 수치를 프롬프트에 전달한다. 씬 전체 트라이 상한은 기본 해제(0 = 상한 없음) — 스타일 상한은 모델 1개 기준이다. 실내는 `lp.room`으로 바닥·벽을 만들고 지형·`ground_snap`을 쓰지 않는다. 울타리 전용 `lp.fence_run` 추가 — `wall_run`으로 울타리를 만들면 판때기가 되던 문제.
 - **0.14.0**: 아트 스타일 드롭다운 추가 — 로우폴리 캐주얼/복셀/귀여운 둥근/스타일리쉬 캐주얼/사실적. 하드코딩돼 있던 로우폴리 지침을 공통 골격(`prompts/system_base.md`)과 스타일 조각(`prompts/styles/*.md`)으로 분리했고, 스타일이 모델링 규칙·폴리 버짓과 참조 시트 화풍을 함께 정한다. 복셀용 격자 헬퍼 `lp.voxel`/`voxel_box`/`voxel_column` 추가.
@@ -227,6 +232,7 @@ blender --background --factory-startup --python tests/verify_geometry_in_blender
 blender --background --factory-startup --python tests/verify_texturing_in_blender.py # 개별 매핑: 언랩·6면도 렌더·베이크·재질 교체
 blender --background --factory-startup --python tests/verify_voxel_in_blender.py     # 복셀 격자 헬퍼 (좌표·은면 제거·닫힌 메시)
 blender --background --factory-startup --python tests/verify_sceneprops_in_blender.py # 실내 방(room)·울타리(fence_run) 구조
+blender --background --factory-startup --python tests/verify_organic_in_blender.py    # 비정형 지형(outline)·meander·place_cluster·place_along 지터
 ```
 
 ## 라이선스

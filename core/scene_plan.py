@@ -253,6 +253,36 @@ def _normalize_scene(plan: dict, warnings: list):
     scene["palette"] = palette
     scene["mood"] = str(scene.get("mood") or "")
 
+    # 부지 형태. 예전에는 규모에서 정사각형 한 변만 나왔다 — 항상 정사각형으로
+    # 생성되던 원인이다. extent=(폭, 깊이)는 비율이 자유이고, outline이 있으면
+    # 그 다각형이 실제 부지 윤곽이 된다(terrain outline으로 그대로 넘어간다).
+    meters = SCENE_SIZE_M[size]
+    extent = _pair(scene.get("extent"), (meters, meters))
+    extent = (max(extent[0], meters * 0.4), max(extent[1], meters * 0.4))
+    area_cap = meters * meters * 1.6  # 규모보다 지나치게 넓어지는 것만 막는다
+    if extent[0] * extent[1] > area_cap:
+        k = (area_cap / (extent[0] * extent[1])) ** 0.5
+        extent = (extent[0] * k, extent[1] * k)
+        warnings.append("부지 extent가 규모 %s보다 너무 넓어 %.0fx%.0fm로 줄였다"
+                        % (size, extent[0], extent[1]))
+    scene["extent"] = [round(extent[0], 1), round(extent[1], 1)]
+
+    outline = scene.get("outline")
+    points = []
+    if isinstance(outline, list):
+        for pt in outline:
+            try:
+                points.append([round(float(pt[0]), 1), round(float(pt[1]), 1)])
+            except (TypeError, ValueError, IndexError):
+                continue
+    if points and len(points) < 3:
+        warnings.append("부지 outline이 3점 미만이라 무시했다")
+        points = []
+    if len(points) > 16:
+        warnings.append("부지 outline이 %d점이라 16점으로 줄였다" % len(points))
+        points = points[:16]
+    scene["outline"] = points
+
 
 def _normalize_terrain(plan: dict, warnings: list):
     terrain = plan.get("terrain")
@@ -277,10 +307,14 @@ def _normalize_zones(plan: dict, warnings: list) -> list:
             continue
         name = _dedupe(_slug(zone.get("name"), "zone%d" % (i + 1)), names)
         names.append(name)
+        # rotation(도)이 있으면 구역이 축에 정렬되지 않는다 — 모든 구역이 XY축에
+        # 나란하면 결과가 도면처럼 규칙적으로 보인다
+        rotation = _to_float(zone.get("rotation"), 0.0)
         zones.append({
             "name": name,
             "center": _pair(zone.get("center"), (0.0, 0.0)),
             "extent": _pair(zone.get("extent"), (10.0, 10.0)),
+            "rotation": round(((rotation + 180.0) % 360.0) - 180.0, 1),
             "purpose": str(zone.get("purpose") or ""),
         })
     if not zones:

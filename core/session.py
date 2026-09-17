@@ -14,7 +14,7 @@ from .. import preferences
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
 from . import (errors, executor, jobs, library, models, multiview,
-               prompts, runner, scheduler, snapshots, styles, texgen)
+               prompts, runner, scheduler, shapegen, snapshots, styles, texgen)
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
 
@@ -204,6 +204,14 @@ class GenerationSession:
             self.system_mode = 'CHARACTER'
         self.character_type = (str(getattr(job, "character_type", 'AUTO') or 'AUTO')
                                if job else 'AUTO')
+        # 캐릭터는 실행 후 시트와 같은 6시점으로 렌더해 시트와 대조하는 턴을 돈다.
+        # 첫 생성은 시트를 '보고' 만들지만 결과가 얼마나 다른지는 모른다 — 나란히
+        # 놓고 비교시켜야 빠진 요소·비율 오차·떨어진 파트가 잡힌다.
+        self.compare_turns_left = (int(getattr(self.prefs, "character_compare_turns", 1) or 0)
+                                   if self.system_mode == 'CHARACTER' else 0)
+        self.compare_turns_total = self.compare_turns_left
+        if self.compare_turns_left:
+            self.max_iterations = 1 + self.compare_turns_left
         # 배경 잡이 스폰한 에셋이면 부모 uid 문자열 — 완료 시 부모에게 알린다
         self.parent_uid = str(getattr(job, "parent_uid", "") or "") if job else ""
         self.texture_path = None    # 개별 매핑 결과 PNG (보관 폴더)
@@ -432,7 +440,72 @@ class GenerationSession:
             lines += [f"  · {l}" for l in errors.detail_lines(error)]
             # 상태줄에 "— 참조 없이 진행"까지 붙이면 가운데가 잘려 정작 원인이 사라진다
             self._set_status(f"멀티뷰 실패: {reason}", "\n".join(lines))
+        if self.multiview and self.system_mode == 'CHARACTER' and shapegen.is_available():
+            self._start_shapegen()
+            return
         self._start_generation()
+
+    # ---------- 캐릭터: 이미지→3D 셰이프 → 리토폴로지 ----------
+    #
+    # 프리미티브 코드로 조립한 캐릭터는 원화와 닮지 않는다. 턴어라운드 시트를 그대로
+    # 이미지→3D 모델에 넣어 "찰흙" 셰이프를 받고 리토폴로지한다. Astra 모델링 턴은 건너뛰고
+    # 마무리(은면 정리·게임레디·텍스처 6면도 베이크)는 기존 경로를 그대로 탄다.
+    def _start_shapegen(self):
+        try:
+            views = shapegen.split_turnaround(self.multiview, os.path.join(self.workdir, "views"))
+        except Exception as e:
+            _log.exception("턴어라운드 분할 실패")
+            self._set_status("시트 분할 실패 — 코드 모델링으로 진행", f"턴어라운드 분할 실패: {e}")
+            self._start_generation()
+            return
+        self.shape_path = os.path.join(self.workdir, "shape.glb")
+        self._set_status("이미지→3D 셰이프 생성중 (Hunyuan3D 로컬)...",
+                         f"셰이프 생성 시작: 뷰 {', '.join(sorted(views))} → {shapegen.server_url()}",
+                         phase='GEN')
+        self._submit_ai(lambda: shapegen.generate(
+            views, self.shape_path, max(self.prefs.timeout, 600), self._on_shape,
+            job_key=self.uid, face_count=0))
+
+    def _on_shape(self, path, error=None):
+        if self._stale():
+            return
+        scheduler.release_ai(self.uid)
+        if not path:
+            # 셰이프 실패는 비치명 — 코드 모델링 경로로 돌아간다
+            self._set_status("셰이프 생성 실패 — 코드 모델링으로 진행",
+                             f"셰이프 생성 실패: {error}")
+            self._start_generation()
+            return
+        self._set_status("셰이프 수신 — 리토폴로지 대기중...", "셰이프 GLB 수신", phase='EXEC')
+        self._submit_blender(self._blender_retopo)
+
+    def _blender_retopo(self):
+        from ..lowpoly import retopo, set_session
+        set_session(self.collection_name)
+        try:
+            coll = bpy.data.collections.get(self.collection_name)
+            if coll is None:
+                coll = bpy.data.collections.new(self.collection_name)
+                bpy.context.scene.collection.children.link(coll)
+            self._set_status("리토폴로지 중 (조각 제거·복셀 리메시·QuadriFlow)...", phase='EXEC')
+            # 이름은 프롬프트에서 — _slug는 ASCII만 남겨 한국어 요청이 전부 "Model"이 된다
+            info = retopo.process_glb(
+                self.shape_path, multiview._slug(self.request, 24) or "Character", coll,
+                height=float(getattr(self.prefs, "character_height", 1.8)),
+                target_faces=int(getattr(self.prefs, "shapegen_faces", 12000)),
+                method=str(getattr(self.prefs, "shapegen_method", 'DECIMATE')))
+        except Exception as e:
+            _log.exception("리토폴로지 실패")
+            self._set_status("리토폴로지 실패 — 코드 모델링으로 진행", f"리토폴로지 실패: {e}")
+            self._start_generation()
+            return
+        self.last_code = ""  # 코드 없이 만든 결과 — 라이브러리 few-shot에 섞이지 않는다
+        self.compare_turns_left = 0
+        self._set_status(
+            "셰이프 리토폴로지 완료",
+            f"셰이프: 원본 {info['raw_faces']}면, 파편 {info['floaters_removed']}개 제거, "
+            f"리메시 {info['remeshed_faces']}면 → {info['method']} → {info['tris']} tris")
+        self._finalize()
 
     def _start_generation(self):
         fewshot = []
@@ -699,7 +772,44 @@ class GenerationSession:
         self.exec_retries = 0
         self.last_code = code
         self._set_status(f"턴 {self.iteration} 생성 완료", f"턴 {self.iteration} 실행 성공")
+        if self.compare_turns_left > 0 and self.multiview:
+            if self._dispatch_compare(code):
+                return
         self._finalize()
+
+    def _dispatch_compare(self, code: str) -> bool:
+        """현재 모델을 6시점 렌더해 턴어라운드 시트와 대조하는 턴을 보낸다. 실패하면 False.
+
+        렌더는 개별 매핑용 캡처(texturing.capture)를 그대로 쓴다 — 시트와 칸 순서는
+        다르지만 라벨이 붙어 있어 모델이 대조할 수 있다."""
+        from ..texturing import capture as tex_capture
+        try:
+            coll = bpy.data.collections.get(self.collection_name)
+            mesh_objs = [o for o in coll.objects if o.type == 'MESH'] if coll else []
+            if not mesh_objs:
+                return False
+            out_dir = os.path.join(self.workdir, f"compare_{self.iteration}")
+            with _bake_context(self.scene_name) as ctx:
+                views = tex_capture.render_views(ctx, mesh_objs, out_dir)
+            render = tex_capture.join_sheet(views, os.path.join(self.workdir,
+                                                                f"render_{self.iteration}.png"))
+        except Exception as e:
+            _log.exception("6면도 대조 렌더 실패")
+            self._set_status("6면도 대조 렌더 실패 — 대조 없이 마무리", f"대조 렌더 실패: {e}")
+            return False
+        turn = self.compare_turns_total - self.compare_turns_left + 1
+        self.compare_turns_left -= 1
+        self.iteration += 1
+        job = self._job()
+        if job:
+            job.iteration = self.iteration
+        self._set_status(f"6면도 대조 {turn}/{self.compare_turns_total} — {self._model_label()} 호출중...",
+                         f"6면도 대조 턴 {turn}/{self.compare_turns_total}: 시트 vs 렌더 비교 요청",
+                         phase='GEN')
+        self._dispatch(prompts.build_character_compare_prompt(
+            self._mv_name(), os.path.basename(render), code, turn, self.compare_turns_total),
+            images=[self.multiview, render])
+        return True
 
     def _finalize(self):
         self._set_status("마무리 대기중...", phase='FINAL')

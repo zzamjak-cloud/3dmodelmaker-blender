@@ -117,5 +117,40 @@ class TestTurnaroundSheet(unittest.TestCase):
         self.assertIn("스타일: 복셀", p)
 
 
+class TestComparePrompt(unittest.TestCase):
+    def test_names_both_images_and_turn(self):
+        p = prompts.build_character_compare_prompt("multiview.png", "render_1.png",
+                                                   "x = 1", 1, 2)
+        self.assertIn("multiview.png", p)
+        self.assertIn("render_1.png", p)
+        self.assertIn("대조 1/2", p)
+        self.assertIn("x = 1", p)
+        self.assertIn("STATUS: DONE", p)
+
+    def test_asks_for_missing_parts_and_floating_parts(self):
+        p = prompts.build_character_compare_prompt("s.png", "r.png", "", 1, 1)
+        self.assertIn("모델에 없는 요소", p)
+        self.assertIn("떠 있는 파트", p)
+        self.assertIn("전체 코드", p)
+
+    def test_explains_grid_order_difference(self):
+        # 시트(FRONT|BACK|LEFT / RIGHT|TOP|3/4)와 렌더(FRONT|RIGHT|BACK / LEFT|TOP|BOTTOM)의
+        # 칸 순서가 달라 모델이 칸 위치로 대조하면 틀린 짝을 비교한다
+        p = prompts.build_character_compare_prompt("s.png", "r.png", "", 1, 1)
+        self.assertIn("칸 순서가 시트와 다르니", p)
+
+
+class TestCharacterRulesConnectParts(unittest.TestCase):
+    def test_gap_rule_is_gone_and_penetration_rule_exists(self):
+        with open(os.path.join(_ROOT, "prompts", "system_character.md"), encoding="utf-8") as f:
+            md = f.read()
+        # 첫 실행 결과: 파트 사이 틈 규칙 때문에 팔·다리가 몸에서 떨어져 떠 있었다
+        self.assertNotIn("0.05m 이상 틈", md)
+        self.assertIn("떠 있는 파트는 실패", md)
+        self.assertIn("관통", md)
+        self.assertIn("80,000", md)          # 폴리 제약 완화
+        self.assertIn("시트 체크리스트", md)  # 원화 요소 열거
+
+
 if __name__ == "__main__":
     unittest.main()

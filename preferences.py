@@ -109,6 +109,50 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default='high',
         update=_persist_cb,
     )
+    use_shapegen: BoolProperty(
+        name="캐릭터 이미지→3D 셰이프 생성",
+        description=("캐릭터를 코드로 조립하는 대신, 턴어라운드 시트의 정면·뒷면·측면을 로컬 "
+                     "Hunyuan3D 서버에 넣어 하이폴리 셰이프를 받고 리토폴로지한다. 서버가 없으면 "
+                     "자동으로 코드 모델링 경로로 폴백"),
+        default=True,
+        update=_persist_cb,
+    )
+    shapegen_url: StringProperty(
+        name="셰이프 서버 주소",
+        description="로컬 Hunyuan3D 서버 (D:/Tools/Hunyuan3D-2/run_server.bat). Blender MCP의 Hunyuan LOCAL_API와 같은 주소",
+        default="http://127.0.0.1:8081",
+        update=_persist_cb,
+    )
+    shapegen_faces: IntProperty(
+        name="리토폴로지 목표 면수",
+        description="이미지→3D 셰이프를 게임용으로 줄일 때의 목표 폴리곤(쿼드) 수. 트라이는 약 2배",
+        default=12000, min=2000, max=100000,
+        update=_persist_cb,
+    )
+    shapegen_method: EnumProperty(
+        name="리토폴로지 방식",
+        description="이미지→3D 셰이프를 게임용 메시로 줄이는 방법",
+        items=[
+            ('DECIMATE', "데시메이트 (디테일 보존)", "조각 제거 후 데시메이트 — 얼굴·털 디테일이 남는 트라이 메시"),
+            ('QUADRIFLOW', "QuadriFlow (쿼드 흐름)", "복셀 리메시 후 QuadriFlow — 리깅용 쿼드 메시, 작은 디테일은 뭉개진다"),
+        ],
+        default='DECIMATE',
+        update=_persist_cb,
+    )
+    character_height: FloatProperty(
+        name="캐릭터 기본 키(m)",
+        description="이미지→3D 셰이프의 크기 기준. 발바닥 z=0에서 머리끝까지",
+        default=1.8, min=0.2, max=10.0,
+        update=_persist_cb,
+    )
+    character_compare_turns: IntProperty(
+        name="캐릭터 6면도 대조 횟수",
+        description=("캐릭터 모델을 실행한 뒤 시트와 같은 6시점으로 렌더해 턴어라운드 시트와 "
+                     "대조하고 차이를 고치는 추가 턴 수. 0이면 대조 없이 한 번에 마무리. "
+                     "1회당 Astra 호출 1번이 늘어난다"),
+        default=1, min=0, max=3,
+        update=_persist_cb,
+    )
     use_library: BoolProperty(
         name="생성 라이브러리 사용",
         description="성공한 생성 결과(프롬프트·코드)를 쌓아두고, 비슷한 요청이 오면 과거 합격 코드를 예시로 참고해 품질을 높인다",
@@ -163,6 +207,15 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col.prop(self, "use_multiview")
         col.prop(self, "use_library")
         col.prop(self, "texture_resolution")
+        char_box = self.layout.box()
+        char_box.label(text="캐릭터", icon='ARMATURE_DATA')
+        char_box.prop(self, "use_shapegen")
+        if self.use_shapegen:
+            char_box.prop(self, "shapegen_url")
+            char_box.prop(self, "shapegen_faces")
+            char_box.prop(self, "shapegen_method")
+            char_box.prop(self, "character_height")
+        char_box.prop(self, "character_compare_turns")
         img_box = self.layout.box()
         img_box.label(text="참조 이미지 생성", icon='IMAGE_DATA')
         img_box.prop(self, "image_backend")
@@ -202,6 +255,12 @@ class _Defaults:
     openrouter_api_key = ""
     image_model = imagegen.DEFAULT_MODEL
     image_quality = 'high'
+    character_compare_turns = 1
+    use_shapegen = True
+    shapegen_url = "http://127.0.0.1:8081"
+    shapegen_faces = 12000
+    shapegen_method = 'DECIMATE'
+    character_height = 1.8
     scene_tri_budget = 0
     scene_max_assets = 0
     scene_timeout_scale = 2.0

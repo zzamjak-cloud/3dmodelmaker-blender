@@ -139,7 +139,7 @@ class BackendTests(unittest.TestCase):
 class ServerPostprocessTests(unittest.TestCase):
     def test_preserve_parts_skips_floater_removal_only(self):
         # GPU 모델을 로드하지 않고 실제 서버의 후처리 함수를 실행한다.
-        tree = ast.parse((ROOT / 'scripts/hunyuan3d/lp3d_h3d_server.py').read_text(encoding='utf-8'))
+        tree = ast.parse((ROOT / 'scripts/trellis3d/server_core.py').read_text(encoding='utf-8'))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_postprocess_mesh')
         floater, degenerate, reducer = Mock(), Mock(), Mock()
         degenerate.return_value.return_value = 'clean'

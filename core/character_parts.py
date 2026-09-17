@@ -151,7 +151,7 @@ class CharacterPartsMixin:
             return
         archived = multiview.archive(path, f'{self.request}_{part}')
         self._part_records[part] = {'sheet': archived or path, 'boxes': boxes, 'sizes': sizes}
-        self._set_status(f'{LABELS[part]} Hunyuan3D 생성중...', phase='GEN')
+        self._set_status(f'{LABELS[part]} 셰이프 생성중...', phase='GEN')
         self._submit_ai(lambda: shapegen.generate(
             views, os.path.join(directory, 'shape.glb'), max(self.prefs.timeout, 600),
             lambda result, error=None: self._on_part_shape(part, result, error),

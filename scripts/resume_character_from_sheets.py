@@ -1,4 +1,4 @@
-"""생성된 부품 시트로 실제 Hunyuan 모델링을 재개하고 채색용 가이드를 저장한다."""
+"""생성된 부품 시트로 실제 셰이프 서버 모델링을 재개하고 채색용 가이드를 저장한다."""
 import importlib
 import json
 import time
@@ -23,7 +23,7 @@ unwrap = importlib.import_module(PACKAGE + '.texturing.unwrap')
 prefs = importlib.import_module(PACKAGE + '.preferences').get_prefs()
 REPORT = {
     'image_backend': 'imagegen tool supplied local sheets',
-    'shape_backend': 'actual Hunyuan HTTP; no shape fixture',
+    'shape_backend': 'actual shape-server HTTP; no shape fixture',
     'texture_status': 'not painted; UV and guides prepared',
     'parts': {},
 }

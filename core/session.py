@@ -461,7 +461,7 @@ class GenerationSession(CharacterPartsMixin):
             if not self.multiview:
                 self._finish(f'부품 분리 실패: 원본 턴어라운드 생성 실패 ({error})', ok=False)
             elif not shapegen.is_available():
-                self._finish('부품 분리 실패: Hunyuan3D 서버 연결 또는 셰이프 생성 설정을 확인하세요', ok=False)
+                self._finish('부품 분리 실패: 셰이프 서버 연결 또는 셰이프 생성 설정을 확인하세요', ok=False)
             else:
                 self._start_character_parts()
             return
@@ -484,7 +484,7 @@ class GenerationSession(CharacterPartsMixin):
             self._start_generation()
             return
         self.shape_path = os.path.join(self.workdir, "shape.glb")
-        self._set_status("이미지→3D 셰이프 생성중 (Hunyuan3D 로컬)...",
+        self._set_status("이미지→3D 셰이프 생성중 (셰이프 서버)...",
                          f"셰이프 생성 시작: 뷰 {', '.join(sorted(views))} → {shapegen.server_url()}",
                          phase='GEN')
         self._submit_ai(lambda: shapegen.generate(

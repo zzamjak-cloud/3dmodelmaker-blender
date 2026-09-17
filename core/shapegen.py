@@ -1,16 +1,18 @@
-# 이미지→3D 셰이프 생성 클라이언트 (로컬 Hunyuan3D 서버)
+# 이미지→3D 셰이프 생성 클라이언트 (셰이프 서버 HTTP)
 #
 # 캐릭터를 프리미티브 코드로 조립하면 원화와 닮지 않는다. 턴어라운드 시트의 정면·뒷면·측면을
-# 이미지→3D 모델(Hunyuan3D-2mv)에 넣어 "찰흙으로 빚은" 하이폴리 셰이프를 받고, 그 메시를
+# 이미지→3D 모델(TRELLIS.2)에 넣어 "찰흙으로 빚은" 하이폴리 셰이프를 받고, 그 메시를
 # 리토폴로지(lowpoly/retopo.py)해서 게임용 메시로 만든다. 텍스처는 기존 6면도 베이크가 맡는다.
 #
-# 서버는 D:/Tools/Hunyuan3D-2/lp3d_h3d_server.py (POST /generate, base64 뷰 → GLB).
-# Blender MCP의 Hunyuan LOCAL_API 모드와 같은 주소·형식을 쓴다.
+# 서버 계약: GET /status → {"capabilities": {...}}, POST /generate (base64 뷰 + 파라미터) → GLB 바이트.
+# 서버 구현은 scripts/trellis3d/ — 각 사용자가 자기 Modal 계정에 배포하고 주소·토큰을 환경설정에 넣는다.
+# 코드에는 어떤 서버 주소·토큰도 들어 있지 않다(OpenRouter 키와 같은 원칙).
 import base64
 import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 log = logging.getLogger(__name__)
@@ -31,6 +33,21 @@ def server_url() -> str:
     return (getattr(prefs, "shapegen_url", "") or "http://127.0.0.1:8081").rstrip("/")
 
 
+def auth_headers() -> dict:
+    """클라우드 서버 인증 헤더. 토큰이 없으면(로컬 서버) 빈 dict.
+
+    `키:시크릿` 형식은 Modal 프록시 인증(Modal-Key/Modal-Secret) — 토큰 없는 요청은 Modal 엣지에서
+    거절되어 GPU 컨테이너가 뜨지 않으므로 주소가 노출돼도 비용이 발생하지 않는다."""
+    from .. import preferences
+    token = (getattr(preferences.get_prefs(), "shapegen_token", "") or "").strip()
+    if not token:
+        return {}
+    if ":" in token:
+        key, secret = token.split(":", 1)
+        return {"Modal-Key": key.strip(), "Modal-Secret": secret.strip()}
+    return {"Authorization": "Bearer " + token}
+
+
 def is_enabled() -> bool:
     from .. import preferences
     return bool(getattr(preferences.get_prefs(), "use_shapegen", True))
@@ -41,7 +58,8 @@ def is_available(timeout: float = 1.5) -> bool:
     if not is_enabled():
         return False
     try:
-        with urllib.request.urlopen(server_url() + "/status", timeout=timeout) as r:
+        req = urllib.request.Request(server_url() + "/status", headers=auth_headers())
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status == 200
     except (urllib.error.URLError, OSError, ValueError):
         return False
@@ -52,13 +70,19 @@ def parts_support_error(timeout: float = 1.5) -> str:
     if not is_enabled():
         return '환경설정에서 셰이프 생성을 켜세요'
     try:
-        with urllib.request.urlopen(server_url() + '/status', timeout=timeout) as response:
+        req = urllib.request.Request(server_url() + '/status', headers=auth_headers())
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             status = json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        # 401/403은 서버가 살아 있고 토큰이 틀린 것 — 연결 문제로 오해하지 않게 따로 안내한다
+        if exc.code in (401, 403):
+            return '셰이프 서버 인증 실패: 환경설정의 셰이프 서버 토큰을 확인하세요'
+        return f'셰이프 서버 오류 {exc.code}'
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        return f'Hunyuan3D 서버에 연결할 수 없습니다: {exc}'
+        return f'셰이프 서버에 연결할 수 없습니다: {exc}'
     if not isinstance(status, dict) or not isinstance(status.get('capabilities'), dict) or not status['capabilities'].get('preserve_parts'):
-        return ('현재 Hunyuan3D 서버가 부품 보존을 지원하지 않습니다. '
-                '저장소 scripts/hunyuan3d/lp3d_h3d_server.py로 서버를 업데이트하고 재시작하세요')
+        return ('현재 셰이프 서버가 부품 보존을 지원하지 않습니다. '
+                '저장소 scripts/trellis3d/ 의 최신 서버로 업데이트하고 재배포하세요')
     return ''
 
 
@@ -118,6 +142,27 @@ def build_body(views: dict, octree: int = 256, steps: int = 30, guidance: float 
     return body
 
 
+def _poll_result(job: dict, timeout: int, interval: float = 3.0) -> bytes:
+    """202 응답의 job_id 로 GET /result/{id} 를 폴링한다. 202 는 진행 중, 200 은 GLB 바이트.
+
+    서버 오류(500)는 HTTPError 로 올라가 호출자가 본문을 읽어 안내한다."""
+    import time
+    job_id = job.get("job_id")
+    if not job_id:
+        raise ValueError("셰이프 서버가 job_id 없이 202를 보냈습니다")
+    url = server_url() + "/result/" + urllib.parse.quote(str(job_id))
+    deadline = time.monotonic() + timeout
+    while True:
+        req = urllib.request.Request(url, headers=auth_headers())
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = resp.read()
+            if resp.status == 200:
+                return body
+        if time.monotonic() > deadline:
+            raise OSError("셰이프 생성 대기 시간 초과 (%ds)" % timeout)
+        time.sleep(interval)
+
+
 def request_shape(views: dict, out_path: str, timeout: int = 900, **params):
     """셰이프를 생성해 out_path(.glb)에 저장한다 (블로킹 — 워커 스레드에서 호출).
 
@@ -127,16 +172,23 @@ def request_shape(views: dict, out_path: str, timeout: int = 900, **params):
     except (ValueError, OSError) as e:
         return None, "셰이프 요청 구성 실패: %s" % e
     req = urllib.request.Request(server_url() + "/generate", data=json.dumps(body).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"}, method="POST")
+                                 headers={"Content-Type": "application/json", **auth_headers()},
+                                 method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
+            # 클라우드 서버는 웹 요청 한계(Modal 150초) 때문에 202 + job_id 를 주고 결과를 폴링시킨다.
+            # 로컬 서버처럼 200 GLB 를 바로 주면 이 분기를 타지 않는다.
+            if resp.status == 202:
+                data = _poll_result(json.loads(data.decode("utf-8")), timeout)
     except urllib.error.HTTPError as e:
         detail = ""
         try:
             detail = e.read().decode("utf-8", "replace")[:300]
         except Exception:
             pass
+        if e.code in (401, 403):
+            return None, "셰이프 서버 인증 실패(%d): 환경설정의 셰이프 서버 토큰을 확인하세요" % e.code
         return None, "셰이프 서버 오류 %d: %s" % (e.code, detail)
     except urllib.error.URLError as e:
         return None, "셰이프 서버에 연결할 수 없습니다 (%s): %s" % (server_url(), e.reason)

@@ -83,6 +83,81 @@ def voxel_remesh(obj, voxel_size: float) -> None:
         bpy.ops.object.voxel_remesh()
 
 
+def _quadriflow_once(obj, target_faces: int) -> bool:
+    """QuadriFlow 한 번 시도. 면수가 바뀌었으면 성공. (실패 시 조용히 아무것도 안 하거나 RuntimeError)"""
+    before = len(obj.data.polygons)
+    try:
+        with _override(obj):
+            bpy.ops.object.quadriflow_remesh(target_faces=int(target_faces),
+                                             use_preserve_sharp=False,
+                                             use_mesh_symmetry=False, seed=1)
+    except RuntimeError:
+        return False
+    return len(obj.data.polygons) != before
+
+
+def _dissolve_degenerate(obj, dist: float) -> None:
+    """복셀 리메시가 남기는 극소 엣지를 녹인다 — QuadriFlow 사전 검사가 이 엣지에서 '비매니폴드'로 거절한다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.dissolve_degenerate(bm, dist=dist, edges=bm.edges)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+
+
+def retopo_robust(obj, hi, target_faces: int, height_units: float) -> tuple:
+    """QuadriFlow를 두 단계로 시도하고 실패하면 데시메이트. (방법 이름, 실제 리메시 면수) 반환.
+
+    1차: 현재(350분할) 리메시 그대로. 2차: 하이폴리 사본에서 90분할로 다시 리메시 → 퇴화 엣지 정리 →
+    최대 치수 10 단위로 확대 → QuadriFlow → 원래 크기로. 실측(2026-09-17): Blender QuadriFlow 사전 검사는
+    절대 엡실론(~1e-4)을 쓰기 때문에 단위 큐브 스케일의 고밀도 리메시(최소 엣지 1e-5~1e-6)에서는 완벽한
+    매니폴드라도 거절한다. 350분할은 어떤 스케일에서도 통과하지 않았고, 90분할 + ×10(또는 dissolve 2%)은 통과했다.
+    잃는 디테일은 뒤따르는 하이폴리 슈링크랩이 되찾는다."""
+    from mathutils import Matrix
+    remeshed_first = len(obj.data.polygons)
+    if _quadriflow_once(obj, target_faces):
+        return "quadriflow", remeshed_first
+    # 2차 — 하이폴리에서 **최대 치수 기준** 90분할로 다시 리메시하고 크기를 키워가며 시도.
+    # 실측(2026-09-17): 최대치수/90 복셀 + 최대치수 ×10~×40 에서 통과. 높이 기준으로 나누면 옆으로 긴 대상이
+    # 1.5~2배 촘촘해져 180분할급이 되고, 그 밀도는 어떤 스케일에서도 통과하지 않았다.
+    # dissolve_degenerate 는 n-gon 을 만들어 'Remeshing failed' 를 유발했으므로 쓰지 않는다.
+    # QuadriFlow 성공은 밀도에 민감하다(같은 메시가 45k 면에서는 통과, 69k 면에서는 'Remeshing failed').
+    # 그래서 분할 수를 90 → 64 → 45 로 낮추는 사다리로 내려가며, 각 밀도에서 크기를 ×10/×20/×40 으로 키워 시도한다.
+    coords = [v.co for v in hi.data.vertices]
+    extent = max(max(c[a] for c in coords) - min(c[a] for c in coords) for a in range(3)) if coords else 1.0
+    extent = max(extent, 1e-6)
+    remeshed = 0
+    for divisions in (90, 64, 45):
+        for target_size in (10.0, 20.0, 40.0):
+            obj.data = hi.data.copy()
+            keep_largest_island(obj, 0.0)
+            voxel_remesh(obj, extent / divisions)
+            keep_largest_island(obj, 0.0)
+            remeshed = len(obj.data.polygons)
+            scale = target_size / extent
+            obj.data.transform(Matrix.Scale(scale, 4))
+            ok = _quadriflow_once(obj, target_faces)
+            obj.data.transform(Matrix.Scale(1.0 / scale, 4))
+            obj.data.update()
+            if ok:
+                return "quadriflow", remeshed
+    obj.data = hi.data.copy()
+    keep_largest_island(obj, 0.0)
+    voxel_remesh(obj, extent / 90.0)
+    keep_largest_island(obj, 0.0)
+    remeshed = len(obj.data.polygons)
+    # 3차 — 데시메이트 (기존 폴백)
+    obj.data.calc_loop_triangles()
+    tris = len(obj.data.loop_triangles)
+    mod = obj.modifiers.new("LP3D_Decimate", 'DECIMATE')
+    mod.ratio = min(1.0, (int(target_faces) * 2.0) / max(tris, 1))
+    with _override(obj):
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+    return "decimate", remeshed
+
+
 def retopo(obj, target_faces: int) -> str:
     """QuadriFlow 리토폴로지, 실패하면 데시메이트. 쓴 방법 이름을 돌려준다."""
     before = len(obj.data.polygons)
@@ -317,7 +392,7 @@ def normalize(obj, height: float, face_axis: str = '-Y') -> None:
     """키를 height(m)에 맞추고 발바닥을 z=0, 중심을 X=Y=0에 둔다.
 
     glTF 임포트 결과는 원점 중심·1m 안팎 크기다. face_axis는 정면이 향하는 축으로,
-    Hunyuan3D 출력은 glTF +Z(정면)가 Blender -Y로 들어와 기본값이 맞는다."""
+    셰이프 서버 GLB는 glTF 규약(+Z 정면)이라 Blender에서 -Y로 들어와 기본값이 맞는다."""
     bpy.context.view_layer.update()
     pts = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
     zmin, zmax = min(p.z for p in pts), max(p.z for p in pts)
@@ -434,7 +509,7 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
         # 밀도 분포: 균일 고밀도(목표 x2.5)로 뽑은 뒤 평평한 영역만 un-subdivide(4면→1면).
         # 얼굴·손·곡률 높은 곳은 촘촘하게, 팔·다리·갑옷 판은 성기게 — 리깅용 분포
         dense_target = int(target_faces * 2.5) if adaptive else int(target_faces)
-        method = retopo(obj, dense_target)
+        method, remeshed = retopo_robust(obj, hi, dense_target, height_units)
         reduced = 0
         if adaptive and method == "quadriflow":
             weights = importance_weights(obj, head_frac=head_frac)

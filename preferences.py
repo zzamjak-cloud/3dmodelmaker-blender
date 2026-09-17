@@ -112,15 +112,23 @@ class LP3DPreferences(bpy.types.AddonPreferences):
     use_shapegen: BoolProperty(
         name="캐릭터 이미지→3D 셰이프 생성",
         description=("캐릭터를 코드로 조립하는 대신, 턴어라운드 시트의 정면·뒷면·측면을 로컬 "
-                     "Hunyuan3D 서버에 넣어 하이폴리 셰이프를 받고 리토폴로지한다. 서버가 없으면 "
+                     "셰이프 서버(로컬 또는 자기 Modal 계정)에 넣어 하이폴리 셰이프를 받고 리토폴로지한다. 서버가 없으면 "
                      "자동으로 코드 모델링 경로로 폴백"),
         default=True,
         update=_persist_cb,
     )
     shapegen_url: StringProperty(
         name="셰이프 서버 주소",
-        description="로컬 Hunyuan3D 서버 (D:/Tools/Hunyuan3D-2/run_server.bat). Blender MCP의 Hunyuan LOCAL_API와 같은 주소",
+        description=("셰이프 생성 서버. 로컬(http://127.0.0.1:8081) 또는 자기 Modal 계정에 배포한 주소"
+                     "(https://…modal.run). 기본값은 로컬 — 클라우드 주소는 각자 자기 것을 넣는다"),
         default="http://127.0.0.1:8081",
+        update=_persist_cb,
+    )
+    shapegen_token: StringProperty(
+        name="셰이프 서버 토큰",
+        description=("클라우드 서버 인증 토큰. Modal 프록시 인증은 `키:시크릿` 형식(Modal-Key/Modal-Secret 헤더), "
+                     "그 외는 Bearer 토큰으로 보낸다. 로컬 서버면 비워둔다. 이 값은 저장소에 절대 넣지 말 것"),
+        default="", subtype='PASSWORD',
         update=_persist_cb,
     )
     shapegen_faces: IntProperty(
@@ -222,6 +230,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         char_box.prop(self, "use_shapegen")
         if self.use_shapegen:
             char_box.prop(self, "shapegen_url")
+            char_box.prop(self, "shapegen_token")
             char_box.prop(self, "shapegen_faces")
             char_box.prop(self, "shapegen_method")
             char_box.prop(self, "character_height")
@@ -269,6 +278,7 @@ class _Defaults:
     character_compare_turns = 1
     use_shapegen = True
     shapegen_url = "http://127.0.0.1:8081"
+    shapegen_token = ""
     shapegen_faces = 12000
     shapegen_method = 'QUADRIFLOW'
     character_height = 1.8

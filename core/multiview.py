@@ -24,6 +24,27 @@ def is_available() -> bool:
     return bool(imagegen.is_available() or preferences.resolve_cli_path('CODEX'))
 
 
+def backend_label(enabled: bool = True) -> str:
+    """지금 참조 시트를 무엇으로 만드는지 한 줄 — 패널·상태줄·로그가 같은 문구를 쓴다.
+
+    예전에는 설정이 OpenRouter여도 키가 없으면 조용히 codex로 폴백해서, 사용자가
+    실제로 어느 경로가 쓰이는지 알 길이 없었다."""
+    from .. import preferences
+    from . import imagegen
+    if not enabled:
+        return "미사용 (멀티뷰 참조 생성 꺼짐)"
+    prefs = preferences.get_prefs()
+    wants_or = getattr(prefs, "image_backend", 'OPENROUTER') == 'OPENROUTER'
+    if wants_or and imagegen.is_available():
+        model = imagegen.model_def(getattr(prefs, "image_model", imagegen.DEFAULT_MODEL))
+        return "OpenRouter · %s" % model["label"]
+    codex = preferences.resolve_cli_path('CODEX')
+    if wants_or:
+        return ("Codex image_gen (OpenRouter 키 없음 → 폴백)" if codex
+                else "미사용 (OpenRouter 키 없음, codex도 없음)")
+    return "Codex image_gen" if codex else "미사용 (codex CLI 없음)"
+
+
 def use_openrouter() -> bool:
     """OpenRouter 경로를 쓸지 — 백엔드 설정이 OPENROUTER이고 키가 있을 때만.
 

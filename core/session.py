@@ -374,8 +374,12 @@ class GenerationSession:
             return
         # 신규 생성: 멀티뷰 참조 시트를 먼저 생성 (codex image_gen — 없으면 스킵)
         if self._use_multiview() and multiview.is_available():
-            self._set_status("멀티뷰 참조 생성중 (codex image_gen)...",
-                             "멀티뷰 참조 시트 생성 시작", phase='GEN')
+            backend = multiview.backend_label()
+            job = self._job()
+            if job:
+                job.image_backend = backend  # 패널에서 "무엇으로 만들었는지" 보여준다
+            self._set_status(f"멀티뷰 참조 생성중 — {backend}",
+                             f"멀티뷰 참조 시트 생성 시작 [{backend}]", phase='GEN')
             # 멀티뷰도 CLI 호출이므로 AI 슬롯을 점유한다
             self._submit_ai(self._run_multiview)
             return
@@ -792,8 +796,12 @@ class GenerationSession:
             with _bake_context(self.scene_name) as ctx:
                 views = tex_capture.render_views(ctx, self._mesh_objs(), guide_dir)
             guide = tex_capture.join_sheet(views, os.path.join(guide_dir, "guide_sheet.png"))
-            self._set_status("텍스처 6면도 생성중 (codex image_gen)...",
-                             "텍스처 가이드 시트 생성 완료", phase='TEX')
+            backend = multiview.backend_label()
+            job = self._job()
+            if job:
+                job.image_backend = backend
+            self._set_status(f"텍스처 6면도 생성중 — {backend}",
+                             f"텍스처 가이드 시트 생성 완료 → AI 채색 [{backend}]", phase='TEX')
             self._submit_ai_texture(lambda: texgen.generate(
                 self.request, guide, self.workdir, self.prefs.timeout,
                 self._on_texture_sheet, job_key=self.uid))

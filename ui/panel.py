@@ -153,6 +153,18 @@ class LP3D_PT_main(bpy.types.Panel):
 
         경로가 비어 있어도 상자를 그린다: 지난 세션 시트를 파일에서 되찾는 버튼이 필요하다."""
         mv = layout.box()
+        # 지금 설정으로 어느 백엔드가 쓰이는지 항상 보여준다 — 잡이 이미 돌았으면
+        # 그때 실제로 쓴 값을, 아니면 현재 설정에서 계산한 값을 표시한다
+        from .. import preferences
+        from ..core import multiview
+        enabled = bool(getattr(preferences.get_prefs(), "use_multiview", True))
+        used = getattr(job, "image_backend", "")
+        label = used if (used and job.state != 'PENDING') else multiview.backend_label(enabled)
+        active = label.startswith("OpenRouter")
+        row = mv.row()
+        row.alert = label.startswith("미사용") or "폴백" in label
+        row.label(text=f"참조 이미지: {label}",
+                  icon='URL' if active else ('CONSOLE' if label.startswith("Codex") else 'CANCEL'))
         mv_path = job.multiview_path
         if not mv_path:
             mv.operator("lp3d.load_last_multiview",

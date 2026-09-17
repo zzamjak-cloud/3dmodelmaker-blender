@@ -119,6 +119,7 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     entry_id: StringProperty(default="")       # 라이브러리에 축적된 결과의 id
     multiview_path: StringProperty(default="")  # 이 잡의 멀티뷰 시트 경로
     texture_path: StringProperty(default="")    # 개별 매핑 결과 텍스처 PNG 경로
+    image_backend: StringProperty(default="")   # 이 잡의 참조 시트를 만든 백엔드 (표시용)
     lane: IntProperty(default=0)                # 결과를 Y축으로 밀어둘 레인 번호
     requested_model: StringProperty(default="")           # 생성 요청 모델 snapshot
     effective_model: StringProperty(default="")           # 실제 생성 모델 snapshot

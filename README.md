@@ -106,6 +106,8 @@ Codex CLI의 GPT-6 Astra로 게임용 3D 모델(프랍·건물·자연물)을 �
 - **OpenRouter API** (기본): [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys)에서 발급한 키를 환경설정에 넣는다. 키 대신 `OPENROUTER_API_KEY` 환경변수도 읽는다. 이미지 1장에 HTTP 요청 1회만 쓰므로 codex 세션을 띄우는 것보다 토큰 소모가 훨씬 적다.
 - **Codex CLI**: codex의 `image_gen` 도구로 생성한다. API 키가 필요 없다. **OpenRouter를 골라도 키가 없으면 자동으로 이 경로로 폴백한다.**
 
+실제로 어느 경로가 쓰이는지는 사이드바 멀티뷰 상자 첫 줄 **참조 이미지:** 에 표시된다 — `OpenRouter · 덕테이프 (GPT Image 2)` / `Codex image_gen` / `Codex image_gen (OpenRouter 키 없음 → 폴백)` / `미사용`. 대기 중인 항목은 현재 설정 기준, 실행된 항목은 그때 실제로 쓴 값이다. 로그의 시트 생성 시작 줄에도 같은 문구가 `[...]`로 붙는다.
+
 선택 가능한 모델 (OpenRouter Image API `/api/v1/images` 기준):
 
 | 모델 | ID | 비고 |
@@ -123,6 +125,7 @@ API 키는 Blender 설정 폴더의 `lp3d_settings.json`에 평문으로 저장�
 
 ## 변경 이력
 
+- **0.15.1**: 참조 이미지 백엔드 표시 — 패널·상태줄·로그에 실제 사용 경로(OpenRouter 모델 / Codex / 폴백 / 미사용)를 보여준다.
 - **0.15.0**: 배경 규모를 용도 기준으로 재정의 — 실내(약 12m, 건물 내부) / 구역(약 40m) / 대규모(약 100m). 규모마다 에셋 종류·배치 총량·랜드마크 수를 함께 정하고 그 수치를 프롬프트에 전달한다. 씬 전체 트라이 상한은 기본 해제(0 = 상한 없음) — 스타일 상한은 모델 1개 기준이다. 실내는 `lp.room`으로 바닥·벽을 만들고 지형·`ground_snap`을 쓰지 않는다. 울타리 전용 `lp.fence_run` 추가 — `wall_run`으로 울타리를 만들면 판때기가 되던 문제.
 - **0.14.0**: 아트 스타일 드롭다운 추가 — 로우폴리 캐주얼/복셀/귀여운 둥근/스타일리쉬 캐주얼/사실적. 하드코딩돼 있던 로우폴리 지침을 공통 골격(`prompts/system_base.md`)과 스타일 조각(`prompts/styles/*.md`)으로 분리했고, 스타일이 모델링 규칙·폴리 버짓과 참조 시트 화풍을 함께 정한다. 복셀용 격자 헬퍼 `lp.voxel`/`voxel_box`/`voxel_column` 추가.
 - **0.13.0**: 참조 시트 생성을 OpenRouter Image API로 전환 — 이미지 모델 드롭다운(덕테이프 기본, 나노바나나 계열 선택 가능), 품질 티어, API 키 설정 추가. 키가 없으면 기존 codex `image_gen` 경로로 폴백한다.

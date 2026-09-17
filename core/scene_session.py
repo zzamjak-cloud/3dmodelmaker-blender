@@ -14,7 +14,7 @@ import os
 
 import bpy
 
-from . import (errors, jobs, library, prompts, runner, scene_kit, scene_plan,
+from . import (errors, jobs, library, multiview, prompts, runner, scene_kit, scene_plan,
                sceneview, scheduler, styles)
 from .session import GenerationSession, cancel_session, is_active
 
@@ -99,8 +99,12 @@ class SceneSession(GenerationSession):
     def start(self):
         self._begin()
         if self._use_multiview() and sceneview.is_available():
-            self._set_status("컨셉 시트 생성 중...",
-                             "씬 컨셉 시트 생성 시작", phase='VIEW')
+            backend = multiview.backend_label()
+            job = self._job()
+            if job:
+                job.image_backend = backend
+            self._set_status(f"컨셉 시트 생성 중 — {backend}",
+                             f"씬 컨셉 시트 생성 시작 [{backend}]", phase='VIEW')
             self._submit_ai(self._run_sceneview)
             return
         self._start_generation()

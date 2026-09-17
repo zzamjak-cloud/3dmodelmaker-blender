@@ -133,10 +133,10 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         name="리토폴로지 방식",
         description="이미지→3D 셰이프를 게임용 메시로 줄이는 방법",
         items=[
-            ('DECIMATE', "데시메이트 (디테일 보존)", "조각 제거 후 데시메이트 — 얼굴·털 디테일이 남는 트라이 메시"),
-            ('QUADRIFLOW', "QuadriFlow (쿼드 흐름)", "복셀 리메시 후 QuadriFlow — 리깅용 쿼드 메시, 작은 디테일은 뭉개진다"),
+            ('QUADRIFLOW', "QuadriFlow 쿼드 (기본)", "복셀 리메시 → QuadriFlow → 하이폴리 슈링크랩 — 리깅용 쿼드 메시, 디테일 복원"),
+            ('DECIMATE', "데시메이트 (트라이)", "조각 제거 후 데시메이트 — 빠르지만 삼각형 그대로라 수정이 어렵다"),
         ],
-        default='DECIMATE',
+        default='QUADRIFLOW',
         update=_persist_cb,
     )
     character_height: FloatProperty(
@@ -168,6 +168,14 @@ class LP3DPreferences(bpy.types.AddonPreferences):
             ('2048', "2048", "느림 — 큰 건물용"),
         ],
         default='1024',
+        update=_persist_cb,
+    )
+    texture_per_view: BoolProperty(
+        name="텍스처 시점별 고해상 생성",
+        description=("개별 매핑의 AI 채색을 시트 한 장(칸당 512px) 대신 시점마다 1:1 이미지로 "
+                     "6번 요청한다(칸당 1024px). 4배 선명하지만 이미지 요청이 6회다. "
+                     "캐릭터 모드는 이 설정과 무관하게 항상 시점별로 받는다"),
+        default=False,
         update=_persist_cb,
     )
     scene_tri_budget: IntProperty(
@@ -207,6 +215,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         col.prop(self, "use_multiview")
         col.prop(self, "use_library")
         col.prop(self, "texture_resolution")
+        col.prop(self, "texture_per_view")
         char_box = self.layout.box()
         char_box.label(text="캐릭터", icon='ARMATURE_DATA')
         char_box.prop(self, "use_shapegen")
@@ -251,6 +260,7 @@ class _Defaults:
     use_library = True
     asset_library_path = ""
     texture_resolution = '1024'
+    texture_per_view = False
     image_backend = 'OPENROUTER'
     openrouter_api_key = ""
     image_model = imagegen.DEFAULT_MODEL
@@ -259,7 +269,7 @@ class _Defaults:
     use_shapegen = True
     shapegen_url = "http://127.0.0.1:8081"
     shapegen_faces = 12000
-    shapegen_method = 'DECIMATE'
+    shapegen_method = 'QUADRIFLOW'
     character_height = 1.8
     scene_tri_budget = 0
     scene_max_assets = 0

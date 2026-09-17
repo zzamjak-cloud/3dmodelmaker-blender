@@ -103,6 +103,85 @@ def retopo(obj, target_faces: int) -> str:
     return "decimate"
 
 
+def importance_weights(obj, head_frac: float = 0.0, curvature_gain: float = 6.0) -> list:
+    """정점별 중요도 0~1 — 곡률이 높거나 머리 영역이면 1에 가깝다.
+
+    곡률은 정점 노멀과 이웃 노멀의 평균 편차다(이마·눈두덩·주둥이·손가락은 크고, 팔뚝·허벅지·
+    갑옷 판은 작다). head_frac>0이면 바운딩 박스 위쪽 그 비율(예: 인간형 0.24)을 머리로 보고
+    무조건 1로 둔다 — 얼굴은 곡률이 낮은 뺨도 촘촘해야 표정 변형이 깨지지 않는다."""
+    mesh = obj.data
+    mesh.calc_loop_triangles()
+    normals = [v.normal.copy() for v in mesh.vertices]
+    neighbors = [[] for _ in mesh.vertices]
+    for e in mesh.edges:
+        a, b = e.vertices
+        neighbors[a].append(b)
+        neighbors[b].append(a)
+    zs = [v.co.z for v in mesh.vertices]
+    zmin, zmax = min(zs), max(zs)
+    head_z = zmax - (zmax - zmin) * float(head_frac) if head_frac > 0 else float("inf")
+    weights = []
+    for i, v in enumerate(mesh.vertices):
+        n = normals[i]
+        dev = 0.0
+        if neighbors[i]:
+            dev = sum(1.0 - max(-1.0, min(1.0, n.dot(normals[j]))) for j in neighbors[i]) / len(neighbors[i])
+        w = min(1.0, dev * curvature_gain)
+        if v.co.z >= head_z:
+            w = 1.0
+        weights.append(w)
+    # 이웃 평균으로 한 번 부드럽게 — 밀도 경계가 톱니처럼 끊기지 않게
+    smooth = []
+    for i in range(len(weights)):
+        ring = neighbors[i]
+        smooth.append((weights[i] + sum(weights[j] for j in ring)) / (1 + len(ring)) if ring else weights[i])
+    return smooth
+
+
+def adaptive_unsubdivide(obj, weights: list, threshold: float = 0.35, iterations: int = 1) -> int:
+    """중요도가 낮은 정점 영역만 un-subdivide 해서 밀도를 낮춘다. 줄어든 면 수를 돌려준다.
+
+    QuadriFlow는 밀도가 균일하다. 균일한 고밀도 쿼드에서 팔·다리·갑옷 판처럼 평평한 곳만
+    격자를 한 단계 풀면(4면→1면) 얼굴은 촘촘하고 몸통은 성긴, 리깅용 밀도 분포가 된다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    before = len(bm.faces)
+    # 2단계: 아주 평평한 곳(팔뚝·허벅지·갑옷 판)은 두 번(16면→1면), 중간은 한 번(4면→1면).
+    # 한 번만 풀면 머리와 몸통의 밀도 차가 눈에 띄지 않았다(실측).
+    very_low = [bm.verts[i] for i, w in enumerate(weights) if w < threshold * 0.5]
+    if len(very_low) >= 8:
+        bmesh.ops.unsubdivide(bm, verts=very_low, iterations=int(iterations) + 1)
+    bm.verts.ensure_lookup_table()
+    # 첫 단계 뒤 정점 인덱스가 바뀌므로 위치로 다시 고른다 — 남은 정점 중 임계 아래
+    kd_weights = _weights_by_position(obj, weights)
+    low = [v for v in bm.verts if kd_weights(v.co) < threshold]
+    if len(low) >= 8:
+        bmesh.ops.unsubdivide(bm, verts=low, iterations=int(iterations))
+    # 경계에서 생기는 삼각형 쌍은 가능하면 쿼드로 합친다
+    bmesh.ops.join_triangles(bm, faces=bm.faces, angle_face_threshold=0.7,
+                             angle_shape_threshold=0.7)
+    bm.to_mesh(obj.data)
+    after = len(bm.faces)
+    bm.free()
+    return before - after
+
+
+def _weights_by_position(obj, weights: list):
+    """원본 정점 위치 → 중요도 조회 함수 (un-subdivide로 인덱스가 바뀐 뒤에도 쓸 수 있게)."""
+    from mathutils import kdtree
+    coords = [v.co.copy() for v in obj.data.vertices]
+    tree = kdtree.KDTree(len(coords))
+    for i, co in enumerate(coords):
+        tree.insert(co, i)
+    tree.balance()
+
+    def lookup(co):
+        _, idx, _ = tree.find(co)
+        return weights[idx] if idx is not None else 1.0
+    return lookup
+
+
 def normalize(obj, height: float, face_axis: str = '-Y') -> None:
     """키를 height(m)에 맞추고 발바닥을 z=0, 중심을 X=Y=0에 둔다.
 
@@ -144,12 +223,15 @@ def decimate(obj, target_tris: int) -> None:
 
 def process_glb(path: str, name: str, collection, height: float = 1.8,
                 target_faces: int = 12000, voxel_size: float = 0.012,
-                method: str = 'DECIMATE') -> dict:
+                method: str = 'QUADRIFLOW', adaptive: bool = False,
+                head_frac: float = 0.0) -> dict:
     """GLB 한 개를 게임용 메시 오브젝트 하나로 만들어 collection에 넣는다. 통계 dict 반환.
 
-    method='DECIMATE'(기본): 조각 제거 → 데시메이트. 디테일 보존이 좋다 (트라이 메시).
-    method='QUADRIFLOW': 조각 제거 → 복셀 리메시 → QuadriFlow 쿼드 리토폴로지. 리깅·변형용
-    쿼드 흐름이 필요할 때 — 복셀 단계에서 작은 디테일이 뭉개진다."""
+    method='QUADRIFLOW'(기본): 조각 제거 → 복셀 리메시 → QuadriFlow 쿼드 → 하이폴리 슈링크랩으로
+    디테일 복원. adaptive=True면 평평한 영역을 un-subdivide로 성기게 만들어 밀도 차등을 주지만
+    (head_frac은 무조건 촘촘하게 둘 머리 비율), 경계에 삼각형이 생겨 와이어가 지저분하다 —
+    실측 결과 기본은 끈다. 애니메이션용 밀도·와이어 흐름은 템플릿 베이스 메시 방식이 필요하다.
+    method='DECIMATE': 조각 제거 → 데시메이트. 빠르지만 삼각형 그대로다."""
     meshes = import_glb(path)
     if not meshes:
         raise RuntimeError("GLB에 메시가 없다")
@@ -164,10 +246,32 @@ def process_glb(path: str, name: str, collection, height: float = 1.8,
     obj.data.materials.clear()
     raw_tris = len(obj.data.polygons)
     removed = keep_largest_island(obj)
+    reduced = 0
     if str(method).upper() == 'QUADRIFLOW':
-        voxel_remesh(obj, voxel_size)
+        # 하이폴리 사본을 남겨 두고 저폴리를 만든 뒤 슈링크랩으로 표면 디테일을 되찾는다 —
+        # 복셀 리메시·QuadriFlow가 뭉갠 얼굴·털 굴곡이 돌아온다 (실측: 15k 쿼드에서 원본과 구분 어려움)
+        hi = obj.copy()
+        hi.data = obj.data.copy()
+        collection.objects.link(hi)
+        zs = [v.co.z for v in obj.data.vertices]
+        height_units = max(max(zs) - min(zs), 1e-6)
+        voxel_remesh(obj, height_units / 350.0)  # 복셀 상자 350칸 — 눈·주둥이가 살아남는 해상도
         remeshed = len(obj.data.polygons)
-        method = retopo(obj, target_faces)
+        # 밀도 분포: 균일 고밀도(목표 x2.5)로 뽑은 뒤 평평한 영역만 un-subdivide(4면→1면).
+        # 얼굴·손·곡률 높은 곳은 촘촘하게, 팔·다리·갑옷 판은 성기게 — 리깅용 분포
+        dense_target = int(target_faces * 2.5) if adaptive else int(target_faces)
+        method = retopo(obj, dense_target)
+        reduced = 0
+        if adaptive and method == "quadriflow":
+            weights = importance_weights(obj, head_frac=head_frac)
+            reduced = adaptive_unsubdivide(obj, weights)
+            method = "quadriflow+adaptive"
+        mod = obj.modifiers.new("LP3D_Shrinkwrap", 'SHRINKWRAP')
+        mod.target = hi
+        mod.wrap_method = 'NEAREST_SURFACEPOINT'
+        with _override(obj):
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+        bpy.data.objects.remove(hi, do_unlink=True)
     else:
         remeshed = len(obj.data.polygons)
         decimate(obj, int(target_faces) * 2)  # target_faces는 쿼드 기준 — 트라이는 2배
@@ -176,6 +280,8 @@ def process_glb(path: str, name: str, collection, height: float = 1.8,
         p.use_smooth = True
     normalize(obj, height)
     obj.data.calc_loop_triangles()
+    quads = sum(1 for p in obj.data.polygons if len(p.vertices) == 4)
     return {"obj": obj, "raw_faces": raw_tris, "floaters_removed": removed,
-            "remeshed_faces": remeshed, "method": method,
+            "remeshed_faces": remeshed, "method": method, "reduced_faces": reduced,
+            "faces": len(obj.data.polygons), "quads": quads,
             "tris": len(obj.data.loop_triangles)}

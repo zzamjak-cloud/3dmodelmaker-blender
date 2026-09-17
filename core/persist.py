@@ -11,7 +11,7 @@ import bpy
 
 _PREF_KEYS = ("codex_path", "timeout", "ai_concurrency",
               "use_multiview", "use_library",
-              "asset_library_path", "texture_resolution",
+              "asset_library_path", "texture_resolution", "texture_per_view",
               "image_backend", "openrouter_api_key", "image_model", "image_quality",
               "character_compare_turns", "use_shapegen", "shapegen_url", "shapegen_faces",
               "character_height", "shapegen_method",

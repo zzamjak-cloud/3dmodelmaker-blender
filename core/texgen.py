@@ -1,6 +1,6 @@
-# 텍스처 6면도 생성: codex CLI image_gen으로 가이드 시트 위에 손맵 디테일을 입힌다
+# 텍스처 6면도 생성: 가이드 시트 위에 손맵 디테일을 입힌다 (OpenRouter 또는 codex image_gen)
 #
-# multiview.py와 같은 방식 — 세션 workdir의 AGENTS.md(코드 출력 강제)와 충돌하므로
+# codex 경로는 multiview.py와 같은 방식 — 세션 workdir의 AGENTS.md(코드 출력 강제)와 충돌하므로
 # 반드시 별도 임시 디렉토리에서 실행하고 결과 파일만 세션 workdir로 옮긴다.
 import logging
 import os
@@ -12,6 +12,7 @@ from ..texturing import layout
 log = logging.getLogger(__name__)
 
 SHEET_FILENAME = "texture_sheet.png"
+VIEW_FILENAME = "texture_view_%s.png"
 
 
 def is_available() -> bool:
@@ -37,18 +38,29 @@ def build_prompt(request: str) -> str:
 
 
 def generate(request: str, guide_image: str, session_workdir: str, timeout: int, on_done,
-             job_key=None):
-    """6면도 텍스처 시트를 비동기로 생성한다. 완료 시 on_done(경로 or None, 오류 or None)."""
+             job_key=None, reference: str = None, per_view: bool = False):
+    """6면도 텍스처를 비동기로 생성한다.
+
+    완료 시 on_done(결과, 오류). 결과는 시트 한 장의 경로(str) 또는 per_view 모드에서
+    {시점: 경로} dict다 — 베이크(bake.rasterize_to_png)는 둘 다 받는다(session이 분기).
+
+    reference: 턴어라운드/원화 경로. 함께 넘기면 색·무늬를 거기서 가져오게 한다 —
+    회색 가이드만 주면 모델이 색을 지어내고 얼굴을 비워 둔다.
+    per_view: 시점마다 1:1 이미지를 따로 요청한다(6회). 시트 한 장은 칸당 512px밖에
+    안 돼 뿌옇다. OpenRouter 경로에서만 지원하고 codex 경로는 시트 한 장으로 돈다."""
     from .. import preferences
     from . import imagegen, multiview, runner
 
     if multiview.use_openrouter():
-        # 가이드 시트는 input_references로 넘어간다 — 임시 디렉토리 복사가 필요 없다.
-        # 비율은 6면도 3x2 격자에 맞춰 layout.ASPECT_RATIO(3:2)로 고정한다.
+        if per_view:
+            _generate_per_view(request, guide_image, session_workdir, timeout, on_done,
+                               job_key=job_key, reference=reference)
+            return
+        refs = [guide_image] + ([reference] if reference else [])
         imagegen.generate(
-            layout.build_image_prompt(request),
+            layout.build_image_prompt(request, has_reference=bool(reference)),
             os.path.join(session_workdir, SHEET_FILENAME), timeout, on_done,
-            refs=[guide_image], aspect_ratio=layout.ASPECT_RATIO, job_key=job_key)
+            refs=refs, aspect_ratio=layout.ASPECT_RATIO, job_key=job_key)
         return
 
     exe = preferences.resolve_cli_path('CODEX')
@@ -80,3 +92,58 @@ def generate(request: str, guide_image: str, session_workdir: str, timeout: int,
 
     runner.run_cli_async(build_command(exe, work, guide_copy), work, timeout, _cb,
                          stdin_text=build_prompt(request), job_key=job_key)
+
+
+def _generate_per_view(request: str, guide_image: str, session_workdir: str, timeout: int,
+                       on_done, job_key=None, reference: str = None):
+    """시점별 1:1 요청 6개를 병렬로 보내고 전부 끝나면 {시점: 경로}로 콜백한다.
+
+    하나라도 실패하면 실패한 시점만 빼고 넘긴다 — 베이크는 빠진 시점을 이웃 투영으로
+    채우므로 전부 버리는 것보다 낫다. 전부 실패하면 오류로 콜백한다."""
+    from ..texturing import capture as tex_capture
+    from . import imagegen
+
+    try:
+        cells = tex_capture.split_sheet(guide_image)  # {VIEW: 셀 PNG}
+    except Exception as e:
+        on_done(None, f"가이드 시트 분할 실패: {e}")
+        return
+    pending = {"left": len(cells)}
+    results, errors, retried = {}, {}, set()
+
+    def _request(view):
+        cell = cells[view]
+        out = os.path.join(session_workdir, VIEW_FILENAME % view.lower())
+        refs = [cell] + ([reference] if reference else [])
+        imagegen.generate(layout.build_view_prompt(request, view, has_reference=bool(reference)),
+                          out, timeout, _make_cb(view), refs=refs, aspect_ratio="1:1",
+                          job_key=job_key)
+
+    def _make_cb(view):
+        def _cb(path, error=None):
+            if path:
+                results[view] = path
+            elif view not in retried:
+                # 6회 요청 중 하나가 서버 혼잡 등으로 실패하는 일이 흔하다 — 한 번 다시 시도
+                retried.add(view)
+                log.warning("시점 %s 텍스처 생성 실패, 재시도: %s", view, error)
+                _request(view)
+                return
+            else:
+                errors[view] = error or "원인 불명"
+                log.warning("시점 %s 텍스처 생성 재시도도 실패: %s", view, errors[view])
+                # 베이크는 6시점을 모두 요구한다 — 빠진 시점은 회색 가이드 칸으로 채워
+                # 텍스처 전체가 실패하는 것을 막는다 (그 시점만 밋밋하게 남는다)
+                results[view] = cells[view]
+            pending["left"] -= 1
+            if pending["left"] > 0:
+                return
+            if len(errors) == len(cells):
+                on_done(None, "시점별 텍스처 생성 전부 실패: " + "; ".join(
+                    f"{v}: {str(e).splitlines()[0]}" for v, e in errors.items()))
+                return
+            on_done(results, None)
+        return _cb
+
+    for view in cells:
+        _request(view)

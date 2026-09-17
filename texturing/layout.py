@@ -138,10 +138,56 @@ def build_prompt(request: str, filename: str) -> str:
     )
 
 
-def build_image_prompt(request: str) -> str:
+def reference_contract() -> str:
+    """두 번째 첨부(턴어라운드/원화)가 있을 때 — 색을 지어내지 말고 거기서 가져오게 한다.
+
+    회색 가이드만 주면 모델이 색을 새로 정한다. 실측에서 늑대 얼굴이 회색으로 남고 노란
+    눈이 사라졌다 — 가이드에 색이 없으니 얼굴을 '칠할 것'으로 인식하지 못한 것이다."""
+    return (
+        "색 계약(형상 계약 다음으로 우선):\n"
+        "- 두 번째 첨부 이미지는 이 캐릭터의 **턴어라운드 원화**다. 모든 색·무늬·재질은 여기서 가져온다. "
+        "가이드가 회색이어도 색을 새로 정하지 마라.\n"
+        "- 가이드의 각 시점을 원화의 같은 방향 칸과 대조해 부위마다 같은 색을 칠하라 "
+        "(정면↔정면, 뒷면↔뒷면, 측면↔측면). 상면·저면은 인접 시점의 색을 이어 붙인다.\n"
+        "- **얼굴은 반드시 완성하라**: 눈(홍채·흰자·눈꺼풀), 코, 입, 눈썹, 털 색 경계를 원화대로 칠한다. "
+        "얼굴이 단색으로 남으면 실패다.\n"
+        "- 금속·가죽·털·피부의 재질 차이를 원화의 명도·채도로 표현하라."
+    )
+
+
+def build_image_prompt(request: str, has_reference: bool = False) -> str:
     """OpenRouter Image API용 — 가이드 시트는 input_references로 따로 넘어가므로
     파일 저장·도구 호출 지시가 필요 없다."""
     return (
-        f"첨부한 참조 이미지를 그대로 덮어 칠한(paint-over) {ASPECT_RATIO} 이미지 1장을 생성하라.\n"
+        f"첨부한 첫 이미지를 그대로 덮어 칠한(paint-over) {ASPECT_RATIO} 이미지 1장을 생성하라.\n"
         + _body(request)
+        + (("\n\n" + reference_contract()) if has_reference else "")
+    )
+
+
+_VIEW_KO = {"FRONT": "정면", "RIGHT": "우측면", "BACK": "뒷면", "LEFT": "좌측면",
+            "TOP": "상면", "BOTTOM": "저면"}
+
+
+def build_view_prompt(request: str, view: str, has_reference: bool = False) -> str:
+    """시점 하나만 1:1로 채색하는 프롬프트 — 시트 한 장(칸당 512px)보다 4배 선명하다.
+
+    6칸을 한 장에 넣으면 이미지 모델 출력(1536x1024)에서 칸당 512px밖에 안 돼 텍스처가
+    뿌옇다. 시점마다 따로 요청하면 칸당 1024px가 된다(요청 6회)."""
+    view = str(view).upper()
+    label = _VIEW_KO.get(view, view)
+    return (
+        f"첨부한 첫 이미지를 그대로 덮어 칠한(paint-over) 정사각(1:1) 이미지 1장을 생성하라.\n"
+        f"대상: {request}\n"
+        f"이 이미지는 위 대상을 **{label}({view})** 에서 직교 렌더한 한 칸이다. "
+        "목적: 캐주얼 게임용 3D 모델의 손맵(hand-painted) diffuse 텍스처 소스.\n\n"
+        f"{shape_contract()}\n\n"
+        "스타일: 캐주얼 게임 손맵 텍스처. 기본 형상은 유지하면서 재질 디테일과 부드러운 명암을 더한다. "
+        "외곽선은 넣지 않는다.\n\n"
+        "출력 계약:\n"
+        "- 최종 이미지는 정확히 한 장, 첨부와 같은 구도·같은 크기·같은 위치.\n"
+        f"{output_rules()}"
+        + (("\n\n" + reference_contract()
+            + f"\n- 이 칸은 {label} 시점이다 — 원화에서 같은 방향(또는 가장 가까운 방향) 칸의 색을 쓴다.")
+           if has_reference else "")
     )

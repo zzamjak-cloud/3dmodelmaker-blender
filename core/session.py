@@ -493,7 +493,11 @@ class GenerationSession:
                 self.shape_path, multiview._slug(self.request, 24) or "Character", coll,
                 height=float(getattr(self.prefs, "character_height", 1.8)),
                 target_faces=int(getattr(self.prefs, "shapegen_faces", 12000)),
-                method=str(getattr(self.prefs, "shapegen_method", 'DECIMATE')))
+                method=str(getattr(self.prefs, "shapegen_method", 'QUADRIFLOW')),
+                adaptive=bool(getattr(self.prefs, "shapegen_adaptive", False)),
+                # 머리 영역은 곡률과 무관하게 촘촘하게 — 유형별 바운딩 박스 위쪽 비율
+                head_frac={'HUMANOID': 0.24, 'CREATURE': 0.28, 'ANIMAL': 0.0}.get(
+                    self.character_type, 0.22))
         except Exception as e:
             _log.exception("리토폴로지 실패")
             self._set_status("리토폴로지 실패 — 코드 모델링으로 진행", f"리토폴로지 실패: {e}")
@@ -504,7 +508,8 @@ class GenerationSession:
         self._set_status(
             "셰이프 리토폴로지 완료",
             f"셰이프: 원본 {info['raw_faces']}면, 파편 {info['floaters_removed']}개 제거, "
-            f"리메시 {info['remeshed_faces']}면 → {info['method']} → {info['tris']} tris")
+            f"리메시 {info['remeshed_faces']}면 → {info['method']} → {info['faces']}면 "
+            f"(쿼드 {info['quads']}, 밀도 축소 {info['reduced_faces']}면) = {info['tris']} tris")
         self._finalize()
 
     def _start_generation(self):
@@ -926,9 +931,15 @@ class GenerationSession:
                 job.image_backend = backend
             self._set_status(f"텍스처 6면도 생성중 — {backend}",
                              f"텍스처 가이드 시트 생성 완료 → AI 채색 [{backend}]", phase='TEX')
+            # 캐릭터는 턴어라운드를 색 원본으로 함께 넘기고 시점별 고해상(1:1 x 6)으로 받는다 —
+            # 회색 가이드 한 장(칸당 512px)만 주면 색을 지어내고 얼굴이 비며 텍스처가 뿌옇다
+            is_character = self.system_mode == 'CHARACTER'
+            per_view = bool(getattr(self.prefs, "texture_per_view", False)) or is_character
+            reference = self.multiview if is_character else None
             self._submit_ai_texture(lambda: texgen.generate(
                 self.request, guide, self.workdir, self.prefs.timeout,
-                self._on_texture_sheet, job_key=self.uid))
+                self._on_texture_sheet, job_key=self.uid,
+                reference=reference, per_view=per_view))
         self._texture_step(_run, "가이드 렌더")
 
     def _on_texture_sheet(self, path, error=None):
@@ -941,7 +952,8 @@ class GenerationSession:
                 reason = errors.describe(error, 'codex') if error else "원인 불명"
                 self._submit_blender(lambda: self._texture_fallback(reason, error))
                 return
-            self._set_status("텍스처 베이크 대기중...", "텍스처 시트 수신", phase='TEX')
+            got = f"시점 {len(path)}개 수신" if isinstance(path, dict) else "텍스처 시트 수신"
+            self._set_status("텍스처 베이크 대기중...", got, phase='TEX')
             self._submit_blender(lambda: self._blender_bake_texture(path))
         except Exception as e:
             _log.exception("LP3D 텍스처 콜백 처리 실패")
@@ -956,9 +968,12 @@ class GenerationSession:
             if not mesh_objs:
                 raise RuntimeError("생성된 오브젝트 없음")
             resolution = int(getattr(self.prefs, "texture_resolution", "1024"))
+            if self.system_mode == 'CHARACTER':
+                resolution = max(resolution, 2048)  # 얼굴·의상 디테일 — 시점별 1024px 소스를 살린다
             name = tex_apply.texture_name(self.collection_name, mesh_objs)
             self._set_status(f"텍스처 베이크중 ({resolution}px, CPU)...", phase='TEX')
-            views = tex_capture.split_sheet(sheet_path)
+            # 시점별 생성 결과는 이미 {시점: 경로}다 — 시트 한 장이면 잘라서 같은 형태로
+            views = sheet_path if isinstance(sheet_path, dict) else tex_capture.split_sheet(sheet_path)
             png = os.path.join(self.workdir, "texture", f"{name}.png")
             with _bake_context(self.scene_name) as ctx:
                 stats = tex_bake.rasterize_to_png(

@@ -162,6 +162,7 @@ def duplicate_job(props, index: int):
         "creation_mode": src.creation_mode,
         "scene_size": src.scene_size,
         "style": src.style,
+        "character_type": getattr(src, "character_type", 'AUTO'),
     }
     job = add_job(props, src.prompt)
     for key, value in values.items():

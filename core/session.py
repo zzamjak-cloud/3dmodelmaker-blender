@@ -196,6 +196,14 @@ class GenerationSession:
         self.modeling_type = getattr(job, "modeling_type", 'PALETTE') if job else 'PALETTE'
         # 스타일도 같은 이유로 고정한다 — 실행 중 드롭다운을 바꿔도 이 세션은 영향받지 않는다
         self.style = getattr(job, "style", styles.DEFAULT_STYLE) if job else styles.DEFAULT_STYLE
+        # 캐릭터 잡은 캐릭터 지침 + 턴어라운드(6면도) 시트를 쓴다. 배경은 SceneSession이
+        # 클래스 속성으로 따로 정하므로 여기서는 CHARACTER만 본다. 변형(variation)은
+        # 원본 코드를 따르므로 모드를 바꾸지 않는다.
+        mode = str(getattr(job, "creation_mode", 'OBJECT') or 'OBJECT') if job else 'OBJECT'
+        if mode == 'CHARACTER' and not variation_code:
+            self.system_mode = 'CHARACTER'
+        self.character_type = (str(getattr(job, "character_type", 'AUTO') or 'AUTO')
+                               if job else 'AUTO')
         # 배경 잡이 스폰한 에셋이면 부모 uid 문자열 — 완료 시 부모에게 알린다
         self.parent_uid = str(getattr(job, "parent_uid", "") or "") if job else ""
         self.texture_path = None    # 개별 매핑 결과 PNG (보관 폴더)
@@ -385,11 +393,15 @@ class GenerationSession:
             return
         self._start_generation()
 
+    def _sheet_kind(self) -> str:
+        """참조 시트 종류 — 캐릭터는 3x2 턴어라운드, 그 외는 2x2 멀티뷰."""
+        return 'TURNAROUND' if self.system_mode == 'CHARACTER' else 'MULTIVIEW'
+
     def _run_multiview(self):
         multiview.generate(self.request, self.workdir, self.prefs.timeout,
                            self._on_multiview, ref_image=self.ref_image,
                            style_note=styles.image_note(self.style),
-                           job_key=self.uid)
+                           job_key=self.uid, sheet=self._sheet_kind())
 
     def _on_multiview(self, path, error=None):
         if self._stale():
@@ -432,7 +444,9 @@ class GenerationSession:
             if fewshot:
                 self._set_status("과거 합격 예시 참고", f"라이브러리 예시 {len(fewshot)}개 주입")
         first = prompts.build_initial_prompt(self.request, ref_image=self._ref_name(),
-                                             multiview=self._mv_name(), fewshot=fewshot)
+                                             multiview=self._mv_name(), fewshot=fewshot,
+                                             mode=self.system_mode,
+                                             character_type=self.character_type)
         init_images = [p for p in (self.ref_image, self.multiview) if p] or None
         self._set_status(f"코드 생성 — {self._model_label()} 호출중...",
                          f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')

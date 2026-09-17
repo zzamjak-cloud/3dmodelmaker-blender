@@ -60,8 +60,22 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         items=[
             ('OBJECT', "오브젝트", "단일 오브젝트 생성 (멀티뷰 3면도 기반)"),
             ('SCENE', "배경 공간", "여러 에셋으로 구성된 배경 공간 생성 (플랜 → 에셋 키트 → 배치)"),
+            ('CHARACTER', "캐릭터",
+             "게임 캐릭터 생성 — 원화(참조 이미지)로 6면도 턴어라운드 시트를 만들고 리깅 자세로 "
+             "모델링한 뒤 모델링 타입에 따라 매핑까지 진행"),
         ],
         default='OBJECT',
+    )
+    character_type: EnumProperty(
+        name="캐릭터 유형",
+        description="비율·골격 규칙을 정한다 — 자동이면 요청문·원화에서 판단",
+        items=[
+            ('AUTO', "자동", "요청문과 원화에서 유형을 판단"),
+            ('HUMANOID', "인간형", "두신 비율, A-포즈"),
+            ('ANIMAL', "동물형", "실제 동물 골격 비율과 관절 방향, 네 발 중립 자세"),
+            ('CREATURE', "크리처형", "동물 부위 조합이되 하나의 골격 논리"),
+        ],
+        default='AUTO',
     )
     scene_size: EnumProperty(
         name="씬 규모",

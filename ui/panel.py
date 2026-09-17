@@ -145,6 +145,17 @@ class LP3D_PT_main(bpy.types.Panel):
         if job.creation_mode == 'SCENE':
             layout.prop(job, "scene_size", text="씬 규모")
             layout.label(text="머티리얼: 컬러 스와치 (고정)")
+        elif job.creation_mode == 'CHARACTER':
+            layout.prop(job, "character_type", text="캐릭터 유형")
+            layout.prop(job, "modeling_type", text="모델링 타입")
+            hint = layout.column(align=True)
+            hint.scale_y = 0.85
+            if job.ref_image_path.strip():
+                hint.label(text="원화 → 6면도 턴어라운드 → 리깅 자세 모델링", icon='ARMATURE_DATA')
+            else:
+                hint.label(text="원화(참조 이미지)를 넣으면 그 캐릭터로 6면도를 만듭니다", icon='INFO')
+            if job.modeling_type != 'TEXTURE':
+                hint.label(text="얼굴·의상 디테일은 '개별 매핑'이 유리합니다", icon='INFO')
         else:
             layout.prop(job, "modeling_type", text="모델링 타입")
 

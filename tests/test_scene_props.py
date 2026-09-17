@@ -152,7 +152,7 @@ class TestCreationModeFields(unittest.TestCase):
     def test_creation_mode_defaults_to_object(self):
         field = self.annotations["creation_mode"]
         self.assertEqual(field["default"], 'OBJECT')
-        self.assertEqual([item[0] for item in field["items"]], ['OBJECT', 'SCENE'])
+        self.assertEqual([item[0] for item in field["items"]], ['OBJECT', 'SCENE', 'CHARACTER'])
 
     def test_scene_size_defaults_to_medium(self):
         field = self.annotations["scene_size"]

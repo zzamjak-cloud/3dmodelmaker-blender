@@ -60,6 +60,7 @@ class _Job:
         self.parent_uid = ""
         self.modeling_type = 'PALETTE'
         self.style = 'LOWPOLY'
+        self.character_type = 'AUTO'
         self.state = 'PENDING'
         self.status = "대기 중"
         self.status_hint = ""

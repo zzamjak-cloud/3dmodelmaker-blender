@@ -160,35 +160,69 @@ def build_command(exe: str, work_dir: str, ref_image: str = None) -> list:
     return cmd
 
 
-def _body(request: str, has_ref: bool = False, style_note: str = "") -> str:
+# 시트 종류별 구성 — 프랍은 2x2 멀티뷰, 캐릭터는 3x2 턴어라운드(6면도)
+SHEET_LAYOUT = {
+    "MULTIVIEW": {
+        "aspect": "1:1",
+        "title": "3D 모델링용 멀티뷰 참조 시트",
+        "grid": ("구성: 2x2 그리드 — 좌상=정면(FRONT), 우상=측면(SIDE), 좌하=상면(TOP), 우하=3/4뷰. "
+                 "각 뷰에 라벨을 표기하고, 네 뷰 모두 동일한 대상을 일관된 비율로 그려라.\n"),
+        "ref": "첨부한 참조 이미지와 동일한 대상·색·특징을 유지하라.\n",
+    },
+    "TURNAROUND": {
+        "aspect": "3:2",
+        "title": "3D 캐릭터 모델링용 턴어라운드(6면도) 시트",
+        "grid": ("구성: 3x2 그리드 — 윗줄 왼쪽부터 정면(FRONT) | 뒷면(BACK) | 좌측면(LEFT), "
+                 "아랫줄 왼쪽부터 우측면(RIGHT) | 상면(TOP) | 3/4뷰. 각 칸에 라벨을 표기한다.\n"
+                 "자세: 리깅용 중립 자세 — 인간형은 A-포즈(팔을 몸에서 30~40도 내림, 다리 살짝 벌림), "
+                 "네발 동물·크리처는 네 발로 자연스럽게 선 자세, 날개가 있으면 절반 펼침. "
+                 "표정은 중립, 모든 칸이 같은 자세·같은 축척·같은 발 높이여야 한다.\n"
+                 "얼굴·손·발·장비의 디테일이 정면과 측면에서 모두 읽히게 그려라. 그림자·바닥·배경 소품 금지.\n"),
+        "ref": ("첨부한 원화의 캐릭터를 **그대로** 6면도로 전개하라 — 얼굴 생김새·머리 모양·의상·장비·"
+                "색 배치·비율을 바꾸지 마라. 원화에 없는 요소를 추가하지 마라. 원화가 동적인 포즈라면 "
+                "위의 중립 자세로 펴되 디자인은 유지한다.\n"),
+    },
+}
+
+
+def sheet_aspect(sheet: str = "MULTIVIEW") -> str:
+    return SHEET_LAYOUT.get(sheet, SHEET_LAYOUT["MULTIVIEW"])["aspect"]
+
+
+def _body(request: str, has_ref: bool = False, style_note: str = "",
+          sheet: str = "MULTIVIEW") -> str:
     """백엔드 공용 지시 본문 — 시트 구성·스타일."""
+    layout = SHEET_LAYOUT.get(sheet, SHEET_LAYOUT["MULTIVIEW"])
     base = (
         f"대상: {request}\n"
-        "구성: 2x2 그리드 — 좌상=정면(FRONT), 우상=측면(SIDE), 좌하=상면(TOP), 우하=3/4뷰. "
-        "각 뷰에 라벨을 표기하고, 네 뷰 모두 동일한 대상을 일관된 비율로 그려라.\n"
+        + layout["grid"]
         + (style_note or "스타일: 로우폴리 게임 에셋, 플랫 셰이딩, 단순한 색 팔레트, 흰 배경.\n")
     )
     if has_ref:
-        base += "첨부한 참조 이미지와 동일한 대상·색·특징을 유지하라.\n"
+        base += layout["ref"]
     return base
 
 
-def build_prompt(request: str, has_ref: bool = False, style_note: str = "") -> str:
+def build_prompt(request: str, has_ref: bool = False, style_note: str = "",
+                 sheet: str = "MULTIVIEW") -> str:
+    title = SHEET_LAYOUT.get(sheet, SHEET_LAYOUT["MULTIVIEW"])["title"]
     return (
-        "image_gen 도구를 사용해 3D 모델링용 멀티뷰 참조 시트 이미지 1장을 생성하고, "
+        f"image_gen 도구를 사용해 {title} 이미지 1장을 생성하고, "
         f"반드시 현재 디렉토리에 {MULTIVIEW_FILENAME} 파일로 저장하라.\n"
-        + _body(request, has_ref, style_note)
+        + _body(request, has_ref, style_note, sheet)
         + "저장 완료 후 텍스트로는 SAVED 한 단어만 답하라.")
 
 
-def build_image_prompt(request: str, has_ref: bool = False, style_note: str = "") -> str:
+def build_image_prompt(request: str, has_ref: bool = False, style_note: str = "",
+                       sheet: str = "MULTIVIEW") -> str:
     """OpenRouter Image API용 — 파일 저장·도구 호출 지시가 필요 없다."""
-    return ("3D 모델링용 멀티뷰 참조 시트 이미지 1장을 생성하라.\n"
-            + _body(request, has_ref, style_note))
+    title = SHEET_LAYOUT.get(sheet, SHEET_LAYOUT["MULTIVIEW"])["title"]
+    return (f"{title} 이미지 1장을 생성하라.\n"
+            + _body(request, has_ref, style_note, sheet))
 
 
 def generate(request: str, session_workdir: str, timeout: int, on_done, ref_image: str = None,
-             job_key=None, style_note: str = ""):
+             job_key=None, style_note: str = "", sheet: str = "MULTIVIEW"):
     """멀티뷰 시트를 비동기로 생성한다.
 
     완료 시 메인 스레드에서 on_done(경로 or None, 오류 문자열 or None)을 호출한다.
@@ -204,9 +238,11 @@ def generate(request: str, session_workdir: str, timeout: int, on_done, ref_imag
     if use_openrouter():
         # OpenRouter는 결과를 바로 최종 경로에 쓴다 — 임시 디렉토리도, AGENTS.md 충돌도 없다
         imagegen.generate(
-            build_image_prompt(request, has_ref=bool(ref_image), style_note=style_note),
+            build_image_prompt(request, has_ref=bool(ref_image), style_note=style_note,
+                               sheet=sheet),
             final_path, timeout, on_done,
-            refs=[ref_image] if ref_image else None, aspect_ratio="1:1", job_key=job_key)
+            refs=[ref_image] if ref_image else None, aspect_ratio=sheet_aspect(sheet),
+            job_key=job_key)
         return
 
     exe = preferences.resolve_cli_path('CODEX')
@@ -236,5 +272,5 @@ def generate(request: str, session_workdir: str, timeout: int, on_done, ref_imag
     cmd = build_command(exe, work, ref_image=ref_image)
     runner.run_cli_async(cmd, work, timeout, _cb,
                          stdin_text=build_prompt(request, has_ref=bool(ref_image),
-                                                 style_note=style_note),
+                                                 style_note=style_note, sheet=sheet),
                          job_key=job_key)

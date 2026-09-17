@@ -26,8 +26,10 @@ MOVED_TO_JOB = (
 _PATTERN = re.compile(
     r"(?:\bprops|\.lp3d)\.(?:" + "|".join(MOVED_TO_JOB) + r")\s*=(?!=)")
 
-# 정의 자체가 있는 곳과 계획·문서·배포본은 검사하지 않는다
-_SKIP_DIRS = {"tests", "docs", "dist", ".superpowers", ".git", "__pycache__"}
+# 정의 자체가 있는 곳과 계획·문서·배포본은 검사하지 않는다.
+# Generate에는 저장소로 다시 연결되는 개발 프로필 정션이 있으므로 진입 전에 제외한다.
+_SKIP_DIRS = {"tests", "docs", "dist", "Generate", ".omc", ".claude",
+              ".superpowers", ".git", "__pycache__"}
 _SKIP_FILES = {"properties.py"}
 
 

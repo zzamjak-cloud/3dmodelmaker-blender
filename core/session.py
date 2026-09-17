@@ -15,6 +15,7 @@ from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
 from . import (errors, executor, jobs, library, models, multiview,
                prompts, runner, scheduler, shapegen, snapshots, styles, texgen)
+from .character_parts import CharacterPartsMixin, LABELS, retopo_method_note
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
 
@@ -156,7 +157,7 @@ def _slug(text: str) -> str:
     return ascii_part or "Model"
 
 
-class GenerationSession:
+class GenerationSession(CharacterPartsMixin):
     system_mode = 'OBJECT'  # prompts.build_system_prompt에 넘길 제작 모드
 
     def __init__(self, scene_name, uid, request, exe,
@@ -204,6 +205,14 @@ class GenerationSession:
             self.system_mode = 'CHARACTER'
         self.character_type = (str(getattr(job, "character_type", 'AUTO') or 'AUTO')
                                if job else 'AUTO')
+        self.character_parts = str(getattr(job, 'character_parts', 'SEPARATE')) if job else 'SEPARATE'
+        self.character_template = str(getattr(job, 'character_template', 'AUTO')) if job else 'AUTO'
+        if self.character_template == 'AUTO':
+            self.character_template = 'QUADRUPED' if self.character_type == 'ANIMAL' else 'HUMANOID'
+        self._cancel_requested = False
+        self._part_records = {}
+        self._texture_part = None
+        self._texture_parts_pending = []
         # 캐릭터는 실행 후 시트와 같은 6시점으로 렌더해 시트와 대조하는 턴을 돈다.
         # 첫 생성은 시트를 '보고' 만들지만 결과가 얼마나 다른지는 모른다 — 나란히
         # 놓고 비교시켜야 빠진 요소·비율 오차·떨어진 파트가 잡힌다.
@@ -332,7 +341,7 @@ class GenerationSession:
     def _submit_blender(self, fn):
         """bpy 단계를 Blender 큐에 제출한다 (실행 시점의 유효성·예외를 함께 책임진다)."""
         def _step():
-            if self._stale():
+            if self._stale() or getattr(self, '_cancel_requested', False):
                 return
             if self._job() is None:
                 self._discard()  # 사용자가 리스트에서 항목을 지웠다
@@ -347,8 +356,8 @@ class GenerationSession:
     def _submit_ai(self, fn):
         """CLI 호출을 AI 슬롯 대기열에 제출한다. 호출 자체가 터지면 슬롯을 되돌린다."""
         def _step():
-            if self._stale():
-                scheduler.release_ai(self.uid)
+            if self._stale() or getattr(self, '_cancel_requested', False):
+                # 종료·취소 때 슬롯을 이미 반환했다. 같은 uid의 새 세션 슬롯은 건드리지 않는다.
                 return
             try:
                 fn()
@@ -388,6 +397,11 @@ class GenerationSession:
                              f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')
             self._dispatch(first)
             return
+        if self.system_mode == 'CHARACTER' and self.character_parts == 'SEPARATE':
+            support_error = shapegen.parts_support_error()
+            if support_error:
+                self._finish(f'부품 분리 준비 실패: {support_error}', ok=False)
+                return
         # 신규 생성: 멀티뷰 참조 시트를 먼저 생성 (codex image_gen — 없으면 스킵)
         if self._use_multiview() and multiview.is_available():
             backend = multiview.backend_label()
@@ -398,6 +412,9 @@ class GenerationSession:
                              f"멀티뷰 참조 시트 생성 시작 [{backend}]", phase='GEN')
             # 멀티뷰도 CLI 호출이므로 AI 슬롯을 점유한다
             self._submit_ai(self._run_multiview)
+            return
+        if self.system_mode == 'CHARACTER' and self.character_parts == 'SEPARATE':
+            self._finish('부품 분리 실패: 멀티뷰 참조 생성 기능이 필요합니다', ok=False)
             return
         self._start_generation()
 
@@ -412,7 +429,7 @@ class GenerationSession:
                            job_key=self.uid, sheet=self._sheet_kind())
 
     def _on_multiview(self, path, error=None):
-        if self._stale():
+        if self._stale() or getattr(self, '_cancel_requested', False):
             return  # 이미 끝난 세션의 지연 콜백 — 슬롯은 _end_session이 이미 반환했다
         scheduler.release_ai(self.uid)
         if path:
@@ -440,6 +457,14 @@ class GenerationSession:
             lines += [f"  · {l}" for l in errors.detail_lines(error)]
             # 상태줄에 "— 참조 없이 진행"까지 붙이면 가운데가 잘려 정작 원인이 사라진다
             self._set_status(f"멀티뷰 실패: {reason}", "\n".join(lines))
+        if self.system_mode == 'CHARACTER' and self.character_parts == 'SEPARATE':
+            if not self.multiview:
+                self._finish(f'부품 분리 실패: 원본 턴어라운드 생성 실패 ({error})', ok=False)
+            elif not shapegen.is_available():
+                self._finish('부품 분리 실패: Hunyuan3D 서버 연결 또는 셰이프 생성 설정을 확인하세요', ok=False)
+            else:
+                self._start_character_parts()
+            return
         if self.multiview and self.system_mode == 'CHARACTER' and shapegen.is_available():
             self._start_shapegen()
             return
@@ -495,6 +520,7 @@ class GenerationSession:
                 target_faces=int(getattr(self.prefs, "shapegen_faces", 12000)),
                 method=str(getattr(self.prefs, "shapegen_method", 'QUADRIFLOW')),
                 adaptive=bool(getattr(self.prefs, "shapegen_adaptive", False)),
+                template_id=self.character_template,
                 # 머리 영역은 곡률과 무관하게 촘촘하게 — 유형별 바운딩 박스 위쪽 비율
                 head_frac={'HUMANOID': 0.24, 'CREATURE': 0.28, 'ANIMAL': 0.0}.get(
                     self.character_type, 0.22))
@@ -508,7 +534,7 @@ class GenerationSession:
         self._set_status(
             "셰이프 리토폴로지 완료",
             f"셰이프: 원본 {info['raw_faces']}면, 파편 {info['floaters_removed']}개 제거, "
-            f"리메시 {info['remeshed_faces']}면 → {info['method']} → {info['faces']}면 "
+            f"리메시 {info['remeshed_faces']}면 → {retopo_method_note(info)} → {info['faces']}면 "
             f"(쿼드 {info['quads']}, 밀도 축소 {info['reduced_faces']}면) = {info['tris']} tris")
         self._finalize()
 
@@ -531,6 +557,9 @@ class GenerationSession:
         self._dispatch(first, images=init_images)
 
     def cancel(self):
+        self._cancel_requested = True
+        if hasattr(self, '_parts_sequence'):
+            self._parts_sequence.stop()
         runner.cancel(self.uid)
         scheduler.cancel_job(self.uid)
         # 정리도 bpy 조작이므로 큐를 통해 순서대로 실행한다
@@ -826,7 +855,8 @@ class GenerationSession:
         coll = bpy.data.collections.get(self.collection_name)
         if coll:
             mesh_objs = [o for o in coll.objects if o.type == 'MESH']
-            removed = cull_hidden_faces(mesh_objs)  # join(union)을 안 거친 잔여 은면 제거
+            # 분리 부품은 장비 아래 몸체와 안쪽 의상 면까지 보존한다.
+            removed = 0 if self._part_records else cull_hidden_faces(mesh_objs)
             for obj in mesh_objs:
                 game_ready(obj)
             tris = collection_tri_count(coll)
@@ -836,9 +866,15 @@ class GenerationSession:
             self._final_note = f"{tris} tris{note}"
             if self.modeling_type == 'TEXTURE' and mesh_objs:
                 if not texgen.is_available():
+                    if self._part_records:
+                        self._finish('부품 텍스처 실패: 이미지 생성 기능을 사용할 수 없습니다', ok=False)
+                        return
                     self._set_status("텍스처 생략: codex CLI 없음",
                                      "개별 매핑 생략 — codex CLI를 찾을 수 없어 팔레트로 마감")
                 else:
+                    if self._part_records:
+                        self._texture_parts_pending = list(self._part_records)
+                        self._texture_part = self._texture_parts_pending.pop(0)
                     # 언랩·렌더·베이크는 각각 한 틱을 통째로 막으므로 스텝을 나눠
                     # 상태줄이 실제로 갱신되고 다른 잡의 큐도 사이사이 진행되게 한다
                     self._set_status("UV 언랩 대기중...", phase='TEX')
@@ -868,6 +904,9 @@ class GenerationSession:
     # 두고 원인만 상태·로그에 남긴다.
     def _texture_fallback(self, reason: str, error: str = None):
         from ..texturing import apply as tex_apply
+        if self._part_records:
+            self._finish(f'부품 텍스처 실패 ({LABELS.get(self._texture_part, "부품")}): {reason}', ok=False)
+            return
         coll = bpy.data.collections.get(self.collection_name)
         if coll:
             tex_apply.discard([o for o in coll.objects if o.type == 'MESH'])
@@ -882,7 +921,8 @@ class GenerationSession:
 
     def _mesh_objs(self):
         coll = bpy.data.collections.get(self.collection_name)
-        return [o for o in coll.objects if o.type == 'MESH'] if coll else []
+        return [o for o in coll.objects if o.type == 'MESH'
+                and (not self._texture_part or o.get('lp3d_character_part') == self._texture_part)] if coll else []
 
     def _texture_step(self, fn, stage: str):
         """텍스처 단계 하나를 실행한다 — 예외는 세션 실패가 아니라 팔레트 폴백으로 흡수한다."""
@@ -895,8 +935,7 @@ class GenerationSession:
     def _submit_ai_texture(self, fn):
         """_submit_ai와 같지만 제출 자체가 터져도 잡을 FAILED로 만들지 않는다."""
         def _step():
-            if self._stale():
-                scheduler.release_ai(self.uid)
+            if self._stale() or getattr(self, '_cancel_requested', False):
                 return
             try:
                 fn()
@@ -921,7 +960,7 @@ class GenerationSession:
         def _run():
             from ..texturing import capture as tex_capture
             self._set_status("6면도 가이드 렌더중...", phase='TEX')
-            guide_dir = os.path.join(self.workdir, "texture")
+            guide_dir = os.path.join(self.workdir, "texture", self._texture_part or 'combined')
             with _bake_context(self.scene_name) as ctx:
                 views = tex_capture.render_views(ctx, self._mesh_objs(), guide_dir)
             guide = tex_capture.join_sheet(views, os.path.join(guide_dir, "guide_sheet.png"))
@@ -936,18 +975,31 @@ class GenerationSession:
             is_character = self.system_mode == 'CHARACTER'
             per_view = bool(getattr(self.prefs, "texture_per_view", False)) or is_character
             reference = self.multiview if is_character else None
+            request = self.request
+            texture_workdir = self.workdir
+            if self._texture_part:
+                from .character_parts import part_texture_prompt
+                reference = self._part_records[self._texture_part]['sheet']
+                request = part_texture_prompt(self.request, self._texture_part)
+                texture_workdir = os.path.join(self.workdir, 'parts', self._texture_part.lower())
             self._submit_ai_texture(lambda: texgen.generate(
-                self.request, guide, self.workdir, self.prefs.timeout,
+                request, guide, texture_workdir, self.prefs.timeout,
                 self._on_texture_sheet, job_key=self.uid,
-                reference=reference, per_view=per_view))
+                reference=reference, per_view=per_view,
+                has_face=self._texture_part in (None, 'BODY'),
+                strict_views=bool(self._texture_part),
+                is_active=lambda: not self._stale() and not self._cancel_requested))
         self._texture_step(_run, "가이드 렌더")
 
     def _on_texture_sheet(self, path, error=None):
-        if self._stale():
+        if self._stale() or getattr(self, '_cancel_requested', False):
             return
         scheduler.release_ai(self.uid)
         # 펌프는 콜백 예외를 삼키므로 여기서 잡지 않으면 세션이 영원히 끝나지 않는다
         try:
+            if self._texture_part and isinstance(path, dict) and len(path) < 6:
+                self._submit_blender(lambda: self._texture_fallback('부품 텍스처 6시점 중 일부 생성 실패'))
+                return
             if not path:
                 reason = errors.describe(error, 'codex') if error else "원인 불명"
                 self._submit_blender(lambda: self._texture_fallback(reason, error))
@@ -997,5 +1049,12 @@ class GenerationSession:
             if job:
                 job.texture_path = saved
             self._set_status("텍스처 적용 완료", f"텍스처 저장: {saved} (머티리얼 {result['material']})")
+            if self._texture_part:
+                self._part_records[self._texture_part]['texture'] = saved
+                if self._texture_parts_pending:
+                    self._texture_part = self._texture_parts_pending.pop(0)
+                    self._submit_blender(self._blender_unwrap)
+                    return
+                self._texture_part = None
             self._finish_placed(extra=f", 텍스처 {result['image']} {resolution}px")
         self._texture_step(_run, "적용")

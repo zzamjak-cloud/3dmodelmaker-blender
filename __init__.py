@@ -6,10 +6,10 @@ import sys
 from pathlib import Path
 
 from . import preferences, properties
-from .ui import operators, panel, previews
+from .ui import operators, panel, previews, template_operators
 
 # 등록 순서를 보장하는 모듈 목록 (의존성 순)
-_MODULES = (preferences, properties, previews, operators, panel)
+_MODULES = (preferences, properties, previews, operators, template_operators, panel)
 _SUBPACKAGES = ("lowpoly", "agents", "core", "pipeline", "texturing")
 
 

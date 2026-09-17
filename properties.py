@@ -77,6 +77,17 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         ],
         default='AUTO',
     )
+    character_parts: EnumProperty(
+        name="부위 생성",
+        description="몸체와 장비를 독립 메시로 생성해 옷 아래 몸체와 개별 수정을 보존",
+        items=[
+            ('SEPARATE', "몸체 / 의상 / 무기 분리", "시트와 셰이프를 부위별로 생성 (생성 시간이 늘어남)"),
+            ('COMBINED', "통합 생성", "기존 방식으로 하나의 셰이프 생성"),
+        ],
+        default='SEPARATE',
+    )
+    # 사용자 템플릿은 UUID 문자열로 저장해 목록 순서가 바뀌어도 선택이 유지된다.
+    character_template: StringProperty(name="베이스 메시", default='AUTO')
     scene_size: EnumProperty(
         name="씬 규모",
         description="무엇을 만드는지 — 공간 크기와 함께 에셋 종류·배치 총량·실내 여부가 정해진다",

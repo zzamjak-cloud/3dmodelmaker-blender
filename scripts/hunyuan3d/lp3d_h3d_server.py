@@ -3,8 +3,7 @@
 # 원본 api_server.py와의 차이:
 #   1) 멀티뷰 입력 — {"front","back","left","right"} base64 를 받으면 Hunyuan3D-2mv 파이프라인에
 #      뷰 딕셔너리로 넘긴다 (원본은 단일 "image"만). 턴어라운드 시트에서 잘라낸 3~4면을 그대로 쓴다.
-#   2) 후처리 항상 적용 — FloaterRemover / DegenerateFaceRemover / FaceReducer. 원본은 texture=True일
-#      때만 돌려서 떠다니는 조각이 그대로 남았다.
+#   2) 후처리 적용 — 부품 보존 요청에서는 FloaterRemover를 생략하여 장갑·신발 등을 유지한다.
 #   3) 요청 형식은 원본과 호환 — Blender MCP의 LOCAL_API 모드(단일 "image")도 그대로 동작한다.
 #
 # 실행: .venv\Scripts\python.exe lp3d_h3d_server.py --port 8081
@@ -38,6 +37,17 @@ VIEW_KEYS = ("front", "back", "left", "right")
 
 def _b64_image(data: str) -> Image.Image:
     return Image.open(BytesIO(base64.b64decode(data))).convert("RGBA")
+
+
+def _postprocess_mesh(mesh, params):
+    """분리 장비의 연결되지 않은 섬은 남기고 퇴화면과 요청된 면 수를 처리한다."""
+    if not params.get('preserve_parts', False):
+        mesh = FloaterRemover()(mesh)
+    mesh = DegenerateFaceRemover()(mesh)
+    face_count = int(params.get('face_count', 0) or 0)
+    if face_count > 0:
+        mesh = FaceReducer()(mesh, max_facenum=face_count)
+    return mesh
 
 
 class Worker:
@@ -78,12 +88,7 @@ class Worker:
         )
         with self.lock:
             mesh = self.pipeline(**kwargs)[0]
-            # 원본 서버는 texture=True일 때만 후처리했다 — 떠다니는 조각이 그대로 남는 원인
-            mesh = FloaterRemover()(mesh)
-            mesh = DegenerateFaceRemover()(mesh)
-            face_count = int(params.get("face_count", 0) or 0)
-            if face_count > 0:
-                mesh = FaceReducer()(mesh, max_facenum=face_count)
+            mesh = _postprocess_mesh(mesh, params)
             torch.cuda.empty_cache()
         path = os.path.join(SAVE_DIR, "%s.glb" % uuid.uuid4().hex)
         mesh.export(path)
@@ -96,7 +101,8 @@ worker: Worker = None
 
 @app.get("/status")
 async def status():
-    return {"ok": True, "multiview": worker.multiview if worker else None}
+    return {"ok": True, "multiview": worker.multiview if worker else None,
+            "capabilities": {"preserve_parts": True}}
 
 
 @app.post("/generate")

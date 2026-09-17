@@ -24,6 +24,9 @@ param(
     # Blender 버전 폴더명. 포터블 리소스 경로 <BlenderDir>\portable\<Version>\ 에 쓰인다
     [string]$Version = "5.2",
 
+    # 지정하면 포터블 실행 파일과 별개인 프로젝트 전용 프로필을 사용한다
+    [string]$ProfileDir,
+
     # 연결만 하고 Blender를 띄우지 않는다
     [switch]$LinkOnly,
 
@@ -71,7 +74,11 @@ blender.org에서 포터블 ZIP을 받아 압축을 푸세요:
 # 확장 경로에 버전 폴더는 들어가지 않는다. Blender가 실제로 쓰는 경로는
 # <BlenderDir>\portable\extensions\user_default 이다
 # (bpy.utils.resource_path('USER') == <BlenderDir>\portable 로 확인).
-$portableRoot = Join-Path $BlenderDir "portable"
+$portableRoot = if ($ProfileDir) {
+    [System.IO.Path]::GetFullPath($ProfileDir)
+} else {
+    Join-Path $BlenderDir "portable"
+}
 $env:BLENDER_USER_RESOURCES = $portableRoot
 $extDir = Join-Path $portableRoot "extensions\user_default"
 New-Item -ItemType Directory -Path $extDir -Force | Out-Null

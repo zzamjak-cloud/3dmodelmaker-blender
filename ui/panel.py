@@ -147,6 +147,20 @@ class LP3D_PT_main(bpy.types.Panel):
             layout.label(text="머티리얼: 컬러 스와치 (고정)")
         elif job.creation_mode == 'CHARACTER':
             layout.prop(job, "character_type", text="캐릭터 유형")
+            layout.prop(job, "character_parts", text="부위 생성")
+            from .. import preferences
+            from . import template_operators
+            prefs = preferences.get_prefs()
+            layout.prop(prefs, "shapegen_method", text="리토폴로지")
+            if prefs.shapegen_method == 'TEMPLATE':
+                box = layout.box()
+                box.operator_menu_enum('lp3d.template_choose', 'template_id',
+                                       text=template_operators.selected_label(job), icon='MESH_DATA')
+                box.operator('lp3d.template_load', icon='IMPORT')
+                row = box.row(align=True)
+                row.operator('lp3d.template_register', text='선택 메시 등록')
+                row.operator('lp3d.template_import', text='.blend 등록')
+                box.label(text='기준: 정면 -Y, 위쪽 +Z, 중립 자세', icon='INFO')
             layout.prop(job, "modeling_type", text="모델링 타입")
             hint = layout.column(align=True)
             hint.scale_y = 0.85

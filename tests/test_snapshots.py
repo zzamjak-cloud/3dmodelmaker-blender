@@ -98,10 +98,22 @@ class TestMultiviewArchive(unittest.TestCase):
 
 class TestArchiveDir(unittest.TestCase):
     # 시트·클립보드 참조 이미지가 매번 다른 곳에 생기지 않도록 한 곳으로 고정한다
+    def setUp(self):
+        # 실제 사용자 Downloads를 쓰지 않고 임시 사용자 경로에서 저장 계약을 검증한다.
+        temporary = tempfile.TemporaryDirectory(prefix='lp3d_archive_home_')
+        self.addCleanup(temporary.cleanup)
+        self.archive_home = temporary.name
+        os.mkdir(os.path.join(self.archive_home, 'Downloads'))
+        original = os.path.expanduser
+        stub = patch.object(multiview.os.path, 'expanduser',
+                            side_effect=lambda path: temporary.name if path == '~' else original(path))
+        stub.start()
+        self.addCleanup(stub.stop)
+
     def test_uses_downloads_blender(self):
         d = multiview.archive_dir()
         self.assertTrue(os.path.isdir(d), f"보관 폴더가 만들어지지 않음: {d}")
-        self.assertEqual(os.path.basename(d), "blender")
+        self.assertEqual(d, os.path.join(self.archive_home, 'Downloads', 'blender'))
 
     def test_under_home(self):
         self.assertTrue(multiview.archive_dir().startswith(os.path.expanduser("~")))

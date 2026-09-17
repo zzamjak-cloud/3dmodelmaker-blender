@@ -222,7 +222,8 @@ def build_image_prompt(request: str, has_ref: bool = False, style_note: str = ""
 
 
 def generate(request: str, session_workdir: str, timeout: int, on_done, ref_image: str = None,
-             job_key=None, style_note: str = "", sheet: str = "MULTIVIEW"):
+             job_key=None, style_note: str = "", sheet: str = "MULTIVIEW",
+             prompt_override: str = None):
     """멀티뷰 시트를 비동기로 생성한다.
 
     완료 시 메인 스레드에서 on_done(경로 or None, 오류 문자열 or None)을 호출한다.
@@ -238,7 +239,7 @@ def generate(request: str, session_workdir: str, timeout: int, on_done, ref_imag
     if use_openrouter():
         # OpenRouter는 결과를 바로 최종 경로에 쓴다 — 임시 디렉토리도, AGENTS.md 충돌도 없다
         imagegen.generate(
-            build_image_prompt(request, has_ref=bool(ref_image), style_note=style_note,
+            prompt_override or build_image_prompt(request, has_ref=bool(ref_image), style_note=style_note,
                                sheet=sheet),
             final_path, timeout, on_done,
             refs=[ref_image] if ref_image else None, aspect_ratio=sheet_aspect(sheet),
@@ -270,7 +271,10 @@ def generate(request: str, session_workdir: str, timeout: int, on_done, ref_imag
         on_done(path, failure)
 
     cmd = build_command(exe, work, ref_image=ref_image)
+    custom_cli_prompt = (f'image_gen 도구로 이미지 1장을 생성하고 현재 디렉토리에 '
+                         f'{MULTIVIEW_FILENAME} 파일로 저장하라.\n{prompt_override}\n'
+                         '완료 후 SAVED 한 단어만 답하라.') if prompt_override else None
     runner.run_cli_async(cmd, work, timeout, _cb,
-                         stdin_text=build_prompt(request, has_ref=bool(ref_image),
+                         stdin_text=custom_cli_prompt or build_prompt(request, has_ref=bool(ref_image),
                                                  style_note=style_note, sheet=sheet),
                          job_key=job_key)

@@ -47,6 +47,21 @@ def is_available(timeout: float = 1.5) -> bool:
         return False
 
 
+def parts_support_error(timeout: float = 1.5) -> str:
+    """이미지 생성 비용을 쓰기 전에 서버의 분리 부품 보존 기능을 확인한다."""
+    if not is_enabled():
+        return '환경설정에서 셰이프 생성을 켜세요'
+    try:
+        with urllib.request.urlopen(server_url() + '/status', timeout=timeout) as response:
+            status = json.loads(response.read().decode('utf-8'))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return f'Hunyuan3D 서버에 연결할 수 없습니다: {exc}'
+    if not isinstance(status, dict) or not isinstance(status.get('capabilities'), dict) or not status['capabilities'].get('preserve_parts'):
+        return ('현재 Hunyuan3D 서버가 부품 보존을 지원하지 않습니다. '
+                '저장소 scripts/hunyuan3d/lp3d_h3d_server.py로 서버를 업데이트하고 재시작하세요')
+    return ''
+
+
 def split_turnaround(sheet_path: str, out_dir: str) -> dict:
     """턴어라운드 시트를 칸별 PNG로 잘라 {view: path}를 돌려준다 (bpy 이미지 API, PIL 불필요).
 
@@ -88,10 +103,12 @@ def _b64(path: str) -> str:
 
 
 def build_body(views: dict, octree: int = 256, steps: int = 30, guidance: float = 5.0,
-               face_count: int = 0, seed: int = 7) -> dict:
+               face_count: int = 0, seed: int = 7, preserve_parts: bool = False) -> dict:
     body = {"octree_resolution": int(octree), "num_inference_steps": int(steps),
             "guidance_scale": float(guidance), "face_count": int(face_count), "seed": int(seed),
             "texture": False, "type": "glb"}
+    if preserve_parts:
+        body['preserve_parts'] = True
     for name in SEND_VIEWS:
         path = views.get(name)
         if path and os.path.isfile(path):

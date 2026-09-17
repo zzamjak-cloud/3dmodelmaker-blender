@@ -133,7 +133,8 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         name="리토폴로지 방식",
         description="이미지→3D 셰이프를 게임용 메시로 줄이는 방법",
         items=[
-            ('QUADRIFLOW', "QuadriFlow 쿼드 (기본)", "복셀 리메시 → QuadriFlow → 하이폴리 슈링크랩 — 리깅용 쿼드 메시, 디테일 복원"),
+            ('TEMPLATE', "베이스 메시 템플릿", "몸체에 얼굴·관절 루프를 가진 템플릿을 적합. 극단적인 비율은 수동 보정 필요"),
+            ('QUADRIFLOW', "QuadriFlow 쿼드", "복셀 리메시 → QuadriFlow → 하이폴리 슈링크랩 — 균일 쿼드 메시"),
             ('DECIMATE', "데시메이트 (트라이)", "조각 제거 후 데시메이트 — 빠르지만 삼각형 그대로라 수정이 어렵다"),
         ],
         default='QUADRIFLOW',

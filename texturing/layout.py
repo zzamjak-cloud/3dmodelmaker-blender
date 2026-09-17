@@ -138,7 +138,7 @@ def build_prompt(request: str, filename: str) -> str:
     )
 
 
-def reference_contract() -> str:
+def reference_contract(has_face: bool = True) -> str:
     """두 번째 첨부(턴어라운드/원화)가 있을 때 — 색을 지어내지 말고 거기서 가져오게 한다.
 
     회색 가이드만 주면 모델이 색을 새로 정한다. 실측에서 늑대 얼굴이 회색으로 남고 노란
@@ -149,19 +149,21 @@ def reference_contract() -> str:
         "가이드가 회색이어도 색을 새로 정하지 마라.\n"
         "- 가이드의 각 시점을 원화의 같은 방향 칸과 대조해 부위마다 같은 색을 칠하라 "
         "(정면↔정면, 뒷면↔뒷면, 측면↔측면). 상면·저면은 인접 시점의 색을 이어 붙인다.\n"
-        "- **얼굴은 반드시 완성하라**: 눈(홍채·흰자·눈꺼풀), 코, 입, 눈썹, 털 색 경계를 원화대로 칠한다. "
-        "얼굴이 단색으로 남으면 실패다.\n"
+        + ("- **얼굴은 반드시 완성하라**: 눈(홍채·흰자·눈꺼풀), 코, 입, 눈썹, 털 색 경계를 원화대로 칠한다. "
+           "얼굴이 단색으로 남으면 실패다.\n" if has_face else
+           "- 이 대상은 장비 부품이다. 얼굴·신체를 추가하지 않는다.\n")
+        +
         "- 금속·가죽·털·피부의 재질 차이를 원화의 명도·채도로 표현하라."
     )
 
 
-def build_image_prompt(request: str, has_reference: bool = False) -> str:
+def build_image_prompt(request: str, has_reference: bool = False, has_face: bool = True) -> str:
     """OpenRouter Image API용 — 가이드 시트는 input_references로 따로 넘어가므로
     파일 저장·도구 호출 지시가 필요 없다."""
     return (
         f"첨부한 첫 이미지를 그대로 덮어 칠한(paint-over) {ASPECT_RATIO} 이미지 1장을 생성하라.\n"
         + _body(request)
-        + (("\n\n" + reference_contract()) if has_reference else "")
+        + (("\n\n" + reference_contract(has_face)) if has_reference else "")
     )
 
 
@@ -169,7 +171,7 @@ _VIEW_KO = {"FRONT": "정면", "RIGHT": "우측면", "BACK": "뒷면", "LEFT": "
             "TOP": "상면", "BOTTOM": "저면"}
 
 
-def build_view_prompt(request: str, view: str, has_reference: bool = False) -> str:
+def build_view_prompt(request: str, view: str, has_reference: bool = False, has_face: bool = True) -> str:
     """시점 하나만 1:1로 채색하는 프롬프트 — 시트 한 장(칸당 512px)보다 4배 선명하다.
 
     6칸을 한 장에 넣으면 이미지 모델 출력(1536x1024)에서 칸당 512px밖에 안 돼 텍스처가
@@ -187,7 +189,7 @@ def build_view_prompt(request: str, view: str, has_reference: bool = False) -> s
         "출력 계약:\n"
         "- 최종 이미지는 정확히 한 장, 첨부와 같은 구도·같은 크기·같은 위치.\n"
         f"{output_rules()}"
-        + (("\n\n" + reference_contract()
+        + (("\n\n" + reference_contract(has_face)
             + f"\n- 이 칸은 {label} 시점이다 — 원화에서 같은 방향(또는 가장 가까운 방향) 칸의 색을 쓴다.")
            if has_reference else "")
     )

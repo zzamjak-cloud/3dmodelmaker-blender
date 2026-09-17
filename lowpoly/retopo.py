@@ -22,12 +22,15 @@ def _override(obj):
 def import_glb(path: str) -> list:
     """GLB를 가져와 새 메시 오브젝트 목록을 돌려준다 (씬 컬렉션 링크는 호출자가 정리)."""
     before = set(bpy.data.objects)
-    with bpy.context.temp_override(window=bpy.context.window_manager.windows[0]):
-        bpy.ops.import_scene.gltf(filepath=path)
+    bpy.ops.import_scene.gltf(filepath=path)
     new = [o for o in bpy.data.objects if o not in before]
     meshes = [o for o in new if o.type == 'MESH']
     for o in new:
         if o.type != 'MESH':
+            for child in list(o.children):
+                world = child.matrix_world.copy()
+                child.parent = None
+                child.matrix_world = world
             bpy.data.objects.remove(o, do_unlink=True)  # 빈 노드·카메라 등
     return meshes
 
@@ -182,6 +185,134 @@ def _weights_by_position(obj, weights: list):
     return lookup
 
 
+def _slice_prefit(obj, target, slices: int = 24, smooth: int = 2) -> None:
+    """높이(Z) 슬라이스마다 템플릿의 X·Y 폭과 중심을 타깃 실루엣에 맞춘다.
+
+    각 슬라이스에서 타깃 정점의 x·y 범위(min·max)와 템플릿 정점의 범위를 재고, 템플릿
+    정점을 그 슬라이스 안에서 선형으로 다시 배치한다(왼쪽 끝→왼쪽 끝, 오른쪽 끝→오른쪽 끝).
+    A-포즈 인간형끼리는 팔·머리·어깨 폭이 이렇게 대체로 맞고, 이어지는 슈링크랩이 세부를
+    붙인다. 슬라이스 사이 값은 이웃 평균으로 smooth번 고른다."""
+    import bisect
+    tv = [target.matrix_world @ v.co for v in target.data.vertices]
+    ov = [obj.matrix_world @ v.co for v in obj.data.vertices]
+    z_lo = min(p.z for p in tv)
+    z_hi = max(p.z for p in tv)
+    span = max(z_hi - z_lo, 1e-6)
+    n = max(4, int(slices))
+
+    def _ranges(points):
+        xs = [[] for _ in range(n)]
+        ys = [[] for _ in range(n)]
+        for p in points:
+            k = min(n - 1, max(0, int((p.z - z_lo) / span * n)))
+            xs[k].append(p.x)
+            ys[k].append(p.y)
+        out = []
+        for k in range(n):
+            if xs[k]:
+                out.append((min(xs[k]), max(xs[k]), min(ys[k]), max(ys[k])))
+            else:
+                out.append(None)
+        # 빈 슬라이스는 이웃으로 채운다
+        for k in range(n):
+            if out[k] is None:
+                j = next((i for i in range(1, n) if 0 <= k - i < n and out[k - i] or 0 <= k + i < n and out[k + i]), None)
+                cand = out[k - j] if j is not None and 0 <= k - j < n and out[k - j] else (out[k + j] if j is not None and 0 <= k + j < n else None)
+                out[k] = cand or (-0.1, 0.1, -0.1, 0.1)
+        for _ in range(int(smooth)):
+            out = [tuple((out[max(0, k - 1)][i] + out[k][i] + out[min(n - 1, k + 1)][i]) / 3 for i in range(4))
+                   for k in range(n)]
+        return out
+
+    tr = _ranges(tv)
+    orr = _ranges(ov)
+    # 슬라이스 경계에서 튀지 않게 이웃 슬라이스와 선형 보간한다
+    centers = [z_lo + span * (k + 0.5) / n for k in range(n)]
+    for v, p in zip(obj.data.vertices, ov):
+        k = bisect.bisect_left(centers, p.z)
+        k0, k1 = max(0, k - 1), min(n - 1, k)
+        t = 0.0 if k1 == k0 else max(0.0, min(1.0, (p.z - centers[k0]) / (centers[k1] - centers[k0])))
+        def lerp(a, b):
+            return a + (b - a) * t
+        txl, txh, tyl, tyh = (lerp(tr[k0][i], tr[k1][i]) for i in range(4))
+        oxl, oxh, oyl, oyh = (lerp(orr[k0][i], orr[k1][i]) for i in range(4))
+        ux = (p.x - oxl) / max(oxh - oxl, 1e-6)
+        uy = (p.y - oyl) / max(oyh - oyl, 1e-6)
+        v.co = Vector((txl + ux * (txh - txl), tyl + uy * (tyh - tyl), p.z))
+    obj.data.update()
+
+
+def fit_template(obj, target, passes: int = 4) -> None:
+    """베이스 메시(obj)를 하이폴리 셰이프(target)에 단계적으로 입힌다 (래핑).
+
+    한 번에 100% 투영하면 팔·다리처럼 위치가 어긋난 부위에서 루프가 뒤엉킨다. 그래서
+    ① 노멀 방향 투영을 약하게(0.5) → 스무딩으로 루프 정리 → ② 최근접 표면 투영을 점점
+    강하게 → 마지막에 1.0으로 표면에 붙이고 가벼운 스무딩으로 마무리한다. 얼굴·관절 루프의
+    상대 배치가 유지된 채 실루엣만 셰이프를 따라간다. 자세가 크게 다르면(A-포즈 vs 팔 내림)
+    수동 보정이 필요하다."""
+    # 초기 정렬: 템플릿 바운딩 박스를 셰이프 박스에 축별로 맞춘다 (폭·두께·키). 겹침이
+    # 클수록 최근접 투영이 엉뚱한 면으로 튀지 않는다.
+    bpy.context.view_layer.update()
+    src = [target.matrix_world @ Vector(c) for c in target.bound_box]
+    dst = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+    # 키(Z)로만 균일 스케일 — 축별로 늘리면 주둥이·꼬리가 있는 셰이프의 깊이(1.6m)에 맞춰
+    # 템플릿(0.3m)이 5배로 찌그러져 투영이 엉킨다(실측). 중심은 X·Y 정렬, 발바닥은 Z 정렬
+    s_lo = Vector([min(p[a] for p in src) for a in range(3)])
+    s_hi = Vector([max(p[a] for p in src) for a in range(3)])
+    d_lo = Vector([min(p[a] for p in dst) for a in range(3)])
+    d_hi = Vector([max(p[a] for p in dst) for a in range(3)])
+    scale = (s_hi.z - s_lo.z) / max(d_hi.z - d_lo.z, 1e-6)
+    center_s = (s_lo + s_hi) / 2
+    center_d = (d_lo + d_hi) / 2
+    for v in obj.data.vertices:
+        p = obj.matrix_world @ v.co
+        v.co = Vector((center_s.x + (p.x - center_d.x) * scale,
+                       center_s.y + (p.y - center_d.y) * scale,
+                       s_lo.z + (p.z - d_lo.z) * scale))
+    obj.matrix_world.identity()
+    obj.data.update()
+    # 높이 슬라이스별 실루엣 맞춤 — 팔·머리·주둥이처럼 몸통에서 떨어진 부위는 최근접 투영이
+    # 닿지 못한다(템플릿 팔이 몸통 표면에 붙어 버린다, 실측). 정면·측면 폭을 슬라이스마다
+    # 먼저 맞춰 템플릿 외피가 셰이프 실루엣을 덮게 한 뒤 투영한다.
+    _slice_prefit(obj, target)
+    # 단계적 최근접 투영: 약하게 붙이고 스무딩으로 루프를 고른 뒤 점점 강하게.
+    # 노멀 방향 투영(PROJECT)은 멀리 있는 면으로 튀어 메시가 뭉개진다(실측) — 쓰지 않는다.
+    # 초반은 TARGET_PROJECT(타깃 노멀 방향 투영 — 감싸기용)로 큰 형태를 잡고 스무딩을 많이,
+    # 후반은 NEAREST_SURFACEPOINT로 표면에 밀착시키고 스무딩을 줄인다.
+    n = max(3, int(passes))
+    steps = []
+    for i in range(n):
+        late = i >= n // 2
+        steps.append(('NEAREST_SURFACEPOINT' if late else 'TARGET_PROJECT',
+                      min(1.0, 0.35 + 0.65 * (i + 1) / n),
+                      max(0, (n - i) * 2 - 1)))
+    # RNA 포인터(vg)는 모디파이어를 추가하면 무효가 될 수 있다 — 이름으로 매번 다시 찾는다
+    vg_name = 'lp3d_template_fit'
+    obj.vertex_groups.new(name=vg_name)
+    all_idx = list(range(len(obj.data.vertices)))
+    for method, factor, smooth_iters in steps:
+        obj.vertex_groups[vg_name].add(all_idx, float(factor), 'REPLACE')
+        mod = obj.modifiers.new('LP3D_TemplateFit', 'SHRINKWRAP')
+        mod.target = target
+        mod.wrap_method = method
+        mod.vertex_group = vg_name
+        with _override(obj):
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+        if smooth_iters:
+            sm = obj.modifiers.new('LP3D_TemplateSmooth', 'SMOOTH')
+            sm.factor = 0.5
+            sm.iterations = int(smooth_iters)
+            with _override(obj):
+                bpy.ops.object.modifier_apply(modifier=sm.name)
+    # 마지막으로 표면에 완전히 붙인다 — 스무딩이 살짝 띄운 만큼 되돌린다
+    mod = obj.modifiers.new('LP3D_TemplateFit', 'SHRINKWRAP')
+    mod.target = target
+    mod.wrap_method = 'NEAREST_SURFACEPOINT'
+    with _override(obj):
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+    obj.vertex_groups.remove(obj.vertex_groups[vg_name])
+
+
 def normalize(obj, height: float, face_axis: str = '-Y') -> None:
     """키를 height(m)에 맞추고 발바닥을 z=0, 중심을 X=Y=0에 둔다.
 
@@ -221,10 +352,11 @@ def decimate(obj, target_tris: int) -> None:
         bpy.ops.object.modifier_apply(modifier=mod.name)
 
 
-def process_glb(path: str, name: str, collection, height: float = 1.8,
+def _process_glb(path: str, name: str, collection, height: float = 1.8,
                 target_faces: int = 12000, voxel_size: float = 0.012,
                 method: str = 'QUADRIFLOW', adaptive: bool = False,
-                head_frac: float = 0.0) -> dict:
+                head_frac: float = 0.0, template_id: str = 'HUMANOID',
+                preserve_parts: bool = False, normalize_result: bool = True) -> dict:
     """GLB 한 개를 게임용 메시 오브젝트 하나로 만들어 collection에 넣는다. 통계 dict 반환.
 
     method='QUADRIFLOW'(기본): 조각 제거 → 복셀 리메시 → QuadriFlow 쿼드 → 하이폴리 슈링크랩으로
@@ -236,8 +368,11 @@ def process_glb(path: str, name: str, collection, height: float = 1.8,
     if not meshes:
         raise RuntimeError("GLB에 메시가 없다")
     obj = meshes[0]
-    for extra in meshes[1:]:  # 여러 조각이면 하나로 합친다
-        bpy.data.objects.remove(extra, do_unlink=True)
+    # 모든 GLB 메시를 월드 변환을 유지하여 합친다.
+    if len(meshes) > 1:
+        with bpy.context.temp_override(object=obj, active_object=obj,
+                                       selected_objects=meshes, selected_editable_objects=meshes):
+            bpy.ops.object.join()
     for c in list(obj.users_collection):
         c.objects.unlink(obj)
     collection.objects.link(obj)
@@ -245,9 +380,44 @@ def process_glb(path: str, name: str, collection, height: float = 1.8,
     obj.data.name = obj.name
     obj.data.materials.clear()
     raw_tris = len(obj.data.polygons)
-    removed = keep_largest_island(obj)
+    removed = 0 if preserve_parts or len(meshes) > 1 else keep_largest_island(obj)
     reduced = 0
-    if str(method).upper() == 'QUADRIFLOW':
+    if str(method).upper() == 'TEMPLATE':
+        from ..core.templates import load_template
+        hi = obj
+        obj = load_template(template_id, collection)
+        # 과도한 밀도 증가를 막으면서 사용자 목표에 가까운 두 단계 이하 분할을 적용한다.
+        levels = 0
+        while levels < 2 and len(obj.data.polygons) * (4 ** (levels + 1)) <= int(target_faces):
+            levels += 1
+        if levels:
+            subdivision = obj.modifiers.new('LP3D_TemplateSubdivision', 'SUBSURF')
+            subdivision.levels = levels
+            subdivision.render_levels = levels
+            with _override(obj):
+                bpy.ops.object.modifier_apply(modifier=subdivision.name)
+        bpy.context.view_layer.update()
+        source_points = [hi.matrix_world @ vertex.co for vertex in hi.data.vertices]
+        template_points = [obj.matrix_world @ vertex.co for vertex in obj.data.vertices]
+        if not source_points or not template_points:
+            raise ValueError('템플릿 또는 원본 메시가 비어 있습니다')
+        lower = Vector(tuple(min(p[a] for p in source_points) for a in range(3)))
+        upper = Vector(tuple(max(p[a] for p in source_points) for a in range(3)))
+        t_lower = Vector(tuple(min(p[a] for p in template_points) for a in range(3)))
+        t_upper = Vector(tuple(max(p[a] for p in template_points) for a in range(3)))
+        from mathutils import Matrix
+        obj.matrix_world = Matrix.Identity(4)
+        scale = (upper.z - lower.z) / max(t_upper.z - t_lower.z, 1e-6)
+        source_center = (lower + upper) * .5
+        template_center = (t_lower + t_upper) * .5
+        for vertex, point in zip(obj.data.vertices, template_points):
+            vertex.co = source_center + (point - template_center) * scale
+        fit_template(obj, hi)
+        remeshed = len(obj.data.polygons)
+        bpy.data.objects.remove(hi, do_unlink=True)
+        method = 'template'
+        obj.name = safe_id_name(name)
+    elif str(method).upper() == 'QUADRIFLOW':
         # 하이폴리 사본을 남겨 두고 저폴리를 만든 뒤 슈링크랩으로 표면 디테일을 되찾는다 —
         # 복셀 리메시·QuadriFlow가 뭉갠 얼굴·털 굴곡이 돌아온다 (실측: 15k 쿼드에서 원본과 구분 어려움)
         hi = obj.copy()
@@ -255,7 +425,11 @@ def process_glb(path: str, name: str, collection, height: float = 1.8,
         collection.objects.link(hi)
         zs = [v.co.z for v in obj.data.vertices]
         height_units = max(max(zs) - min(zs), 1e-6)
-        voxel_remesh(obj, height_units / 350.0)  # 복셀 상자 350칸 — 눈·주둥이가 살아남는 해상도
+        # 부품 보존은 GLB 안에 메시가 여러 개일 때만 복셀 리메시를 건너뛴다(합쳐진 셸이 녹아
+        # 붙는다). 3분할 생성처럼 부품이 각각 한 GLB로 오면 셸 하나라 리메시해도 된다 —
+        # 건너뛰면 마칭큐브 원본이 매니폴드가 아니라 QuadriFlow가 조용히 실패해 삼각형이 남는다
+        if not preserve_parts or len(meshes) == 1:
+            voxel_remesh(obj, height_units / 350.0)  # 복셀 상자 350칸 — 눈·주둥이가 살아남는 해상도
         remeshed = len(obj.data.polygons)
         # 밀도 분포: 균일 고밀도(목표 x2.5)로 뽑은 뒤 평평한 영역만 un-subdivide(4면→1면).
         # 얼굴·손·곡률 높은 곳은 촘촘하게, 팔·다리·갑옷 판은 성기게 — 리깅용 분포
@@ -278,10 +452,50 @@ def process_glb(path: str, name: str, collection, height: float = 1.8,
         method = "decimate"
     for p in obj.data.polygons:
         p.use_smooth = True
-    normalize(obj, height)
+    if normalize_result:
+        normalize(obj, height)
     obj.data.calc_loop_triangles()
     quads = sum(1 for p in obj.data.polygons if len(p.vertices) == 4)
     return {"obj": obj, "raw_faces": raw_tris, "floaters_removed": removed,
             "remeshed_faces": remeshed, "method": method, "reduced_faces": reduced,
             "faces": len(obj.data.polygons), "quads": quads,
             "tris": len(obj.data.loop_triangles)}
+
+
+def process_glb(path: str, name: str, collection, height: float = 1.8,
+                target_faces: int = 12000, voxel_size: float = 0.012,
+                method: str = 'QUADRIFLOW', adaptive: bool = False,
+                head_frac: float = 0.0, template_id: str = 'HUMANOID',
+                preserve_parts: bool = False, normalize_result: bool = True) -> dict:
+    """GLB 전체를 처리하고 실패 시 이번 호출이 생성한 데이터만 정리한다.
+
+    분리된 장비를 보존할 때는 복셀 결합 없이 선택한 리토폴로지를 시도한다.
+    템플릿 맞춤은 비율 정렬과 부분 투영이며 완성된 자동 리깅이 아니다.
+    """
+    if str(method).upper() not in ('TEMPLATE', 'QUADRIFLOW', 'DECIMATE'):
+        raise ValueError('지원하지 않는 리토폴로지 방법: ' + str(method))
+    before_objects = set(bpy.data.objects)
+    before_meshes = set(bpy.data.meshes)
+    other_data = [(group, set(group)) for group in
+                  (bpy.data.materials, bpy.data.images, bpy.data.armatures, bpy.data.cameras,
+                   bpy.data.lights, bpy.data.actions)]
+    try:
+        result = _process_glb(path, name, collection, height, target_faces, voxel_size,
+                              method, adaptive, head_frac, template_id, preserve_parts, normalize_result)
+        result['requested_method'] = str(method).upper()
+        result['fallback_reason'] = ('QuadriFlow가 결과를 만들지 못해 DECIMATE로 처리했습니다'
+                                     if str(method).upper() == 'QUADRIFLOW' and result['method'] == 'decimate'
+                                     else '')
+        return result
+    except Exception:
+        for obj in set(bpy.data.objects) - before_objects:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        raise
+    finally:
+        for mesh in set(bpy.data.meshes) - before_meshes:
+            if mesh.users == 0:
+                bpy.data.meshes.remove(mesh)
+        for group, previous in other_data:
+            for item in set(group) - previous:
+                if item.users == 0:
+                    group.remove(item)

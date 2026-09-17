@@ -38,7 +38,8 @@ def build_prompt(request: str) -> str:
 
 
 def generate(request: str, guide_image: str, session_workdir: str, timeout: int, on_done,
-             job_key=None, reference: str = None, per_view: bool = False):
+             job_key=None, reference: str = None, per_view: bool = False,
+             has_face: bool = True, strict_views: bool = False, is_active=None):
     """6면도 텍스처를 비동기로 생성한다.
 
     완료 시 on_done(결과, 오류). 결과는 시트 한 장의 경로(str) 또는 per_view 모드에서
@@ -54,11 +55,12 @@ def generate(request: str, guide_image: str, session_workdir: str, timeout: int,
     if multiview.use_openrouter():
         if per_view:
             _generate_per_view(request, guide_image, session_workdir, timeout, on_done,
-                               job_key=job_key, reference=reference)
+                               job_key=job_key, reference=reference, has_face=has_face,
+                               strict_views=strict_views, is_active=is_active)
             return
         refs = [guide_image] + ([reference] if reference else [])
         imagegen.generate(
-            layout.build_image_prompt(request, has_reference=bool(reference)),
+            layout.build_image_prompt(request, has_reference=bool(reference), has_face=has_face),
             os.path.join(session_workdir, SHEET_FILENAME), timeout, on_done,
             refs=refs, aspect_ratio=layout.ASPECT_RATIO, job_key=job_key)
         return
@@ -90,12 +92,20 @@ def generate(request: str, guide_image: str, session_workdir: str, timeout: int,
         shutil.rmtree(work, ignore_errors=True)
         on_done(path, failure)
 
-    runner.run_cli_async(build_command(exe, work, guide_copy), work, timeout, _cb,
-                         stdin_text=build_prompt(request), job_key=job_key)
+    command = build_command(exe, work, guide_copy)
+    prompt = build_prompt(request)
+    if reference:
+        reference_copy = os.path.join(work, 'color_reference' + os.path.splitext(reference)[1])
+        shutil.copy(reference, reference_copy)
+        command[-1:-1] = ['-i', reference_copy]
+        prompt += '\n' + layout.reference_contract(has_face=has_face)
+    runner.run_cli_async(command, work, timeout, _cb,
+                         stdin_text=prompt, job_key=job_key)
 
 
 def _generate_per_view(request: str, guide_image: str, session_workdir: str, timeout: int,
-                       on_done, job_key=None, reference: str = None):
+                       on_done, job_key=None, reference: str = None,
+                       has_face: bool = True, strict_views: bool = False, is_active=None):
     """시점별 1:1 요청 6개를 병렬로 보내고 전부 끝나면 {시점: 경로}로 콜백한다.
 
     하나라도 실패하면 실패한 시점만 빼고 넘긴다 — 베이크는 빠진 시점을 이웃 투영으로
@@ -112,15 +122,19 @@ def _generate_per_view(request: str, guide_image: str, session_workdir: str, tim
     results, errors, retried = {}, {}, set()
 
     def _request(view):
+        if is_active is not None and not is_active():
+            return
         cell = cells[view]
         out = os.path.join(session_workdir, VIEW_FILENAME % view.lower())
         refs = [cell] + ([reference] if reference else [])
-        imagegen.generate(layout.build_view_prompt(request, view, has_reference=bool(reference)),
+        imagegen.generate(layout.build_view_prompt(request, view, has_reference=bool(reference), has_face=has_face),
                           out, timeout, _make_cb(view), refs=refs, aspect_ratio="1:1",
                           job_key=job_key)
 
     def _make_cb(view):
         def _cb(path, error=None):
+            if is_active is not None and not is_active():
+                return
             if path:
                 results[view] = path
             elif view not in retried:
@@ -138,8 +152,8 @@ def _generate_per_view(request: str, guide_image: str, session_workdir: str, tim
             pending["left"] -= 1
             if pending["left"] > 0:
                 return
-            if len(errors) == len(cells):
-                on_done(None, "시점별 텍스처 생성 전부 실패: " + "; ".join(
+            if len(errors) == len(cells) or (strict_views and errors):
+                on_done(None, "시점별 텍스처 생성 실패: " + "; ".join(
                     f"{v}: {str(e).splitlines()[0]}" for v, e in errors.items()))
                 return
             on_done(results, None)

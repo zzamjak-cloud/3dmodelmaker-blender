@@ -10,8 +10,8 @@ from .modeling import (bevel, mirror_x, array, scatter, taper, shade_flat,
 from .voxel import voxel, voxel_box, voxel_column
 from .palette import set_color
 from .cleanup import game_ready
-from .scene import (terrain, instance, place_grid, place_along, place_scatter,
-                    wall_run, path_strip, ground_snap, kit)
+from .scene import (terrain, room, instance, place_grid, place_along, place_scatter,
+                    wall_run, fence_run, path_strip, ground_snap, kit)
 
 __all__ = [
     "root", "box", "cylinder", "cone", "sphere", "plane", "lathe", "prism", "tube", "join",
@@ -25,8 +25,8 @@ VOXEL_API = ["voxel", "voxel_box", "voxel_column"]
 
 # 배경(SCENE) 모드 프롬프트에만 노출되는 씬 헬퍼 어휘 — __all__과 분리해 둔다
 SCENE_API = [
-    "terrain", "instance", "place_grid", "place_along", "place_scatter",
-    "wall_run", "path_strip", "ground_snap", "kit",
+    "terrain", "room", "instance", "place_grid", "place_along", "place_scatter",
+    "wall_run", "fence_run", "path_strip", "ground_snap", "kit",
 ]
 
 # 현재 생성 세션의 전용 컬렉션 이름 — executor가 실행 전에 설정

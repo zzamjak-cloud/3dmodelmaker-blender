@@ -311,6 +311,108 @@ def wall_run(points, height=3.0, thickness=0.4, name="Wall", closed=False,
     return join(parts, name=name, mode='fast')
 
 
+def room(name="Room", size=(8.0, 6.0), height=3.0, thickness=0.2, ceiling=False,
+         open_sides=()) -> bpy.types.Object:
+    """실내 공간의 껍데기(바닥 + 벽 4면 + 선택적 천장)를 만든다. 합쳐진 오브젝트를 반환.
+
+    **실내 씬에서는 terrain 대신 이것을 쓴다.** 실내에 지형을 깔면 기복 있는 땅 위에
+    가구가 놓여 실내로 읽히지 않는다.
+
+    size=(폭 X, 깊이 Y) 안목 치수(m), height는 천장고(m), thickness는 벽 두께(m)다.
+    바닥 윗면이 z=0이라 가구·프랍을 그대로 z=0에 놓으면 된다.
+    ceiling=True면 천장을 덮는다 — 위에서 내려다보는 카메라라면 False로 두어야 안이 보인다.
+    open_sides에 'N'/'S'/'E'/'W'를 넣으면 그 벽을 만들지 않는다(출입구·단면 뷰).
+    예: shell = lp.room("Shop", size=(10, 8), height=3.2, open_sides=('S',))"""
+    sx, sy = _pair(size, 0.75)
+    sx, sy = max(float(sx), 0.5), max(float(sy), 0.5)
+    h = max(float(height), 0.5)
+    t = max(float(thickness), 0.02)
+    skip = {str(s).strip().upper()[:1] for s in (open_sides or ())}
+    parts = [box(f"{name}_floor", size=(sx + t * 2, sy + t * 2, t),
+                 location=(0.0, 0.0, -t / 2))]
+    walls = {
+        'N': ((sx + t * 2, t, h), (0.0, (sy + t) / 2, h / 2)),
+        'S': ((sx + t * 2, t, h), (0.0, -(sy + t) / 2, h / 2)),
+        'E': ((t, sy, h), ((sx + t) / 2, 0.0, h / 2)),
+        'W': ((t, sy, h), (-(sx + t) / 2, 0.0, h / 2)),
+    }
+    for side, (wsize, wloc) in walls.items():
+        if side in skip:
+            continue
+        parts.append(box(f"{name}_wall{side}", size=wsize, location=wloc))
+    if ceiling:
+        parts.append(box(f"{name}_ceil", size=(sx + t * 2, sy + t * 2, t),
+                         location=(0.0, 0.0, h + t / 2)))
+    return join(parts, name=name, mode='fast')
+
+
+def fence_run(points, height=1.2, name="Fence", closed=False, post_size=0.12,
+              post_spacing=2.0, rails=2, rail_height=0.08, rail_thickness=0.05,
+              pickets=0, picket_width=0.10, picket_gap=0.08) -> bpy.types.Object:
+    """폴리라인을 따라 속이 비치는 울타리를 세운다. 합쳐진 오브젝트를 반환.
+
+    **울타리·난간·철조망에는 wall_run이 아니라 이 함수를 써라.** wall_run은 속이 꽉 찬
+    벽면을 만들기 때문에 울타리에 쓰면 판때기로 보인다. 울타리는 기둥 사이로 배경이
+    비쳐야 울타리로 읽힌다.
+
+    points는 [(x,y), ...] 꺾은선(m), height는 기둥 높이(m), 바닥은 항상 z=0이다.
+    closed=True면 마지막 점과 첫 점을 이어 둘레를 닫는다.
+    post_spacing 간격마다 한 변 post_size인 기둥을 세우고, rails개의 가로대를 높이에
+    나눠 건다(rails=0이면 기둥만 — 철조망 기둥줄). pickets>0이면 기둥 사이에
+    picket_width 폭의 세로 살대를 picket_gap 간격으로 채운다(말뚝 울타리·난간).
+    예: lp.fence_run([(-12,-12), (12,-12), (12,12), (-12,12)], height=1.4, closed=True,
+                     rails=2, pickets=1)"""
+    pts = _polyline(points)
+    if len(pts) < 2:
+        raise ValueError("fence_run은 서로 다른 점이 2개 이상 필요하다")
+    if closed and len(pts) >= 3:
+        pts = pts + [pts[0]]
+    h = max(float(height), 0.1)
+    post = max(float(post_size), 0.02)
+    spacing = max(float(post_spacing), post * 2)
+    parts = []
+    post_at = []
+
+    for a, b in zip(pts, pts[1:]):
+        d = b - a
+        length = d.length
+        if length < 1e-6:
+            continue
+        angle = math.atan2(d.y, d.x)
+        # 기둥: 구간을 spacing에 가장 가까운 정수 등분으로 나눠 간격이 튀지 않게 한다
+        steps = max(1, int(round(length / spacing)))
+        for i in range(steps + 1):
+            p = a + d * (i / steps)
+            key = (round(p.x, 4), round(p.y, 4))
+            if key in post_at:
+                continue  # 꺾이는 지점에서 기둥이 두 번 서지 않도록
+            post_at.append(key)
+            parts.append(box(f"{name}_post", size=(post, post, h),
+                             location=(p.x, p.y, h / 2)))
+        mid = (a + b) / 2
+        # 가로대: 높이를 균등 분할하되 맨 위는 기둥 머리 살짝 아래
+        for r in range(max(0, int(rails))):
+            z = h * (0.85 - 0.5 * r / max(1, int(rails)))
+            parts.append(box(f"{name}_rail", size=(length, float(rail_thickness),
+                                                   float(rail_height)),
+                             location=(mid.x, mid.y, z), rotation=(0.0, 0.0, angle)))
+        # 세로 살대: 폭+간격 주기로 구간을 채운다
+        if pickets and int(pickets) > 0:
+            pitch = max(float(picket_width) + float(picket_gap), 0.02)
+            count = max(1, int(length / pitch))
+            for i in range(count):
+                t = (i + 0.5) / count
+                p = a + d * t
+                parts.append(box(f"{name}_picket",
+                                 size=(float(picket_width), float(rail_thickness) * 0.8,
+                                       h * 0.92),
+                                 location=(p.x, p.y, h * 0.46),
+                                 rotation=(0.0, 0.0, angle)))
+    if not parts:
+        raise ValueError("fence_run에 유효한 세그먼트가 없다")
+    return join(parts, name=name, mode='fast')
+
+
 def path_strip(points, width=2.0, thickness=0.05, name="Path") -> bpy.types.Object:
     """폴리라인을 따라 일정 폭의 얇은 길 판을 만든다. 생성된 오브젝트를 반환.
 

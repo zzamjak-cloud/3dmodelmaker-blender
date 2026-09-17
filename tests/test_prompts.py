@@ -102,7 +102,7 @@ class TestScenePromptBuilders(unittest.TestCase):
     def test_plan_prompt_notes_sceneview_and_reference(self):
         p = prompts.build_scene_plan_prompt("고대 성", "L", 80000, 12,
                                             ref_image="ref.png", sceneview="sceneview.png")
-        self.assertIn("80m", p)
+        self.assertIn("100m", p)   # L = 대규모(도시·성채)
         self.assertIn("sceneview.png", p)
         self.assertIn("탑다운", p)
         self.assertIn("ref.png", p)

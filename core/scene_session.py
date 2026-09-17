@@ -49,8 +49,15 @@ class SceneSession(GenerationSession):
         super().__init__(**kwargs)
         # 실행 중 환경설정·항목이 바뀌어도 이 세션의 기준은 시작 시점에 고정한다
         self.scene_size = str(scene_size or 'M').strip().upper()
-        self.tri_budget = int(getattr(self.prefs, "scene_tri_budget", 80000))
-        self.max_assets = int(getattr(self.prefs, "scene_max_assets", 12))
+        # 0이면 씬 전체 상한을 걸지 않는다. 스타일의 트라이 상한은 모델 1개 기준이라
+        # 에셋이 여러 종 들어가는 배경에 그대로 씌우면 밀도를 만들 수 없다.
+        self.tri_budget = max(0, int(getattr(self.prefs, "scene_tri_budget", 0) or 0))
+        # 0이면 규모별 자동값 (실내 10 / 구역 16 / 대규모 24)
+        self.max_assets = (int(getattr(self.prefs, "scene_max_assets", 0) or 0)
+                           or scene_plan.size_profile(self.scene_size)["max_assets"])
+        # 스타일이 요구하는 밀도에 맞춰 에셋 1개의 트라이 상한을 키운다
+        self.style_scale = styles.tri_scale(self.style)
+        self.interior = scene_plan.is_interior(self.scene_size)
         self.timeout = scene_kit.scaled_timeout(
             getattr(self.prefs, "timeout", 300),
             getattr(self.prefs, "scene_timeout_scale", 2.0))
@@ -133,11 +140,14 @@ class SceneSession(GenerationSession):
         self.stage = 'PLAN'
         prompt = prompts.build_scene_plan_prompt(
             self.request, self.scene_size, self.tri_budget, self.max_assets,
-            ref_image=self._ref_name(), sceneview=self._sv_name())
+            ref_image=self._ref_name(), sceneview=self._sv_name(),
+            style_scale=self.style_scale)
         images = [p for p in (self.ref_image, self.sceneview) if p] or None
+        budget_text = f"예산 {self.tri_budget} tris" if self.tri_budget else "예산 상한 없음"
         self._set_status(f"씬 플랜 설계 중 — {self._model_label()} 호출중...",
                          f"배경 세션 시작: {self.request} (규모 {self.scene_size}, "
-                         f"예산 {self.tri_budget} tris)", phase='PLAN')
+                         f"{budget_text}, 배치 총량 기준 "
+                         f"{scene_plan.target_instances(self.scene_size)}개)", phase='PLAN')
         self._dispatch(prompt, images=images)
 
     def _resume_fallback_dispatch(self):
@@ -201,7 +211,8 @@ class SceneSession(GenerationSession):
         specs = []
         for asset in self.plan["assets"]:
             prompt = prompts.build_scene_asset_prompt(
-                asset, palette, scene_plan.asset_tri_limit(asset.get("size_class")))
+                asset, palette,
+                scene_plan.asset_tri_limit(asset.get("size_class"), self.style_scale))
             # 자식 에셋은 부모 씬의 스타일을 그대로 물려받는다 — 물려주지 않으면
             # 씬과 그 안의 프랍이 서로 다른 스타일로 나온다
             child = jobs.add_child_job(props, self.uid, prompt, style=self.style)
@@ -403,7 +414,7 @@ class SceneSession(GenerationSession):
         self._initial_dispatch_started = False  # 새 세션이므로 모델 폴백을 다시 허용
         prompt = prompts.build_scene_place_prompt(
             self.place_plan, self.kit_manifest, self.tri_budget,
-            sceneview=self._sv_name())
+            sceneview=self._sv_name(), scene_size=self.scene_size)
         images = [self.sceneview] if self.sceneview else None
         self._set_status(f"배치 코드 생성 중 — {self._model_label()} 호출중...",
                          "배치 턴 시작 (새 세션)", phase='PLACE')
@@ -445,7 +456,7 @@ class SceneSession(GenerationSession):
             self._finish("실패: 배치된 오브젝트 없음", ok=False)
             return
         self.scene_tris = collection_tri_count(coll)
-        if self.scene_tris > self.tri_budget:
+        if self.tri_budget and self.scene_tris > self.tri_budget:
             if not self.budget_retried:
                 self.budget_retried = True
                 self._set_status("트라이 예산 초과 — 밀도 축소 재요청...",
@@ -481,7 +492,8 @@ class SceneSession(GenerationSession):
         self.scene_tris = collection_tri_count(coll)
         self._hide_kit()
         self._apply_lane()
-        over = " (예산 초과)" if self.scene_tris > self.tri_budget else ""
+        over = (" (예산 초과)"
+                if self.tri_budget and self.scene_tris > self.tri_budget else "")
         self._final_note = (f"{self.scene_tris} tris{over}, 에셋 {len(self.kit_manifest)}종, "
                             f"인스턴스 {instanced}개")
         self._finish_placed()  # 배경은 팔레트 고정 — 개별 매핑 분기로 가지 않는다

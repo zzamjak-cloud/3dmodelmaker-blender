@@ -32,16 +32,30 @@ def _body(request: str, scene_size: str = "M", has_ref: bool = False,
     from . import scene_plan
     size = str(scene_size or "M").strip().upper()
     meters = scene_plan.SCENE_SIZE_M.get(size, scene_plan.SCENE_SIZE_M["M"])
-    base = (
-        "대상: %s\n"
-        "규모: 한 변 약 %dm의 정사각형 부지.\n"
-        "구성: 좌우 2분할 — 좌 절반은 아이소메트릭 3/4 조감도(공간 전체의 분위기), "
-        "우 절반은 탑다운 레이아웃 맵(구역 경계와 동선을 단순 도형으로 그리고 구역 이름을 라벨로 표기).\n"
-        % (request, int(meters))
-    )
+    interior = scene_plan.is_interior(size)
+    if interior:
+        # 실내는 조감도가 의미 없다 — 천장을 걷어낸 단면 뷰라야 안이 보인다
+        base = (
+            "대상: %s (건물 내부)\n"
+            "규모: 한 변 약 %dm의 실내 공간.\n"
+            "구성: 좌우 2분할 — 좌 절반은 천장을 걷어낸 아이소메트릭 컷어웨이 실내 뷰"
+            "(바닥·벽·가구가 다 보이게), 우 절반은 탑다운 평면도"
+            "(벽·출입구·가구 배치를 단순 도형으로 그리고 영역 이름을 라벨로 표기).\n"
+            % (request, int(meters))
+        )
+    else:
+        base = (
+            "대상: %s\n"
+            "규모: 한 변 약 %dm의 정사각형 부지.\n"
+            "구성: 좌우 2분할 — 좌 절반은 아이소메트릭 3/4 조감도(공간 전체의 분위기), "
+            "우 절반은 탑다운 레이아웃 맵(구역 경계와 동선을 단순 도형으로 그리고 구역 이름을 라벨로 표기).\n"
+            % (request, int(meters))
+        )
     base += (style_note or
              "스타일: 로우폴리 캐주얼 게임 배경, 플랫 셰이딩, 단순한 색 팔레트, 흰 배경.\n")
-    base += "랜드마크 1~2개를 크게 세우고 중앙에 빈 공간을 남겨라.\n"
+    base += ("가구·집기를 벽면과 구석까지 채워 빈 바닥이 남지 않게 하라.\n" if interior else
+             "랜드마크 %d개를 크게 세우고, 공간을 채우되 중앙 한 곳만 의도적으로 비워라.\n"
+             % scene_plan.size_profile(size)["landmarks"])
     if has_ref:
         base += "첨부한 참조 이미지와 동일한 분위기·색·특징을 유지하라.\n"
     return base

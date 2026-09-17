@@ -214,7 +214,7 @@ except KeyError:
 lp.set_kit_collection(None)
 
 # --- SCENE_API 노출 계약 ---
-check("SCENE_API 9개 함수", len(lp.SCENE_API) == 9)
+check("SCENE_API 11개 함수", len(lp.SCENE_API) == 11)   # + room, fence_run
 check("SCENE_API 전부 접근 가능", all(callable(getattr(lp, n)) for n in lp.SCENE_API))
 check("씬 헬퍼는 __all__(오브젝트 모드)에 미노출",
       not any(n in lp.__all__ for n in lp.SCENE_API))

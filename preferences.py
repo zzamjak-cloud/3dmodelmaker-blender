@@ -127,15 +127,18 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         update=_persist_cb,
     )
     scene_tri_budget: IntProperty(
-        name="배경 씬 트라이 예산",
-        description="배경 공간 하나가 쓸 수 있는 전체 삼각형 수 상한 — 플랜의 에셋 개수·밀도를 여기에 맞춰 줄인다",
-        default=80000, min=10000, max=500000,
+        name="배경 씬 트라이 상한",
+        description=("배경 공간 하나가 쓸 수 있는 전체 삼각형 수. **0이면 상한 없음(기본)** — "
+                     "스타일의 트라이 상한은 모델 1개 기준이라 에셋이 여러 종 들어가는 배경에 "
+                     "그대로 씌우면 밀도를 만들 수 없다. 특정 기기 한도에 맞춰야 할 때만 값을 넣는다"),
+        default=0, min=0, max=2000000,
         update=_persist_cb,
     )
     scene_max_assets: IntProperty(
         name="배경 에셋 종류 상한",
-        description="배경 플랜이 요청할 수 있는 고유 에셋 종류 수 — 많을수록 키트 생성 시간이 길어진다",
-        default=12, min=4, max=24,
+        description=("배경 플랜이 요청할 수 있는 고유 에셋 종류 수. **0이면 씬 규모에 따라 자동** "
+                     "(실내 10 / 구역 16 / 대규모 24). 많을수록 키트 생성 시간이 길어진다"),
+        default=0, min=0, max=40,
         update=_persist_cb,
     )
     scene_timeout_scale: FloatProperty(
@@ -199,8 +202,8 @@ class _Defaults:
     openrouter_api_key = ""
     image_model = imagegen.DEFAULT_MODEL
     image_quality = 'high'
-    scene_tri_budget = 80000
-    scene_max_assets = 12
+    scene_tri_budget = 0
+    scene_max_assets = 0
     scene_timeout_scale = 2.0
 
 

@@ -7,8 +7,9 @@ _PROMPT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 
 # 배경 모드 프롬프트에만 노출하는 씬 헬퍼 — lowpoly.SCENE_API를 읽지 못하는 환경
 # (bpy 없는 유닛 테스트)에서도 프롬프트 형태를 검증할 수 있도록 이름 목록을 복제해 둔다.
-_SCENE_API_FALLBACK = ["terrain", "instance", "place_grid", "place_along", "place_scatter",
-                       "wall_run", "path_strip", "ground_snap", "kit"]
+_SCENE_API_FALLBACK = ["terrain", "room", "instance", "place_grid", "place_along",
+                       "place_scatter", "wall_run", "fence_run", "path_strip",
+                       "ground_snap", "kit"]
 # 배치 턴에서도 필요한 최소 모델링 헬퍼 (단순 구조물과 배색용)
 _SCENE_BASE_API = ["set_color", "box", "cylinder", "cone", "plane", "join", "array"]
 # 복셀 스타일에만 노출하는 격자 헬퍼 (bpy 없는 유닛 테스트용 복제 목록)
@@ -164,8 +165,30 @@ def build_variation_prompt(original_request: str, final_code: str, count: int) -
 
 # --- 배경(SCENE) 모드 프롬프트 -------------------------------------------------
 
-_SIZE_METERS = {"S": 20, "M": 40, "L": 80}
-_SIZE_CLASS_TRI_TEXT = "L 6000 / M 2500 / S 800"
+def _scene_plan():
+    """scene_plan 모듈 — prompts.py가 패키지 없이 로드되는 경로(유닛 테스트) 대응."""
+    try:
+        from . import scene_plan
+        return scene_plan
+    except ImportError:
+        import importlib.util
+        import sys
+        cached = sys.modules.get("_lp3d_scene_plan")
+        if cached is not None:
+            return cached
+        spec = importlib.util.spec_from_file_location(
+            "_lp3d_scene_plan",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_plan.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["_lp3d_scene_plan"] = module
+        spec.loader.exec_module(module)
+        return module
+
+
+def _tri_class_text(style_scale: float) -> str:
+    sp = _scene_plan()
+    return " / ".join("%s %d" % (cls, sp.asset_tri_limit(cls, style_scale))
+                      for cls in ("L", "M", "S"))
 
 
 def _sceneview_note(sceneview: str) -> str:
@@ -177,18 +200,47 @@ def _sceneview_note(sceneview: str) -> str:
 
 
 def build_scene_plan_prompt(request: str, scene_size: str, tri_budget: int, max_assets: int,
-                            ref_image: str = None, sceneview: str = None) -> str:
-    """플랜 턴 유저 프롬프트 — 코드가 아니라 플랜 JSON을 요구한다."""
+                            ref_image: str = None, sceneview: str = None,
+                            style_scale: float = 1.0) -> str:
+    """플랜 턴 유저 프롬프트 — 코드가 아니라 플랜 JSON을 요구한다.
+
+    tri_budget이 0 이하면 씬 전체 상한을 걸지 않는다. 스타일의 트라이 상한은 모델
+    1개 기준이라 여러 에셋이 들어가는 배경에 그대로 씌우면 밀도를 만들 수 없다."""
+    sp = _scene_plan()
     size = str(scene_size or "M").strip().upper()
-    meters = _SIZE_METERS.get(size, _SIZE_METERS["M"])
+    if size not in sp.SCENE_SIZE_M:
+        size = "M"
+    profile = sp.size_profile(size)
+    meters = sp.SCENE_SIZE_M[size]
+    target = sp.target_instances(size)
+    interior = profile["interior"]
+
+    place = (f"씬 규모: {size} — {profile['label']}. "
+             + (f"한 변 약 {int(meters)}m의 실내 공간(방·홀·상점 내부).\n"
+                "**지형(terrain)을 만들지 마라.** 바닥·벽·천장은 `lp.room` 하나로 만든다. "
+                "`terrain.relief`는 실내에서 무시되므로 0으로 두어라.\n"
+                "구역(zones)은 옥외 구획이 아니라 **실내 영역**이다 "
+                "(계산대 주변 / 진열 구역 / 통로 / 창가 자리).\n"
+                if interior else
+                f"한 변 약 {int(meters)}m의 옥외 부지.\n"))
+
+    budget_text = (f"씬 전체 트라이 예산: {tri_budget} — Σ(count × size_class 상한) + 지형 여유 "
+                   f"{sp.TERRAIN_RESERVE_TRI} 이 예산을 넘지 않게 개수를 정하라.\n"
+                   if tri_budget and tri_budget > 0 else
+                   "씬 전체 트라이 예산: **상한 없음**. 아래 트라이 상한은 에셋 **1개** 기준이다 — "
+                   "씬 전체를 그 값으로 묶지 마라. 공간이 허전한 것이 무거운 것보다 나쁘다.\n")
+
     return (
         f"다음 배경 공간(씬)을 설계하라: {request}\n\n"
-        f"씬 규모: {size} — 한 변 약 {meters}m의 정사각형 부지.\n"
-        f"씬 전체 트라이 예산: {tri_budget}\n"
-        f"에셋 종류 상한: {max_assets}종 — 종류를 늘리지 말고 같은 프랍을 count로 반복하라.\n"
-        f"에셋 1개당 트라이 상한: {_SIZE_CLASS_TRI_TEXT}\n"
-        "Σ(count × size_class 상한) + 지형 여유 2000 이 예산을 넘지 않게 개수를 정하라.\n\n"
-        "이번 턴은 **플랜 턴**이다. 코드를 쓰지 마라. 구역(zones)·지형(terrain)·"
+        + place
+        + f"에셋 종류 상한: {max_assets}종 — 종류를 늘리지 말고 같은 프랍을 count로 반복하라.\n"
+        + f"에셋 1개당 트라이 상한: {_tri_class_text(style_scale)}\n"
+        + budget_text
+        + f"**배치 총량 기준: 인스턴스 합계 {target}개 안팎** — `assets`의 count를 모두 더한 값이 "
+        f"이 수에 가깝게 나오도록 개수를 정하라. {int(meters)}m 공간을 이보다 적은 수로 채우면 "
+        "텅 비어 보인다. 한두 종을 수십 개씩 반복하는 것이 종류를 늘리는 것보다 낫다.\n"
+        + f"랜드마크: {profile['landmarks']}개 — 시선을 잡는 주 구조물에만 `landmark: true`.\n\n"
+        + "이번 턴은 **플랜 턴**이다. 코드를 쓰지 마라. 구역(zones)·지형(terrain)·"
         "에셋 목록(assets)·씬 팔레트를 설계해 시스템 지침의 플랜 JSON 스키마 그대로 출력하라.\n"
         "출력 형식: 첫 줄 `STATUS: PLAN` + json 코드 블록 정확히 1개 (python 블록 금지)."
     ) + (_ref_note(ref_image) if ref_image else "") \
@@ -226,13 +278,29 @@ def _kit_manifest_table(kit_manifest: list) -> str:
 
 
 def build_scene_place_prompt(plan: dict, kit_manifest: list, tri_budget: int,
-                             sceneview: str = None) -> str:
+                             sceneview: str = None, scene_size: str = None) -> str:
     """배치 턴 유저 프롬프트 — 플랜과 완성된 키트 명단을 주고 배치 코드를 요구한다."""
+    sp = _scene_plan()
     plan_text = json.dumps(plan or {}, ensure_ascii=False, indent=2)
     keys = ", ".join(str(item.get("key")) for item in (kit_manifest or []))
+    size = str(scene_size or (plan or {}).get("scene", {}).get("size") or "M").strip().upper()
+    if size not in sp.SCENE_SIZE_M:
+        size = "M"
+    interior = sp.is_interior(size)
+    target = sp.target_instances(size)
+    shell = ("`lp.room`으로 방 껍데기(바닥·벽) 1개" if interior
+             else "`lp.terrain`으로 지형 1개")
     return (
-        "에셋 키트가 준비됐다. 이번 턴은 **배치 턴**이다 — 아래 플랜대로 지형·구조물을 만들고 "
-        "키트를 배치하는 코드를 작성하라.\n\n"
+        "에셋 키트가 준비됐다. 이번 턴은 **배치 턴**이다 — 아래 플랜대로 "
+        + ("실내 공간과 구조물을 만들고 " if interior else "지형·구조물을 만들고 ")
+        + "키트를 배치하는 코드를 작성하라.\n\n"
+        + (f"**이 씬은 실내다.** 지형(`lp.terrain`)을 만들지 마라 — 기복 있는 땅 위에 가구를 놓으면 "
+           "실내로 읽히지 않는다. 바닥·벽은 `lp.room`으로 만들고, 천장은 위에서 안이 보이도록 "
+           "`ceiling=False`로 둔다. 사람이 드나드는 쪽 벽 하나는 `open_sides`로 열어 단면처럼 보여라. "
+           "`lp.ground_snap`은 실내에서 쓰지 마라 (바닥이 평평하므로 z=0에 그대로 놓으면 된다).\n\n"
+           if interior else "")
+        + f"**배치 총량 기준: 인스턴스 합계 {target}개 안팎.** 플랜의 count를 임의로 줄이지 마라 — "
+        "빈 공간 규칙은 '의도적으로 비운 구역 하나'를 뜻하지 전체를 성기게 깔라는 뜻이 아니다.\n\n"
         "## 플랜 (확정본)\n"
         f"```json\n{plan_text}\n```\n\n"
         "## 사용 가능한 키트 (이 key만 존재한다)\n"
@@ -242,19 +310,25 @@ def build_scene_place_prompt(plan: dict, kit_manifest: list, tri_budget: int,
         "명단에 없는 에셋은 존재하지 않는다 — 빠진 에셋은 없는 셈 치고 구성을 조정하고, "
         "키트에 없는 프랍을 새로 모델링하지 마라.\n\n"
         "## 작성 순서\n"
-        "1. `lp.terrain`으로 지형 1개를 만든다 (플랜의 relief 반영, 색은 팔레트에서).\n"
-        "2. `lp.wall_run` / `lp.path_strip` / 단순 `lp.box`로 담장·길·계단 같은 구조물을 만든다. "
-        "길은 씬 가장자리에서 시작해 랜드마크로 향하게 하라.\n"
+        f"1. {shell}를 만든다 (색은 팔레트에서).\n"
+        "2. 구조물을 만든다 — **울타리·난간·철조망은 반드시 `lp.fence_run`을 써라.** "
+        "`lp.wall_run`은 속이 꽉 찬 벽면이라 울타리에 쓰면 판때기로 보인다. "
+        "`lp.wall_run`은 성벽·건물 외벽·막힌 담장에만 쓴다. "
+        "길·바닥 포장은 `lp.path_strip`, 계단·받침·표지판은 단순 `lp.box`다."
+        + ("" if interior else " 길은 씬 가장자리에서 시작해 랜드마크로 향하게 하라.") + "\n"
         "3. 구역별로 `lp.kit(\"오브젝트 이름\")`으로 원본을 가져와 `lp.place_grid` / `lp.place_along` / "
-        "`lp.place_scatter` / `lp.instance`로 배치한다. 회전·스케일 지터로 변주하고 "
-        "빈 공간 40%는 남겨라.\n"
-        "4. 마지막에 `lp.ground_snap(모든 인스턴스 리스트, 지형)`을 **한 번** 호출한다.\n\n"
-        "`lp.set_color`는 이 턴에서 새로 만든 오브젝트(지형·벽·길·box)에만 쓴다. "
+        "`lp.place_scatter` / `lp.instance`로 배치한다. 회전·스케일 지터로 변주하라.\n"
+        + ("4. 실내이므로 `lp.ground_snap`은 호출하지 않는다 (바닥이 평평하다).\n\n"
+           if interior else
+           "4. 마지막에 `lp.ground_snap(모든 인스턴스 리스트, 지형)`을 **한 번** 호출한다.\n\n")
+        + "`lp.set_color`는 이 턴에서 새로 만든 오브젝트(지형·방·벽·울타리·길·box)에만 쓴다. "
         "인스턴스에 칠하면 공유 메시의 UV가 바뀌어 원본과 나머지 인스턴스까지 전부 같은 색이 된다 — "
         "키트 에셋의 색은 이미 정해져 있으니 건드리지 마라.\n\n"
-        f"씬 전체 트라이 예산: {tri_budget}. 초과가 예상되면 프랍 개수와 지형 셀 수를 먼저 줄여라 "
-        "(랜드마크는 마지막까지 지킨다).\n"
-        "출력 형식: 첫 줄 `STATUS: DONE` + python 코드 블록 정확히 1개, 200줄 이내."
+        + (f"씬 전체 트라이 예산: {tri_budget}. 초과가 예상되면 프랍 개수와 지형 셀 수를 먼저 줄여라 "
+           "(랜드마크는 마지막까지 지킨다).\n"
+           if tri_budget and tri_budget > 0 else
+           "씬 전체 트라이 예산에는 상한이 없다. 개수를 아끼지 말고 위의 배치 총량 기준을 채워라.\n")
+        + "출력 형식: 첫 줄 `STATUS: DONE` + python 코드 블록 정확히 1개, 200줄 이내."
     ) + (_sceneview_note(sceneview) if sceneview else "")
 
 

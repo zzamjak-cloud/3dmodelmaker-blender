@@ -214,8 +214,15 @@ class TestSceneviewPrompt(unittest.TestCase):
         self.assertNotIn("참조 이미지", p)
 
     def test_prompt_size_meters_follow_scene_size(self):
-        self.assertIn("80m", sceneview.build_prompt("고대 성", "L"))
-        self.assertIn("20m", sceneview.build_prompt("작은 마당", "S"))
+        self.assertIn("100m", sceneview.build_prompt("고대 성", "L"))
+        self.assertIn("12m", sceneview.build_prompt("상점 내부", "S"))
+
+    def test_interior_prompt_asks_for_cutaway_not_birdseye(self):
+        # 실내는 조감도가 의미 없다 — 천장을 걷어낸 단면이라야 안이 보인다
+        p = sceneview.build_prompt("상점 내부", "S")
+        self.assertIn("컷어웨이", p)
+        self.assertIn("평면도", p)
+        self.assertNotIn("정사각형 부지", p)
 
     def test_ref_note_when_has_ref(self):
         self.assertIn("참조 이미지", sceneview.build_prompt("포로 수용소", "M", has_ref=True))

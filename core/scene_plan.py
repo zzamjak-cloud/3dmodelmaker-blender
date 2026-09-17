@@ -6,12 +6,52 @@
 import copy
 import json
 
-# size_class별 에셋 1개의 트라이 상한
+# size_class별 에셋 1개의 트라이 상한 (로우폴리 기준 — 스타일 배수가 곱해진다)
 SIZE_CLASS_TRI = {"L": 6000, "M": 2500, "S": 800}
 # 씬 규모별 한 변 길이(m)
-SCENE_SIZE_M = {"S": 20.0, "M": 40.0, "L": 80.0}
+#
+# 예전에는 20/40/80이었고 규모가 바닥 크기만 바꿨다. 그래서 대형은 같은 밀도를
+# 16배 넓은 땅에 뿌려 텅 비어 보였다. 규모를 "무엇을 만드는가"로 다시 정의하고
+# (S=건물 내부 / M=구역 / L=도시·성채) 밀도 기준을 규모마다 따로 둔다.
+SCENE_SIZE_M = {"S": 12.0, "M": 40.0, "L": 100.0}
 # 지형·구조물이 쓸 트라이 여유분
 TERRAIN_RESERVE_TRI = 2000
+
+# 규모별 설계 기준.
+#   interior     — 지형(terrain)이 아니라 방 껍데기(room)로 만드는 실내인가
+#   max_assets   — 에셋 종류 상한 (자동값. 환경설정에서 0이 아니면 그 값이 이긴다)
+#   density      — 100㎡당 인스턴스 개수 기준. 플랜 턴에 이 수를 곱해 총량을 안내한다
+#   landmarks    — 시선을 잡는 주 구조물 개수
+SIZE_PROFILE = {
+    # 건물 내부: 바닥 면적은 작지만 가구·소품이 촘촘하다. 빈 바닥을 남길 이유가 없다
+    "S": {"interior": True, "max_assets": 10, "density": 26.0, "landmarks": 1,
+          "label": "실내 (건물 내부)"},
+    # 여러 건물과 주변 요소가 들어가는 구역
+    "M": {"interior": False, "max_assets": 16, "density": 7.0, "landmarks": 2,
+          "label": "구역 (건물 여러 채 + 주변)"},
+    # 대도시·대형 성채. 넓은 만큼 종류와 총량이 함께 커져야 허전하지 않다
+    "L": {"interior": False, "max_assets": 24, "density": 5.0, "landmarks": 3,
+          "label": "대규모 (도시·성채)"},
+}
+
+
+def size_profile(scene_size) -> dict:
+    """규모별 설계 기준. 모르는 값이면 M."""
+    return SIZE_PROFILE.get(_size_class(scene_size), SIZE_PROFILE["M"])
+
+
+def is_interior(scene_size) -> bool:
+    return bool(size_profile(scene_size)["interior"])
+
+
+def target_instances(scene_size) -> int:
+    """이 규모에서 배치할 인스턴스 총량의 기준값 (면적 x 밀도).
+
+    플랜 턴에 "몇 개를 깔아야 안 허전한가"를 수치로 알려주기 위한 값이다.
+    예전에는 이런 기준이 없어 규모와 무관하게 비슷한 개수가 나왔다."""
+    profile = size_profile(scene_size)
+    meters = SCENE_SIZE_M.get(_size_class(scene_size), SCENE_SIZE_M["M"])
+    return int(round(meters * meters / 100.0 * profile["density"]))
 
 _DEFAULT_SIZE_CLASS = "M"
 _DEFAULT_PALETTE = ["#7fa855", "#c2a06a", "#8fb8d8", "#e4dcc4", "#d9603f"]
@@ -63,9 +103,18 @@ def parse_plan(text: str) -> dict:
     return plan
 
 
-def asset_tri_limit(size_class) -> int:
-    """size_class(L/M/S)에 해당하는 에셋 1개의 트라이 상한."""
-    return SIZE_CLASS_TRI.get(_size_class(size_class), SIZE_CLASS_TRI[_DEFAULT_SIZE_CLASS])
+def asset_tri_limit(size_class, style_scale: float = 1.0) -> int:
+    """size_class(L/M/S)에 해당하는 에셋 1개의 트라이 상한.
+
+    style_scale은 아트 스타일의 밀도 배수다(로우폴리 1.0, 사실적 6.0). 스타일이
+    요구하는 형태를 만들려면 상한도 같이 커져야 한다 — 사실적 스타일에 로우폴리
+    상한을 씌우면 곡률 세그먼트를 못 써서 각진 결과가 나온다."""
+    base = SIZE_CLASS_TRI.get(_size_class(size_class), SIZE_CLASS_TRI[_DEFAULT_SIZE_CLASS])
+    try:
+        scale = max(float(style_scale), 0.1)
+    except (TypeError, ValueError):
+        scale = 1.0
+    return int(round(base * scale))
 
 
 def estimated_tris(plan: dict) -> int:

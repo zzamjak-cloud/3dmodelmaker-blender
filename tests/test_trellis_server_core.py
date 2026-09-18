@@ -94,6 +94,7 @@ class PlaneRemoverTests(unittest.TestCase):
     def test_flat_wide_shell_is_a_plane_but_thin_sword_is_not(self):
         pr = sc.PlaneRemover()
         self.assertTrue(pr.is_plane(_FakePart([-.5, -.5, -.43], [.5, .5, -.43]), 1.0))       # 바닥판
+        self.assertTrue(pr.is_plane(_FakePart([-.5, -.5, -.33], [.5, .5, -.31]), 1.0))       # 두께 2% 바닥판(실측)
         self.assertFalse(pr.is_plane(_FakePart([-.5, -.1, -.43], [.5, .1, .46]), 1.0))       # 몸체
         self.assertFalse(pr.is_plane(_FakePart([.4, -.01, -.2], [.42, .01, .5]), 1.0))       # 가느다란 검(좁아서 판 아님)
 
@@ -112,6 +113,25 @@ class PlaneRemoverTests(unittest.TestCase):
             calls.clear()
             sc._postprocess_mesh(M(), {})
             self.assertEqual(calls, ["plane", "floater", "degen"])
+
+
+class BackgroundKeyTests(unittest.TestCase):
+    def test_inner_white_survives_and_outer_white_is_cut(self):
+        # 몸통(어두움) 안에 흰 이빨, 바깥은 흰 배경 — 배경만 투명해져야 한다
+        a = np.full((40, 40, 3), 255, dtype=np.uint8)
+        a[10:30, 10:30] = (60, 90, 40)
+        a[18:22, 18:22] = 255                      # 실루엣 안쪽의 흰색
+        rgba = np.asarray(sc.rgb_to_rgba_white(Image.fromarray(a, "RGB")))
+        self.assertEqual(int(rgba[0, 0, 3]), 0)     # 배경
+        self.assertEqual(int(rgba[20, 20, 3]), 255)  # 이빨
+        self.assertEqual(int(rgba[12, 12, 3]), 255)  # 몸통
+
+    def test_background_notch_reaching_the_edge_is_cut(self):
+        a = np.full((40, 40, 3), 255, dtype=np.uint8)
+        a[10:30, 10:30] = (60, 90, 40)
+        a[10:30, 18:22] = 255                      # 가장자리까지 이어진 흰 틈
+        rgba = np.asarray(sc.rgb_to_rgba_white(Image.fromarray(a, "RGB")))
+        self.assertEqual(int(rgba[20, 20, 3]), 0)
 
 
 class ParamAndFrameTests(unittest.TestCase):

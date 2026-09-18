@@ -30,6 +30,7 @@ STATE_ICONS = {
     'PENDING': 'DOT',
     'RUNNING': 'PLAY',
     'DONE': 'CHECKMARK',
+    'SHAPED': 'MOD_REMESH',
     'MODELED': 'MESH_DATA',
     'FAILED': 'ERROR',
     'CANCELLED': 'X',
@@ -107,15 +108,17 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         ],
         default='PALETTE',
     )
-    # 리토폴로지와 언랩·매핑을 분리한다 — 사용자가 메시를 손본 뒤 [매핑 시작]을 누르는 시점에 매핑
-    texture_stage: EnumProperty(
-        name="매핑 시점",
-        description="개별 매핑을 언제 실행할지",
+    # 셰이프 → 리토폴로지 → 매핑을 나눠 사용자가 각 단계를 확인하고 손볼 수 있게 한다
+    stage_mode: EnumProperty(
+        name="단계 진행",
+        description="어느 단계에서 멈추고 사용자 확인을 기다릴지",
         items=[
-            ('MANUAL', "모델링 후 수동", "리토폴로지까지 끝내고 멈춘다. 메시를 수정한 뒤 [매핑 시작]으로 언랩·매핑"),
-            ('AUTO', "자동", "리토폴로지 직후 곧바로 언랩·매핑까지 진행 (기존 동작)"),
+            ('SHAPE', "셰이프에서 정지", "원본 셰이프만 만들고 멈춘다. 원본을 확인하고 [샤프 표시]로 와이어 기준선을 "
+                                   "그은 뒤 [리토폴로지 시작]"),
+            ('RETOPO', "리토폴로지에서 정지", "리토폴로지까지 하고 멈춘다. 메시를 수정한 뒤 [매핑 시작]"),
+            ('AUTO', "자동", "셰이프 → 리토폴로지 → 매핑까지 멈추지 않고 진행"),
         ],
-        default='MANUAL',
+        default='RETOPO',
     )
 
     # --- 실행 상태 ---
@@ -124,6 +127,7 @@ class LP3DJobItem(bpy.types.PropertyGroup):
             ('PENDING', "대기", "아직 실행되지 않음"),
             ('RUNNING', "실행 중", "AI 호출 또는 Blender 작업 진행 중"),
             ('DONE', "완료", "생성 성공"),
+            ('SHAPED', "셰이프 완료", "원본 셰이프까지 끝남 — 확인·마킹 후 [리토폴로지 시작]"),
             ('MODELED', "모델링 완료", "리토폴로지까지 끝남 — 메시를 수정한 뒤 [매핑 시작]"),
             ('FAILED', "실패", "생성 실패 — 원인은 상태·로그 참고"),
             ('CANCELLED', "취소됨", "사용자가 중단함"),

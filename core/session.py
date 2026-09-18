@@ -113,6 +113,40 @@ def start_job(scene_name, uid, variation_of=None, variation_count=3,
     return None
 
 
+def start_retopo_job(scene_name, uid):
+    """셰이프 단계에서 멈춘(SHAPED) 잡의 원본 오브젝트로 리토폴로지만 실행한다. 오류 메시지 또는 None.
+
+    사용자가 원본을 확인하고 엣지를 Mark Sharp 로 그어 둔 상태 그대로 시작한다 — 그 선을 따라 와이어가 흐른다."""
+    from ..lowpoly.retopo import SOURCE_KEY
+    if uid in _sessions:
+        return "이미 진행 중인 항목입니다"
+    scene = bpy.data.scenes.get(scene_name)
+    if not scene or not getattr(scene, "lp3d", None):
+        return "씬을 찾을 수 없습니다"
+    job = scene.lp3d.job_by_uid(uid)
+    if job is None:
+        return "항목을 찾을 수 없습니다"
+    coll = bpy.data.collections.get(job.collection_name)
+    if coll is None:
+        return f"결과 컬렉션을 찾을 수 없습니다: {job.collection_name or '(없음)'}"
+    source = next((o for o in coll.objects if o.type == 'MESH' and o.get(SOURCE_KEY)), None)
+    if source is None:
+        source = next((o for o in coll.objects if o.type == 'MESH'), None)
+    if source is None:
+        return "원본 셰이프 오브젝트를 찾을 수 없습니다"
+    try:
+        ctx = texture_stage.load_context(coll)
+    except ValueError as e:
+        return str(e)
+    ctx['source'] = source.name
+    scheduler.set_ai_limit(getattr(preferences.get_prefs(), "ai_concurrency", 3))
+    session = GenerationSession(scene_name, uid, ctx['request'],
+                                preferences.resolve_cli_path('CODEX') or "", lane=job.lane)
+    _sessions[uid] = session
+    session.start_retopo(coll, ctx)
+    return None
+
+
 def start_texture_job(scene_name, uid):
     """모델링이 끝난(MODELED) 잡의 컬렉션에 대해 언랩·매핑만 실행한다. 오류 메시지 또는 None.
 
@@ -249,9 +283,9 @@ class GenerationSession:
         if self.character_template == 'AUTO':
             self.character_template = 'QUADRUPED' if self.character_type == 'ANIMAL' else 'HUMANOID'
         self._cancel_requested = False
-        # 매핑 시점: MANUAL 이면 리토폴로지 뒤 MODELED 로 멈추고 [매핑 시작]을 기다린다
-        self.texture_stage = (str(getattr(job, 'texture_stage', 'MANUAL') or 'MANUAL')
-                              if job else 'MANUAL')
+        # 단계 진행: SHAPE 는 셰이프에서, RETOPO 는 리토폴로지에서 멈추고 사용자의 다음 버튼을 기다린다
+        self.stage_mode = (str(getattr(job, 'stage_mode', 'RETOPO') or 'RETOPO')
+                           if job else 'RETOPO')
         self.texture_only = False   # start_texture 로 시작한 매핑 전용 세션
         # 캐릭터는 실행 후 시트와 같은 6시점으로 렌더해 시트와 대조하는 턴을 돈다.
         # 첫 생성은 시트를 '보고' 만들지만 결과가 얼마나 다른지는 모른다 — 나란히
@@ -540,10 +574,57 @@ class GenerationSession:
                              f"셰이프 생성 실패: {error}")
             self._start_generation()
             return
+        if self.stage_mode == 'SHAPE':
+            self._set_status("셰이프 수신 — 원본 확인 대기중...", "셰이프 GLB 수신", phase='EXEC')
+            self._submit_blender(self._blender_shape_only)
+            return
         self._set_status("셰이프 수신 — 리토폴로지 대기중...", "셰이프 GLB 수신", phase='EXEC')
         self._submit_blender(self._blender_retopo)
 
-    def _blender_retopo(self):
+    def _blender_shape_only(self):
+        """셰이프 단계에서 멈춘다 — 원본을 씬에 올려 두고 사용자가 확인·마킹한 뒤 [리토폴로지 시작]을 누른다."""
+        from ..lowpoly import retopo, set_session
+        set_session(self.collection_name)
+        try:
+            coll = bpy.data.collections.get(self.collection_name)
+            if coll is None:
+                coll = bpy.data.collections.new(self.collection_name)
+                bpy.context.scene.collection.children.link(coll)
+            name = multiview._slug(self.request, 24) or "Character"
+            obj, _count = retopo.import_shape(self.shape_path, name + retopo.SOURCE_SUFFIX, coll)
+            retopo.remove_ground_slabs(obj)
+            retopo.flip_if_inverted(obj)
+            obj[retopo.SOURCE_KEY] = True
+            retopo.normalize(obj, float(getattr(self.prefs, "character_height", 1.8)))
+        except Exception as e:
+            _log.exception("셰이프 임포트 실패")
+            self._set_status("셰이프 임포트 실패 — 코드 모델링으로 진행", f"셰이프 임포트 실패: {e}")
+            self._start_generation()
+            return
+        self.last_code = ""
+        self.compare_turns_left = 0
+        job = self._job()
+        texture_stage.save_context(
+            coll, self.request, self.multiview or (job.multiview_path if job else ""),
+            self.style, self.system_mode, self.character_type, "")
+        self._apply_lane()
+        self._finish(f"셰이프 완료 — {obj.name} ({len(obj.data.polygons):,}면) · 확인 후 [리토폴로지 시작]",
+                     ok=True, state='SHAPED')
+        self._autosave()
+
+    def start_retopo(self, coll, ctx: dict):
+        """리토폴로지 전용 시작 — 컬렉션의 원본 오브젝트(사용자 마킹 포함)에서 리토폴로지를 돌린다."""
+        self.collection_name = coll.name
+        self.multiview = ctx['multiview']
+        self.style = ctx['style'] or self.style
+        self.system_mode = ctx['system_mode']
+        self.character_type = ctx['character_type']
+        self._begin()
+        self._set_status("리토폴로지 대기중...", "리토폴로지 시작 — 원본(마킹 포함)에서 진행", phase='EXEC')
+        self._submit_blender(lambda: self._blender_retopo(source_object=ctx['source']))
+
+    def _blender_retopo(self, source_object: str = ""):
+        """셰이프를 게임용 메시로 만든다. source_object 가 있으면 파일 대신 씬의 그 오브젝트에서 시작한다."""
         from ..lowpoly import retopo, set_session
         set_session(self.collection_name)
         try:
@@ -552,13 +633,16 @@ class GenerationSession:
                 coll = bpy.data.collections.new(self.collection_name)
                 bpy.context.scene.collection.children.link(coll)
             self._set_status("리토폴로지 중 (조각 제거·복셀 리메시·QuadriFlow)...", phase='EXEC')
-            # 이름은 프롬프트에서 — _slug는 ASCII만 남겨 한국어 요청이 전부 "Model"이 된다
-            info = retopo.process_glb(
-                self.shape_path, multiview._slug(self.request, 24) or "Character", coll,
+            name = multiview._slug(self.request, 24) or "Character"   # _slug는 ASCII만 남긴다
+            source = bpy.data.objects.get(source_object) if source_object else None
+            run = ((lambda **kw: retopo.process_object(source, name, coll, **kw)) if source is not None
+                   else (lambda **kw: retopo.process_glb(self.shape_path, name, coll, **kw)))
+            info = run(
                 height=float(getattr(self.prefs, "character_height", 1.8)),
                 target_faces=int(getattr(self.prefs, "shapegen_faces", 12000)),
                 method=str(getattr(self.prefs, "shapegen_method", 'QUADRIFLOW')),
                 adaptive=bool(getattr(self.prefs, "shapegen_adaptive", False)),
+                symmetry=bool(getattr(self.prefs, "shapegen_symmetry", True)),
                 template_id=self.character_template,
                 # 머리 영역은 곡률과 무관하게 촘촘하게 — 유형별 바운딩 박스 위쪽 비율
                 head_frac={'HUMANOID': 0.24, 'CREATURE': 0.28, 'ANIMAL': 0.0}.get(
@@ -924,7 +1008,7 @@ class GenerationSession:
             note = f", 은면 {removed}개 제거" if removed else ""
             self._final_note = f"{tris} tris{note}"
             if self.modeling_type == 'TEXTURE' and mesh_objs:
-                if self.texture_stage == 'MANUAL' and not self.texture_only:
+                if self.stage_mode in ('SHAPE', 'RETOPO') and not self.texture_only:
                     # 리토폴로지에서 멈춘다. 매핑에 필요한 것은 컬렉션에 남겨 두고, 사용자가
                     # 메시를 손본 뒤 [매핑 시작]을 누르면 start_texture_job 이 이어받는다.
                     job = self._job()

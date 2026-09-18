@@ -164,7 +164,7 @@ class LP3D_PT_main(bpy.types.Panel):
                 box.label(text='기준: 정면 -Y, 위쪽 +Z, 중립 자세', icon='INFO')
             layout.prop(job, "modeling_type", text="모델링 타입")
             if job.modeling_type == 'TEXTURE':
-                layout.prop(job, "texture_stage", text="매핑 시점")
+                layout.prop(job, "stage_mode", text="단계 진행")
             hint = layout.column(align=True)
             hint.scale_y = 0.85
             if job.ref_image_path.strip():
@@ -176,7 +176,7 @@ class LP3D_PT_main(bpy.types.Panel):
         else:
             layout.prop(job, "modeling_type", text="모델링 타입")
             if job.modeling_type == 'TEXTURE':
-                layout.prop(job, "texture_stage", text="매핑 시점")
+                layout.prop(job, "stage_mode", text="단계 진행")
 
     def _draw_multiview(self, layout, props, job):
         """AI가 만든 멀티뷰(3면도) 시트 — 패널에서 바로 확인하고 참조로 재사용할 수 있게 한다.
@@ -244,6 +244,10 @@ class LP3D_PT_main(bpy.types.Panel):
             box.label(text="자세한 원인은 [로그] 패널 참고", icon='TEXT')
         if job.state in ('FAILED', 'CANCELLED'):
             box.operator("lp3d.job_retry", icon='FILE_REFRESH')
+        if job.state == 'SHAPED':
+            box.label(text="원본 셰이프를 확인하고 리토폴로지를 시작하세요", icon='INFO')
+            box.label(text="Edit Mode에서 엣지를 Mark Sharp 하면 그 선을 따라 와이어가 흐릅니다", icon='EDGESEL')
+            box.operator("lp3d.job_retopo", icon='MOD_REMESH')
         if job.state == 'MODELED':
             box.label(text="메시를 수정한 뒤 매핑을 시작하세요", icon='INFO')
             box.operator("lp3d.job_texture", icon='TEXTURE')

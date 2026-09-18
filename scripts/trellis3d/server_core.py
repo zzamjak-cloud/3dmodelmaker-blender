@@ -74,12 +74,44 @@ def prepare_view(img: Image.Image) -> Image.Image:
     return canvas
 
 
+def background_mask(dist: "np.ndarray") -> "np.ndarray":
+    """가장자리에서 이어진 배경 픽셀만 True. 흰색 임계만 쓰면 이빨·손톱·눈처럼 실루엣 안쪽의 흰색까지 지워진다.
+
+    실측(2026-09-18): 고블린 원화의 흰 이빨·발톱이 배경과 같은 밝기라 전역 임계로는 구분되지 않는다.
+    배경은 언제나 캔버스 가장자리와 이어져 있으므로, 가장자리에서 흘려 넣어(flood fill) 닿는 곳만 배경으로 본다."""
+    from collections import deque
+    height, width = dist.shape
+    whiteish = dist <= WHITE_DIST
+    seen = np.zeros_like(whiteish)
+    queue = deque()
+    for x in range(width):
+        for y in (0, height - 1):
+            if whiteish[y, x] and not seen[y, x]:
+                seen[y, x] = True
+                queue.append((y, x))
+    for y in range(height):
+        for x in (0, width - 1):
+            if whiteish[y, x] and not seen[y, x]:
+                seen[y, x] = True
+                queue.append((y, x))
+    while queue:
+        y, x = queue.popleft()
+        for ny, nx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+            if 0 <= ny < height and 0 <= nx < width and whiteish[ny, nx] and not seen[ny, nx]:
+                seen[ny, nx] = True
+                queue.append((ny, nx))
+    return seen
+
+
 def rgb_to_rgba_white(img: Image.Image, soft: int = 24) -> Image.Image:
-    """흰 배경 RGB → 알파. 공식 파이프라인의 preprocess_image는 알파가 있으면 배경제거 모델(CC BY-NC)을
-    건너뛰고 알파 bbox 크롭·알파 곱(검정 합성)을 하므로, 알파를 우리가 만들어 넘기는 것이 라이선스·품질 모두에 맞다."""
+    """흰 배경 RGB → 알파. 배경과 이어진 흰색만 투명으로 만든다(실루엣 안쪽 흰색은 보존).
+
+    공식 파이프라인의 preprocess_image는 알파가 있으면 배경제거 모델(CC BY-NC)을 건너뛰고 알파 bbox 크롭·
+    알파 곱을 하므로, 알파를 우리가 만들어 넘기는 것이 라이선스·품질 모두에 맞다."""
     arr = np.asarray(img.convert("RGB")).astype(np.int16)
     dist = 255 - arr.min(axis=2)                                   # 흰색과의 거리
     alpha = np.clip((dist - WHITE_DIST) * (255.0 / max(soft, 1)), 0, 255).astype(np.uint8)
+    alpha[~background_mask(dist)] = 255                            # 배경과 떨어진 흰색(이빨·발톱·눈)은 남긴다
     return Image.fromarray(np.dstack([arr.astype(np.uint8), alpha]), "RGBA")
 
 
@@ -135,9 +167,9 @@ class PlaneRemover:
     """두께가 거의 0인 대형 평면 셸(바닥판) 제거 — 시트의 격자선·그림자를 모델이 바닥으로 복원한 것.
 
     부품 보존(preserve_parts)과 무관하게 항상 적용한다: 두께 0의 판은 어떤 부품도 아니다.
-    (실측: 몸체 시트에서 1.0×1.0×0.0 셸 18만 면이 몸체와 함께 나왔다)"""
+    (실측: 1.0×1.0×0.0 바닥판 18만 면, 그리고 1.0×1.0×0.021 바닥판 1.6만 면 — 두께 1% 기준으로는 후자가 통과했다)"""
 
-    def __init__(self, thickness_ratio: float = 0.01, footprint_ratio: float = 0.25):
+    def __init__(self, thickness_ratio: float = 0.05, footprint_ratio: float = 0.25):
         self.thickness_ratio = thickness_ratio
         self.footprint_ratio = footprint_ratio
 

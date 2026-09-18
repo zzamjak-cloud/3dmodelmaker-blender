@@ -117,6 +117,25 @@ class LP3D_OT_job_retry(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LP3D_OT_job_retopo(bpy.types.Operator):
+    bl_idname = "lp3d.job_retopo"
+    bl_label = "리토폴로지 시작"
+    bl_description = ("셰이프 단계에서 멈춘 원본(마킹했다면 마킹 그대로)에서 리토폴로지를 실행한다. "
+                      "실패해도 원본은 남고 다시 누를 수 있다")
+
+    @classmethod
+    def poll(cls, context):
+        job = _standalone_job(context)
+        return job is not None and job.state == 'SHAPED' and not session.is_active(job.uid)
+
+    def execute(self, context):
+        error = session.start_retopo_job(context.scene.name, context.scene.lp3d.active_job().uid)
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
 class LP3D_OT_job_texture(bpy.types.Operator):
     bl_idname = "lp3d.job_texture"
     bl_label = "매핑 시작"
@@ -522,7 +541,7 @@ _CLASSES = (
     LP3D_OT_load_last_multiview,
     LP3D_OT_paste_ref_image, LP3D_OT_clear_ref_image,
     LP3D_OT_job_add, LP3D_OT_job_remove, LP3D_OT_job_duplicate, LP3D_OT_job_move,
-    LP3D_OT_job_retry, LP3D_OT_job_texture, LP3D_OT_job_cancel,
+    LP3D_OT_job_retry, LP3D_OT_job_retopo, LP3D_OT_job_texture, LP3D_OT_job_cancel,
     LP3D_OT_queue_start, LP3D_OT_queue_stop,
     LP3D_OT_variation,
     LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,

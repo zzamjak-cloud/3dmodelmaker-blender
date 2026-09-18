@@ -137,6 +137,13 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=12000, min=2000, max=100000,
         update=_persist_cb,
     )
+    shapegen_symmetry: BoolProperty(
+        name="좌우 대칭 와이어",
+        description="QuadriFlow 를 X축 대칭으로 돌려 좌우 와이어 흐름을 맞춘다. 캐릭터에 권장 — "
+                    "비대칭 소품이나 한쪽에만 장비가 붙은 모델에서는 끄는 편이 낫다",
+        default=True,
+        update=_persist_cb,
+    )
     shapegen_method: EnumProperty(
         name="리토폴로지 방식",
         description="이미지→3D 셰이프를 게임용 메시로 줄이는 방법",
@@ -233,6 +240,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
             char_box.prop(self, "shapegen_token")
             char_box.prop(self, "shapegen_faces")
             char_box.prop(self, "shapegen_method")
+            char_box.prop(self, "shapegen_symmetry")
             char_box.prop(self, "character_height")
         char_box.prop(self, "character_compare_turns")
         img_box = self.layout.box()
@@ -281,6 +289,7 @@ class _Defaults:
     shapegen_token = ""
     shapegen_faces = 12000
     shapegen_method = 'QUADRIFLOW'
+    shapegen_symmetry = True
     character_height = 1.8
     scene_tri_budget = 0
     scene_max_assets = 0

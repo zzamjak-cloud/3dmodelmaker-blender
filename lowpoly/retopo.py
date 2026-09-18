@@ -159,6 +159,37 @@ def keep_largest_island(obj, min_ratio: float = KEEP_ISLAND_RATIO) -> int:
     return removed
 
 
+SOLIDIFY_VOXELS = 3.0     # 복셀 몇 개 두께로 껍질을 채울지
+SOLIDIFY_MIN_BORDER = 0.01   # 경계 엣지가 이 비율을 넘으면 '찢어진 껍질'로 보고 두께를 준다
+
+
+def seal_shell(obj, voxel: float) -> int:
+    """찢어진 껍질에 안쪽으로 두께를 줘 복셀 리메시가 속이 찬 솔리드를 만들게 한다. 준 두께(0이면 안 함).
+
+    실측(2026-09-19): 셰이프 서버 메시는 경계 엣지가 1만 개가 넘는 열린 껍질이다. 이런 입력에 복셀 리메시를
+    돌리면 OpenVDB 가 부호 없는 거리장으로 처리해 **종이처럼 얇은 껍질**(부피/면적 0.0011)을 만들고,
+    그 얇은 벽이 군데군데 뚫려 결과가 그물처럼 된다. 두께를 주면 닫힌 부피가 되어(0.019) 정상 솔리드가 나온다.
+    겉면은 그대로 두고 안쪽으로만 밀어 넣으므로 실루엣은 변하지 않는다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    border = sum(1 for e in bm.edges if len(e.link_faces) != 2)
+    total = max(len(bm.edges), 1)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)   # 셸마다 바깥을 향하게 — 두께가 안쪽으로 가도록
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    if border < total * SOLIDIFY_MIN_BORDER:
+        return 0.0
+    thickness = max(float(voxel), 1e-6) * SOLIDIFY_VOXELS
+    mod = obj.modifiers.new("LP3D_Seal", 'SOLIDIFY')
+    mod.thickness = thickness
+    mod.offset = 1.0            # 안쪽으로만
+    mod.use_even_offset = False
+    with _override(obj):
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+    return thickness
+
+
 def voxel_remesh(obj, voxel_size: float) -> None:
     """복셀 리메시 — 겹친 셸·자기교차를 하나의 닫힌 표면으로 녹인다."""
     obj.data.remesh_voxel_size = max(float(voxel_size), 0.002)
@@ -168,10 +199,50 @@ def voxel_remesh(obj, voxel_size: float) -> None:
         bpy.ops.object.voxel_remesh()
 
 
-QF_INPUT_TARGET_RATIO = 0.6   # 복셀 리메시가 노릴 면수 = 목표 x 이 비율. 실측(2026-09-18): 입력이 목표의 1.7배(20,720/12,000)면
-                              # QuadriFlow 결과가 구멍투성이가 되고, 0.55배(6,630)면 깨끗하게 닫힌다.
+QF_INPUT_TARGET_RATIO = 2.5   # 복셀 리메시가 노릴 면수 = 목표 x 이 비율(=90분할 유지). 실측(2026-09-19): 이 값을 낮춰
+                              # 복셀을 성기게 하면 셸이 조각난 셰이프(셸 9개)에서 얇은 막·구멍이 생긴다.
+                              # QuadriFlow 가 남기는 구멍은 close_holes 로 메우고, 정말 실패할 때만 사다리로 내려간다.
 QF_MAX_INPUT_RATIO = 6.0   # 입력 면수 / 목표 면수 상한 — 실측(2026-09-18): 28배에서 QuadriFlow 가 메모리 폭주로 SIGKILL,
                            # 6~12배는 'Remeshing failed', 3배 이하 성공. 가드가 없으면 Blender 프로세스 자체가 죽는다.
+
+
+def sharp_edge_points(obj, samples_per_edge: int = 4) -> list:
+    """샤프로 표시된 엣지를 따라 찍은 월드 좌표 표본. 표시가 없으면 빈 목록."""
+    matrix = obj.matrix_world
+    points = []
+    for edge in obj.data.edges:
+        if not edge.use_edge_sharp:
+            continue
+        a = matrix @ obj.data.vertices[edge.vertices[0]].co
+        b = matrix @ obj.data.vertices[edge.vertices[1]].co
+        for i in range(samples_per_edge + 1):
+            points.append(a.lerp(b, i / samples_per_edge))
+    return points
+
+
+def transfer_sharp_edges(obj, points: list, radius: float) -> int:
+    """표본 점 근처의 엣지에 샤프 표시를 옮긴다. 표시한 엣지 수를 돌려준다.
+
+    복셀 리메시는 원본의 엣지를 모두 지우므로, 사용자가 원본에 그어 둔 기준선은 이렇게 다시 심어야
+    QuadriFlow 의 use_preserve_sharp 가 그 선을 따라 와이어를 흘려 준다."""
+    if not points:
+        return 0
+    from mathutils.kdtree import KDTree
+    tree = KDTree(len(points))
+    for index, point in enumerate(points):
+        tree.insert(point, index)
+    tree.balance()
+    matrix = obj.matrix_world
+    marked = 0
+    for edge in obj.data.edges:
+        a = matrix @ obj.data.vertices[edge.vertices[0]].co
+        b = matrix @ obj.data.vertices[edge.vertices[1]].co
+        _co, _i, distance = tree.find((a + b) / 2)
+        if distance is not None and distance <= radius:
+            edge.use_edge_sharp = True
+            marked += 1
+    obj.data.update()
+    return marked
 
 
 HOLE_FILL_RATIO = 0.02   # 경계 엣지가 전체의 이 비율을 넘으면 메워도 형태가 남지 않는다 — 더 성긴 단계로 물러난다
@@ -196,7 +267,7 @@ def close_holes(obj) -> int:
     return remaining
 
 
-def _quadriflow_once(obj, target_faces: int) -> bool:
+def _quadriflow_once(obj, target_faces: int, preserve_sharp: bool = False, symmetry: bool = False) -> bool:
     """QuadriFlow 한 번 시도. 면수가 바뀌었으면 성공. (실패 시 조용히 아무것도 안 하거나 RuntimeError)"""
     before = len(obj.data.polygons)
     if before > int(target_faces) * QF_MAX_INPUT_RATIO:
@@ -204,8 +275,8 @@ def _quadriflow_once(obj, target_faces: int) -> bool:
     try:
         with _override(obj):
             bpy.ops.object.quadriflow_remesh(target_faces=int(target_faces),
-                                             use_preserve_sharp=False,
-                                             use_mesh_symmetry=False, seed=1)
+                                             use_preserve_sharp=bool(preserve_sharp),
+                                             use_mesh_symmetry=bool(symmetry), seed=1)
     except RuntimeError:
         return False
     if len(obj.data.polygons) == before:
@@ -232,6 +303,7 @@ def _division_ladder(obj, hi, extent: float, target_faces: int) -> list:
     복셀 면수는 분할 수의 제곱에 비례하므로 sqrt 로 맞추고, 그 밀도와 0.75배·0.5배를 차례로 시도한다."""
     obj.data = hi.data.copy()
     keep_largest_island(obj)
+    seal_shell(obj, extent / 90.0)
     voxel_remesh(obj, extent / 90.0)
     keep_largest_island(obj)
     faces = max(len(obj.data.polygons), 1)
@@ -245,7 +317,14 @@ def _division_ladder(obj, hi, extent: float, target_faces: int) -> list:
     return ladder
 
 
-def retopo_robust(obj, hi, target_faces: int, height_units: float) -> tuple:
+def _guided_quadriflow(obj, target_faces: int, sharp_points, symmetry: bool, voxel: float) -> bool:
+    """사용자가 그어 둔 기준선을 리메시 메시에 다시 심고 QuadriFlow 를 돌린다."""
+    marked = transfer_sharp_edges(obj, sharp_points or [], max(voxel, 1e-6) * 1.5)
+    return _quadriflow_once(obj, target_faces, preserve_sharp=bool(marked), symmetry=symmetry)
+
+
+def retopo_robust(obj, hi, target_faces: int, height_units: float,
+                  sharp_points: list = None, symmetry: bool = False) -> tuple:
     """QuadriFlow를 두 단계로 시도하고 실패하면 데시메이트. (방법 이름, 실제 리메시 면수) 반환.
 
     1차: 현재(350분할) 리메시 그대로. 2차: 하이폴리 사본에서 90분할로 다시 리메시 → 퇴화 엣지 정리 →
@@ -255,7 +334,7 @@ def retopo_robust(obj, hi, target_faces: int, height_units: float) -> tuple:
     잃는 디테일은 뒤따르는 하이폴리 슈링크랩이 되찾는다."""
     from mathutils import Matrix
     remeshed_first = len(obj.data.polygons)
-    if _quadriflow_once(obj, target_faces):
+    if _guided_quadriflow(obj, target_faces, sharp_points, symmetry, height_units / 350.0):
         return "quadriflow", remeshed_first
     # 2차 — 하이폴리에서 **최대 치수 기준** 90분할로 다시 리메시하고 크기를 키워가며 시도.
     # 실측(2026-09-17): 최대치수/90 복셀 + 최대치수 ×10~×40 에서 통과. 높이 기준으로 나누면 옆으로 긴 대상이
@@ -271,12 +350,13 @@ def retopo_robust(obj, hi, target_faces: int, height_units: float) -> tuple:
         for target_size in (10.0, 20.0, 40.0):
             obj.data = hi.data.copy()
             keep_largest_island(obj)
+            seal_shell(obj, extent / divisions)
             voxel_remesh(obj, extent / divisions)
             keep_largest_island(obj)
             remeshed = len(obj.data.polygons)
             scale = target_size / extent
             obj.data.transform(Matrix.Scale(scale, 4))
-            ok = _quadriflow_once(obj, target_faces)
+            ok = _guided_quadriflow(obj, target_faces, sharp_points, symmetry, extent / divisions)
             obj.data.transform(Matrix.Scale(1.0 / scale, 4))
             obj.data.update()
             if ok:
@@ -697,18 +777,8 @@ def stash_source(hi, collection, name: str):
     return hi
 
 
-def _process_glb(path: str, name: str, collection, height: float = 1.8,
-                target_faces: int = 12000, voxel_size: float = 0.012,
-                method: str = 'QUADRIFLOW', adaptive: bool = False,
-                head_frac: float = 0.0, template_id: str = 'HUMANOID',
-                preserve_parts: bool = False, normalize_result: bool = True) -> dict:
-    """GLB 한 개를 게임용 메시 오브젝트 하나로 만들어 collection에 넣는다. 통계 dict 반환.
-
-    method='QUADRIFLOW'(기본): 조각 제거 → 복셀 리메시 → QuadriFlow 쿼드 → 하이폴리 슈링크랩으로
-    디테일 복원. adaptive=True면 평평한 영역을 un-subdivide로 성기게 만들어 밀도 차등을 주지만
-    (head_frac은 무조건 촘촘하게 둘 머리 비율), 경계에 삼각형이 생겨 와이어가 지저분하다 —
-    실측 결과 기본은 끈다. 애니메이션용 밀도·와이어 흐름은 템플릿 베이스 메시 방식이 필요하다.
-    method='DECIMATE': 조각 제거 → 데시메이트. 빠르지만 삼각형 그대로다."""
+def import_shape(path: str, name: str, collection):
+    """셰이프 GLB 를 한 오브젝트로 가져와 collection 에 넣는다 (리토폴로지 전 원본)."""
     meshes = import_glb(path)
     if not meshes:
         raise RuntimeError("GLB에 메시가 없다")
@@ -724,6 +794,36 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
     obj.name = safe_id_name(name)
     obj.data.name = obj.name
     obj.data.materials.clear()
+    return obj, len(meshes)
+
+
+def _process_glb(path: str, name: str, collection, height: float = 1.8,
+                target_faces: int = 12000, voxel_size: float = 0.012,
+                method: str = 'QUADRIFLOW', adaptive: bool = False,
+                head_frac: float = 0.0, template_id: str = 'HUMANOID',
+                preserve_parts: bool = False, normalize_result: bool = True,
+                symmetry: bool = False) -> dict:
+    """GLB 한 개를 게임용 메시 오브젝트 하나로 만들어 collection에 넣는다. 통계 dict 반환.
+
+    method='QUADRIFLOW'(기본): 조각 제거 → 복셀 리메시 → QuadriFlow 쿼드 → 하이폴리 슈링크랩으로
+    디테일 복원. adaptive=True면 평평한 영역을 un-subdivide로 성기게 만들어 밀도 차등을 주지만
+    (head_frac은 무조건 촘촘하게 둘 머리 비율), 경계에 삼각형이 생겨 와이어가 지저분하다 —
+    실측 결과 기본은 끈다. 애니메이션용 밀도·와이어 흐름은 템플릿 베이스 메시 방식이 필요하다.
+    method='DECIMATE': 조각 제거 → 데시메이트. 빠르지만 삼각형 그대로다."""
+    obj, mesh_count = import_shape(path, name, collection)
+    return _process_mesh(obj, name, collection, height, target_faces, voxel_size, method, adaptive,
+                         head_frac, template_id, preserve_parts, normalize_result, mesh_count, symmetry)
+
+
+def _process_mesh(obj, name: str, collection, height: float, target_faces: int, voxel_size: float,
+                  method: str, adaptive: bool, head_frac: float, template_id: str,
+                  preserve_parts: bool, normalize_result: bool, mesh_count: int = 1, symmetry: bool = False) -> dict:
+    """씬에 이미 있는 셰이프 오브젝트를 게임용 메시로 만든다. 통계 dict 반환."""
+    obj.name = safe_id_name(name)
+    obj.data.name = obj.name
+    if SOURCE_KEY in obj:
+        del obj[SOURCE_KEY]   # 셰이프 단계에서 붙인 원본 표식 — 이 오브젝트는 이제 결과물이다
+    meshes = [obj] * mesh_count   # 아래 분기는 '원본 GLB 안에 메시가 여러 개였는가'만 본다
     raw_tris = len(obj.data.polygons)
     slabs = remove_ground_slabs(obj)
     removed = 0 if preserve_parts or len(meshes) > 1 else keep_largest_island(obj)
@@ -783,8 +883,12 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
             # 부품 GLB 는 여러 셸(몸통+부츠, 검+방패)로 온다 — 셸별로 처리해 작은 셸이 사라지지 않게 한다
             obj, method, remeshed = _retopo_islands(obj, hi, collection, dense_target, height_units, name)
         else:
+            # 사용자가 원본에 Mark Sharp 로 그어 둔 기준선 — 복셀 리메시가 지우므로 좌표로 들고 간다
+            sharp_points = sharp_edge_points(hi)
+            sealed = seal_shell(obj, height_units / 350.0)   # 열린 껍질이면 두께를 줘 솔리드가 되게
             voxel_remesh(obj, height_units / 350.0)  # 복셀 상자 350칸 — 눈·주둥이가 살아남는 해상도
-            method, remeshed = retopo_robust(obj, hi, dense_target, height_units)
+            method, remeshed = retopo_robust(obj, hi, dense_target, height_units,
+                                             sharp_points=sharp_points, symmetry=symmetry)
             if adaptive and method == "quadriflow":
                 weights = importance_weights(obj, head_frac=head_frac)
                 reduced = adaptive_unsubdivide(obj, weights)
@@ -796,6 +900,7 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
         decimate(obj, int(target_faces) * 2)  # target_faces는 쿼드 기준 — 트라이는 2배
         method = "decimate"
     flipped = make_normals_outward(obj)   # 리토폴로지 결과는 매니폴드라 여기서 안팎을 제대로 잡을 수 있다
+    flip_if_inverted(obj)                 # 그래도 전체가 안쪽을 보면(껍질 안쪽을 바깥으로 잡은 경우) 통째로 뒤집는다
     for p in obj.data.polygons:
         p.use_smooth = True
     if normalize_result:
@@ -805,6 +910,7 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
     obj.data.calc_loop_triangles()
     quads = sum(1 for p in obj.data.polygons if len(p.vertices) == 4)
     return {"obj": obj, "source": source, "raw_faces": raw_tris, "floaters_removed": removed,
+            "sealed": locals().get("sealed", 0.0),
             "flipped_faces": flipped, "ground_slabs": slabs,
             "remeshed_faces": remeshed, "method": method, "reduced_faces": reduced,
             "faces": len(obj.data.polygons), "quads": quads,
@@ -815,12 +921,35 @@ def process_glb(path: str, name: str, collection, height: float = 1.8,
                 target_faces: int = 12000, voxel_size: float = 0.012,
                 method: str = 'QUADRIFLOW', adaptive: bool = False,
                 head_frac: float = 0.0, template_id: str = 'HUMANOID',
-                preserve_parts: bool = False, normalize_result: bool = True) -> dict:
+                preserve_parts: bool = False, normalize_result: bool = True,
+                symmetry: bool = False) -> dict:
     """GLB 전체를 처리하고 실패 시 이번 호출이 생성한 데이터만 정리한다.
 
     분리된 장비를 보존할 때는 복셀 결합 없이 선택한 리토폴로지를 시도한다.
     템플릿 맞춤은 비율 정렬과 부분 투영이며 완성된 자동 리깅이 아니다.
     """
+    return _guarded(lambda: _process_glb(path, name, collection, height, target_faces, voxel_size,
+                                        method, adaptive, head_frac, template_id, preserve_parts,
+                                        normalize_result, symmetry=symmetry), method)
+
+
+def process_object(obj, name: str, collection, height: float = 1.8,
+                   target_faces: int = 12000, voxel_size: float = 0.012,
+                   method: str = 'QUADRIFLOW', adaptive: bool = False,
+                   head_frac: float = 0.0, template_id: str = 'HUMANOID',
+                   preserve_parts: bool = False, normalize_result: bool = True,
+                   symmetry: bool = False) -> dict:
+    """씬에 이미 있는 셰이프 오브젝트(사용자가 확인·마킹한 원본)에서 리토폴로지를 시작한다.
+
+    단계를 나눈 흐름(셰이프 → 리토폴로지 → 매핑)에서 2단계가 쓴다. 넘긴 오브젝트는 결과 메시가 되고,
+    처리 전 상태는 하이폴리 사본으로 보관된다."""
+    return _guarded(lambda: _process_mesh(obj, name, collection, height, target_faces, voxel_size,
+                                          method, adaptive, head_frac, template_id, preserve_parts,
+                                          normalize_result, symmetry=symmetry), method)
+
+
+def _guarded(run, method: str) -> dict:
+    """실패 시 이번 호출이 만든 데이터만 정리한다."""
     if str(method).upper() not in ('TEMPLATE', 'QUADRIFLOW', 'DECIMATE'):
         raise ValueError('지원하지 않는 리토폴로지 방법: ' + str(method))
     before_objects = set(bpy.data.objects)
@@ -829,8 +958,7 @@ def process_glb(path: str, name: str, collection, height: float = 1.8,
                   (bpy.data.materials, bpy.data.images, bpy.data.armatures, bpy.data.cameras,
                    bpy.data.lights, bpy.data.actions)]
     try:
-        result = _process_glb(path, name, collection, height, target_faces, voxel_size,
-                              method, adaptive, head_frac, template_id, preserve_parts, normalize_result)
+        result = run()
         result['requested_method'] = str(method).upper()
         result['fallback_reason'] = ('QuadriFlow가 결과를 만들지 못해 DECIMATE로 처리했습니다'
                                      if str(method).upper() == 'QUADRIFLOW' and result['method'] == 'decimate'

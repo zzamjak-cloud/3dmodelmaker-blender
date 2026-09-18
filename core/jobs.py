@@ -316,7 +316,8 @@ def apply_lane_offset(collection_name: str, lane: int, spacing: float = None):
     if not coll:
         return
     gap = lanes.LANE_SPACING if spacing is None else spacing
-    for obj in coll.objects:
+    # all_objects: 하이폴리 원본을 담은 자식 컬렉션까지 같이 민다 — 결과와 겹쳐 있어야 다시 리토폴로지할 수 있다
+    for obj in coll.all_objects:
         if obj.parent is not None:  # 자식은 부모를 따라 움직인다
             continue
         applied = obj.get(LANE_MARK)

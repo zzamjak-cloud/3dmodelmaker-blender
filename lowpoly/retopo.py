@@ -524,27 +524,31 @@ def fit_template(obj, target, passes: int = 4) -> None:
     obj.vertex_groups.remove(obj.vertex_groups[vg_name])
 
 
-def normalize(obj, height: float, face_axis: str = '-Y') -> None:
-    """키를 height(m)에 맞추고 발바닥을 z=0, 중심을 X=Y=0에 둔다.
+def normalize(obj, height: float, face_axis: str = '-Y'):
+    """키를 height(m)에 맞추고 발바닥을 z=0, 중심을 X=Y=0에 둔다. 적용한 월드 변환 행렬을 돌려준다.
 
     glTF 임포트 결과는 원점 중심·1m 안팎 크기다. face_axis는 정면이 향하는 축으로,
-    셰이프 서버 GLB는 glTF 규약(+Z 정면)이라 Blender에서 -Y로 들어와 기본값이 맞는다."""
+    셰이프 서버 GLB는 glTF 규약(+Z 정면)이라 Blender에서 -Y로 들어와 기본값이 맞는다.
+    반환 행렬은 함께 보관하는 하이폴리 원본을 같은 자리에 두는 데 쓴다."""
+    from mathutils import Matrix
     bpy.context.view_layer.update()
     pts = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
     zmin, zmax = min(p.z for p in pts), max(p.z for p in pts)
-    span = max(zmax - zmin, 1e-6)
-    scale = float(height) / span
-    obj.scale = (obj.scale.x * scale, obj.scale.y * scale, obj.scale.z * scale)
-    bpy.context.view_layer.update()
-    pts = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
-    cx = (min(p.x for p in pts) + max(p.x for p in pts)) / 2
-    cy = (min(p.y for p in pts) + max(p.y for p in pts)) / 2
-    obj.location.x -= cx
-    obj.location.y -= cy
-    obj.location.z -= min(p.z for p in pts)
+    scale = float(height) / max(zmax - zmin, 1e-6)
+    cx = (min(p.x for p in pts) + max(p.x for p in pts)) / 2 * scale
+    cy = (min(p.y for p in pts) + max(p.y for p in pts)) / 2 * scale
+    matrix = Matrix.Translation((-cx, -cy, -zmin * scale)) @ Matrix.Scale(scale, 4)
     # 트랜스폼을 메시에 굽는다 — 이후 단계(언랩·베이크·익스포트)가 단위 변환을 전제한다
-    with _override(obj):
-        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    apply_world(obj, matrix)
+    return matrix
+
+
+def apply_world(obj, matrix) -> None:
+    """월드 변환 matrix 를 메시 좌표에 굽고 오브젝트 변환을 항등으로 되돌린다."""
+    from mathutils import Matrix
+    obj.data.transform(matrix @ obj.matrix_world)
+    obj.matrix_world = Matrix.Identity(4)
+    obj.data.update()
 
 
 def decimate(obj, target_tris: int) -> None:
@@ -561,6 +565,30 @@ def decimate(obj, target_tris: int) -> None:
     mod.use_collapse_triangulate = True
     with _override(obj):
         bpy.ops.object.modifier_apply(modifier=mod.name)
+
+
+SOURCE_SUFFIX = '_원본'
+SOURCE_KEY = 'lp3d_source_mesh'   # 이 표식이 있는 오브젝트는 은면 정리·게임레디·매핑 대상이 아니다
+
+
+def stash_source(hi, collection, name: str):
+    """리토폴로지 전 하이폴리를 결과 옆에 숨겨 남긴다 — 같은 원본으로 리토폴로지를 다시 돌릴 수 있게.
+
+    결과 컬렉션의 자식 컬렉션에 넣는다: 세션·매핑·정리는 `collection.objects`(직계)만 보므로 자동으로 제외된다."""
+    child_name = safe_id_name(name + SOURCE_SUFFIX)
+    child = bpy.data.collections.get(child_name)
+    if child is None or child.name not in collection.children:
+        child = bpy.data.collections.new(child_name)
+        collection.children.link(child)
+    for c in list(hi.users_collection):
+        c.objects.unlink(hi)
+    child.objects.link(hi)
+    hi.name = child_name
+    hi.data.name = child_name
+    hi[SOURCE_KEY] = True
+    hi.hide_viewport = True   # 무거운 하이폴리 — 기본은 숨김, 필요할 때 아웃라이너에서 켠다
+    hi.hide_render = True
+    return hi
 
 
 def _process_glb(path: str, name: str, collection, height: float = 1.8,
@@ -593,6 +621,7 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
     raw_tris = len(obj.data.polygons)
     removed = 0 if preserve_parts or len(meshes) > 1 else keep_largest_island(obj)
     reduced = 0
+    source = None
     if str(method).upper() == 'TEMPLATE':
         from ..core.templates import load_template
         hi = obj
@@ -625,7 +654,7 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
             vertex.co = source_center + (point - template_center) * scale
         fit_template(obj, hi)
         remeshed = len(obj.data.polygons)
-        bpy.data.objects.remove(hi, do_unlink=True)
+        source = stash_source(hi, collection, name)
         method = 'template'
         obj.name = safe_id_name(name)
     elif str(method).upper() == 'QUADRIFLOW':
@@ -654,7 +683,7 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
                 reduced = adaptive_unsubdivide(obj, weights)
                 method = "quadriflow+adaptive"
             _shrinkwrap(obj, hi)
-            bpy.data.objects.remove(hi, do_unlink=True)
+            source = stash_source(hi, collection, name)
     else:
         remeshed = len(obj.data.polygons)
         decimate(obj, int(target_faces) * 2)  # target_faces는 쿼드 기준 — 트라이는 2배
@@ -662,10 +691,12 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
     for p in obj.data.polygons:
         p.use_smooth = True
     if normalize_result:
-        normalize(obj, height)
+        matrix = normalize(obj, height)
+        if source is not None:
+            apply_world(source, matrix)   # 결과와 같은 자리·축척으로 겹쳐 둔다
     obj.data.calc_loop_triangles()
     quads = sum(1 for p in obj.data.polygons if len(p.vertices) == 4)
-    return {"obj": obj, "raw_faces": raw_tris, "floaters_removed": removed,
+    return {"obj": obj, "source": source, "raw_faces": raw_tris, "floaters_removed": removed,
             "remeshed_faces": remeshed, "method": method, "reduced_faces": reduced,
             "faces": len(obj.data.polygons), "quads": quads,
             "tris": len(obj.data.loop_triangles)}

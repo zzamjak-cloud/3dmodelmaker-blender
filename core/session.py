@@ -639,6 +639,22 @@ class GenerationSession:
         _end_session(self.uid)
         self._notify_parent(ok)
 
+    def _autosave(self):
+        """이번 잡이 만든 것을 폴더 하나로 즉시 남긴다 — 저장을 잊어 결과를 잃지 않도록.
+
+        기하가 완성된 지점(모델링 완료·최종 완료)에서만 부른다. 실패는 잡을 실패시키지 않는다."""
+        if self.parent_uid:   # 씬 에셋 자식 잡 — 부모가 씬 전체를 한 번에 저장한다
+            return
+        from . import autosave
+        job = self._job()
+        files = {'원화': self.ref_image,
+                 '턴어라운드': self.multiview or (getattr(job, 'multiview_path', "") if job else ""),
+                 '셰이프': getattr(self, 'shape_path', ""),
+                 '텍스처': self.texture_path}
+        path = autosave.save_result(self.collection_name, self.system_mode, files)
+        if path and job:
+            job.log = "\n".join((job.log + f"\n결과 저장: {path}").strip().splitlines()[-30:])
+
     def _parent_session(self):
         """이 세션을 스폰한 배경 세션. 부모가 아니거나 이미 끝났으면 None."""
         if not self.parent_uid:
@@ -915,6 +931,7 @@ class GenerationSession:
                         self.style, self.system_mode, self.character_type, self._final_note)
                     self._finish(f"모델링 완료 — {self.collection_name} ({self._final_note}) · 메시 수정 후 [매핑 시작]",
                                  ok=True, state='MODELED')
+                    self._autosave()
                     return
                 if not texgen.is_available():
                     self._set_status("텍스처 생략: codex CLI 없음",
@@ -942,6 +959,7 @@ class GenerationSession:
         """성공 마감. extra는 텍스처 단계 결과 문구."""
         self._apply_lane()
         self._finish(f"완료 — {self.collection_name} ({self._final_note}{extra})", ok=True)
+        self._autosave()
 
     # ---------- 개별 매핑 (언랩 → 6면도 가이드 → AI 텍스처 → 베이크) ----------
     #

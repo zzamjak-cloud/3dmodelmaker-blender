@@ -1128,7 +1128,7 @@ def build_raster_source(
 
     mask = coarse_foreground_mask(pixels, width, height, background, background_threshold)
     filled, distance = extend_foreground_mask(
-        pixels, width, height, mask, _extend_radius(subject_bbox)
+        pixels, width, height, fill_mask(mask, width, height), _extend_radius(subject_bbox)
     )
     return RasterSource(
         width=width,
@@ -1142,6 +1142,20 @@ def build_raster_source(
         foreground_distance=distance,
         foreground=mask,
     )
+
+
+EDGE_ERODE_PER_PX = 512   # 이미지 512px 마다 1px — 실루엣 가장자리의 안티에일리어싱 폭에 비례
+
+
+def fill_mask(mask: Sequence[int], width: int, height: int) -> bytearray:
+    """색을 퍼뜨릴 기준 마스크 — 실루엣 가장자리를 한 겹 깎는다.
+
+    생성 이미지의 외곽 한두 픽셀은 배경(흰색)과 섞인 안티에일리어싱이다. 그대로 전경으로 두면
+    실루엣에 걸친 면(머리카락 끝·어깨선)이 그 반투명한 흰색을 그대로 물어와 아틀라스에 흰 부스러기가 남는다.
+    깎은 뒤 채우면 그 자리는 안쪽의 단단한 색으로 대체된다. 전부 깎이면(아주 작은 피사체) 원래 마스크를 쓴다."""
+    radius = max(1, round(min(width, height) / EDGE_ERODE_PER_PX))
+    eroded = erode_mask(mask, width, height, radius)
+    return eroded if any(eroded) else bytearray(mask)
 
 
 def _extend_radius(subject_bbox: BBox) -> float:
@@ -1710,7 +1724,8 @@ def prepare_sources(
             prepared[name] = replace(source, alignment=alignment)
             continue
         filled, foreground_distance = extend_foreground_mask(
-            source.pixels, width, height, refined, _extend_radius(source.subject_bbox)
+            source.pixels, width, height, fill_mask(refined, width, height),
+            _extend_radius(source.subject_bbox)
         )
         prepared[name] = replace(
             source,
@@ -3210,6 +3225,7 @@ __all__ = (
     "compare_rendered_view",
     "compose_verification_sheet",
     "erode_mask",
+    "fill_mask",
     "evaluate_silhouette_match",
     "evaluate_view_sources",
     "load_image_pixels",

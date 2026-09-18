@@ -334,21 +334,21 @@ class TestLaneSpacingPassthrough(ChildJobTestCase):
 
     def test_spacing_argument_reaches_lanes(self):
         obj = _Object()
-        coll = SimpleNamespace(objects=[obj])
+        coll = SimpleNamespace(objects=[obj], all_objects=[obj])
         with patch.dict(jobs.bpy.data.collections, {"LP3D_Scene": coll}, clear=True):
             jobs.apply_lane_offset("LP3D_Scene", 2, spacing=20.0)
         self.assertEqual(obj.location.y, 40.0)
 
     def test_default_spacing_unchanged(self):
         obj = _Object()
-        coll = SimpleNamespace(objects=[obj])
+        coll = SimpleNamespace(objects=[obj], all_objects=[obj])
         with patch.dict(jobs.bpy.data.collections, {"LP3D_Scene": coll}, clear=True):
             jobs.apply_lane_offset("LP3D_Scene", 2)
         self.assertEqual(obj.location.y, jobs.lanes.lane_dy(2))
 
     def test_reapplying_same_lane_does_not_accumulate(self):
         obj = _Object()
-        coll = SimpleNamespace(objects=[obj])
+        coll = SimpleNamespace(objects=[obj], all_objects=[obj])
         with patch.dict(jobs.bpy.data.collections, {"LP3D_Scene": coll}, clear=True):
             jobs.apply_lane_offset("LP3D_Scene", 2, spacing=20.0)
             jobs.apply_lane_offset("LP3D_Scene", 2, spacing=20.0)

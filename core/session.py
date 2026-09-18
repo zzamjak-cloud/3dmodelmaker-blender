@@ -572,7 +572,9 @@ class GenerationSession:
         self.compare_turns_left = 0
         self._set_status(
             "셰이프 리토폴로지 완료",
-            f"셰이프: 원본 {info['raw_faces']}면, 파편 {info['floaters_removed']}개 제거, "
+            f"셰이프: 원본 {info['raw_faces']}면, 파편 {info['floaters_removed']}개 제거"
+            + (f", 바닥판 {info['ground_slabs']}개 제거" if info.get('ground_slabs') else "")
+            + (f", 뒤집힌 면 {info['flipped_faces']:,}개 정렬" if info.get('flipped_faces') else "") + ", "
             f"리메시 {info['remeshed_faces']}면 → {_retopo_method_note(info)} → {info['faces']}면 "
             f"(쿼드 {info['quads']}, 밀도 축소 {info['reduced_faces']}면) = {info['tris']} tris")
         self._finalize()

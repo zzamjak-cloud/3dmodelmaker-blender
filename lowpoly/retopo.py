@@ -35,6 +35,84 @@ def import_glb(path: str) -> list:
     return meshes
 
 
+def signed_volume(obj) -> float:
+    """면 노멀 기준 부호 볼륨. 음수면 메시 전체가 안쪽을 보고 있다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.normal_update()
+    total = sum(f.calc_center_median().dot(f.normal) * f.calc_area() for f in bm.faces) / 3.0
+    bm.free()
+    return total
+
+
+def flip_if_inverted(obj) -> bool:
+    """부호 볼륨이 음수면 모든 면을 뒤집는다. 면끼리의 상대 관계는 그대로 두므로 안전하다."""
+    if signed_volume(obj) >= 0.0:
+        return False
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.reverse_faces(bm, faces=bm.faces)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return True
+
+
+def make_normals_outward(obj) -> int:
+    """면 와인딩을 바깥쪽으로 통일한다. 뒤집혀 있던 면 수를 돌려준다.
+
+    실측(2026-09-18): 셰이프 서버가 준 GLB 는 이웃끼리 반대로 감긴 면이 2만 개가 넘어 결과까지 안팎이 뒤집힌다.
+    단, 임포트 직후(비매니폴드 마칭큐브 출력)에 돌리면 복셀 리메시의 안팎 판정이 어긋나 결과가 구멍투성이가 된다 —
+    매니폴드가 된 리토폴로지 결과에만 쓴다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    before = [f.normal.copy() for f in bm.faces]
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bm.normal_update()
+    flipped = sum(1 for f, old in zip(bm.faces, before) if f.normal.dot(old) < 0.0)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return flipped
+
+
+GROUND_FLAT_RATIO = 0.06   # 가장 긴 변 대비 두께가 이 비율 미만이면 판
+GROUND_WIDE_RATIO = 0.5    # 가로·세로가 전체 폭의 이 비율 이상이면 바닥
+
+
+def remove_ground_slabs(obj) -> int:
+    """넓고 얇은 판(생성 이미지의 바닥선·그림자가 복원된 슬랩)을 지운다. 지운 셸 수를 돌려준다.
+
+    실측: 1.0 x 1.0 x 0.021 짜리 바닥판이 몸통 면수의 21%나 돼 파편 기준(5%)으로는 걸러지지 않았고,
+    키 정규화의 기준 상자를 망가뜨렸다. 크기가 아니라 '납작하고 넓다'는 형태로 판정한다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    islands = _face_islands(bm)
+    if len(islands) <= 1:
+        bm.free()
+        return 0
+    verts = [v.co for v in bm.verts]
+    span = [max(c[a] for c in verts) - min(c[a] for c in verts) for a in range(3)]
+    width = max(max(span[0], span[1]), 1e-6)
+    kill = []
+    for comp in islands:
+        points = [v.co for i in comp for v in bm.faces[i].verts]
+        size = [max(p[a] for p in points) - min(p[a] for p in points) for a in range(3)]
+        longest = max(max(size), 1e-6)
+        if min(size) < GROUND_FLAT_RATIO * longest and max(size[0], size[1]) >= GROUND_WIDE_RATIO * width:
+            kill.append(comp)
+    if not kill or len(kill) == len(islands):
+        bm.free()
+        return 0
+    drop = {i for comp in kill for i in comp}
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.index in drop], context='FACES')
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return len(kill)
+
+
 # 가장 큰 덩어리 대비 이 비율 이상인 셸은 파편이 아니라 본체의 일부다 — 실측(2026-09-18): TRELLIS.2 캐릭터가
 # 상체(259,941면) + 하체·다리(83,929면, 32%) 두 셸로 와서, 가장 큰 것만 남기면 다리가 통째로 사라지고
 # 남은 상체가 키 기준 정규화로 늘어났다. 실제 파편(귀·머리카락 조각)은 1% 미만이다.
@@ -90,8 +168,32 @@ def voxel_remesh(obj, voxel_size: float) -> None:
         bpy.ops.object.voxel_remesh()
 
 
+QF_INPUT_TARGET_RATIO = 0.6   # 복셀 리메시가 노릴 면수 = 목표 x 이 비율. 실측(2026-09-18): 입력이 목표의 1.7배(20,720/12,000)면
+                              # QuadriFlow 결과가 구멍투성이가 되고, 0.55배(6,630)면 깨끗하게 닫힌다.
 QF_MAX_INPUT_RATIO = 6.0   # 입력 면수 / 목표 면수 상한 — 실측(2026-09-18): 28배에서 QuadriFlow 가 메모리 폭주로 SIGKILL,
                            # 6~12배는 'Remeshing failed', 3배 이하 성공. 가드가 없으면 Blender 프로세스 자체가 죽는다.
+
+
+HOLE_FILL_RATIO = 0.02   # 경계 엣지가 전체의 이 비율을 넘으면 메워도 형태가 남지 않는다 — 더 성긴 단계로 물러난다
+
+
+def close_holes(obj) -> int:
+    """리토폴로지가 남긴 경계 구멍을 메운다. 남은 경계 엣지 수를 돌려준다.
+
+    실측(2026-09-18): 복셀을 촘촘하게 넣으면 QuadriFlow 가 표면 곳곳에 구멍을 남긴다(경계 엣지 수백 개).
+    구멍을 메우면 그 밀도의 디테일을 유지하면서 닫힌 메시가 된다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    borders = [e for e in bm.edges if len(e.link_faces) != 2]
+    if borders:
+        bmesh.ops.holes_fill(bm, edges=borders, sides=0)
+        bmesh.ops.triangulate(bm, faces=[f for f in bm.faces if len(f.verts) > 4])
+        bm.normal_update()
+    remaining = sum(1 for e in bm.edges if len(e.link_faces) != 2)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return remaining
 
 
 def _quadriflow_once(obj, target_faces: int) -> bool:
@@ -106,7 +208,10 @@ def _quadriflow_once(obj, target_faces: int) -> bool:
                                              use_mesh_symmetry=False, seed=1)
     except RuntimeError:
         return False
-    return len(obj.data.polygons) != before
+    if len(obj.data.polygons) == before:
+        return False
+    remaining = close_holes(obj)
+    return remaining <= len(obj.data.edges) * HOLE_FILL_RATIO
 
 
 def _dissolve_degenerate(obj, dist: float) -> None:
@@ -130,7 +235,7 @@ def _division_ladder(obj, hi, extent: float, target_faces: int) -> list:
     voxel_remesh(obj, extent / 90.0)
     keep_largest_island(obj)
     faces = max(len(obj.data.polygons), 1)
-    want = max(int(target_faces) * 2.5, 1.0)
+    want = max(int(target_faces) * QF_INPUT_TARGET_RATIO, 1.0)
     base = 90 if faces <= want * 1.2 else max(12, int(90 * (want / faces) ** 0.5))
     ladder = []
     for d in (base, int(base * 0.75), int(base * 0.5)):
@@ -585,6 +690,7 @@ def stash_source(hi, collection, name: str):
     child.objects.link(hi)
     hi.name = child_name
     hi.data.name = child_name
+    flip_if_inverted(hi)   # 마칭큐브 출력은 통째로 안쪽을 보는 경우가 있다 — 보기용이므로 전체 반전만 한다
     hi[SOURCE_KEY] = True
     hi.hide_viewport = True   # 무거운 하이폴리 — 기본은 숨김, 필요할 때 아웃라이너에서 켠다
     hi.hide_render = True
@@ -619,6 +725,7 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
     obj.data.name = obj.name
     obj.data.materials.clear()
     raw_tris = len(obj.data.polygons)
+    slabs = remove_ground_slabs(obj)
     removed = 0 if preserve_parts or len(meshes) > 1 else keep_largest_island(obj)
     reduced = 0
     source = None
@@ -688,6 +795,7 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
         remeshed = len(obj.data.polygons)
         decimate(obj, int(target_faces) * 2)  # target_faces는 쿼드 기준 — 트라이는 2배
         method = "decimate"
+    flipped = make_normals_outward(obj)   # 리토폴로지 결과는 매니폴드라 여기서 안팎을 제대로 잡을 수 있다
     for p in obj.data.polygons:
         p.use_smooth = True
     if normalize_result:
@@ -697,6 +805,7 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
     obj.data.calc_loop_triangles()
     quads = sum(1 for p in obj.data.polygons if len(p.vertices) == 4)
     return {"obj": obj, "source": source, "raw_faces": raw_tris, "floaters_removed": removed,
+            "flipped_faces": flipped, "ground_slabs": slabs,
             "remeshed_faces": remeshed, "method": method, "reduced_faces": reduced,
             "faces": len(obj.data.polygons), "quads": quads,
             "tris": len(obj.data.loop_triangles)}

@@ -21,6 +21,10 @@ def _read(filename: str) -> str:
         return f.read()
 
 
+# 패키지 밖(단위 테스트)에서 상대 임포트가 실패할 때 파일로 로드한 모듈 캐시 — sys.modules 는 건드리지 않는다(확장 검증기 제약)
+_FALLBACK_MODULES = {}
+
+
 def _helpers():
     """lowpoly 모듈 — bpy가 없는 환경(유닛 테스트)에서는 None."""
     try:
@@ -40,14 +44,13 @@ def _styles():
         return styles
     except ImportError:
         import importlib.util
-        import sys
-        cached = sys.modules.get("_lp3d_styles")
+        cached = _FALLBACK_MODULES.get("_lp3d_styles")
         if cached is not None:
             return cached
         spec = importlib.util.spec_from_file_location(
             "_lp3d_styles", os.path.join(os.path.dirname(os.path.abspath(__file__)), "styles.py"))
         module = importlib.util.module_from_spec(spec)
-        sys.modules["_lp3d_styles"] = module
+        _FALLBACK_MODULES["_lp3d_styles"] = module
         spec.loader.exec_module(module)
         return module
 
@@ -236,15 +239,14 @@ def _scene_plan():
         return scene_plan
     except ImportError:
         import importlib.util
-        import sys
-        cached = sys.modules.get("_lp3d_scene_plan")
+        cached = _FALLBACK_MODULES.get("_lp3d_scene_plan")
         if cached is not None:
             return cached
         spec = importlib.util.spec_from_file_location(
             "_lp3d_scene_plan",
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_plan.py"))
         module = importlib.util.module_from_spec(spec)
-        sys.modules["_lp3d_scene_plan"] = module
+        _FALLBACK_MODULES["_lp3d_scene_plan"] = module
         spec.loader.exec_module(module)
         return module
 

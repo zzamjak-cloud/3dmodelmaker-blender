@@ -3,10 +3,11 @@
 # 스레드를 쓰지 않는다 — Popen은 논블로킹이고, 완료 여부는 타이머에서 poll()로
 # 확인한다. stdout/stderr는 파이프 버퍼 블로킹을 피하기 위해 파일로 리다이렉트한다.
 # 모든 bpy 호출과 콜백은 메인 스레드(타이머 콜백)에서 실행된다.
+import json
 import logging
 import os
 import subprocess
-import threading
+import sys
 import time
 
 import bpy
@@ -68,30 +69,49 @@ def run_cli_async(cmd: list, cwd: str, timeout: int, on_done, stdin_text: str = 
     _ensure_pump()
 
 
-def run_http_async(work, on_done, job_key=None):
-    """블로킹 함수 work()를 워커 스레드에서 돌리고 완료 시 메인 스레드에서 on_done을 호출한다.
+def _worker_python() -> list:
+    """HTTP 워커를 돌릴 파이썬 명령. Blender 의 sys.executable 은 번들 파이썬이다(2.92+).
+    실행 파일이 Blender 자체로 잡히는 빌드에서는 배경 모드로 스크립트를 넘긴다."""
+    exe = sys.executable or ""
+    if "blender" in os.path.basename(exe).lower():
+        return [exe, "--background", "--factory-startup", "--python"]
+    return [exe]
 
-    work()는 (결과, 오류) 튜플을 돌려줘야 하며, 그 값이 그대로 on_done(결과, 오류)로 간다.
-    CLI 경로(run_cli_async)와 콜백 계약을 맞춘 것이다.
 
-    스레드를 쓰는 이유: urllib은 Popen과 달리 논블로킹 폴링이 안 된다. 다만 bpy는
-    메인 스레드 밖에서 건드리면 안 되므로, 워커는 결과만 담아두고 콜백은 같은 타이머
-    펌프(_pump)에서 실행한다 — CLI 잡과 취소·펌프 수명 관리가 하나로 유지된다."""
-    job = {"on_done": on_done, "job_key": job_key, "cancelled": False, "done": False,
-           "result": None, "error": None}
+def run_http_async(spec: dict, on_done, job_key=None):
+    """HTTP 요청 spec(http_worker 참고)을 자식 파이썬 프로세스로 수행하고, 완료 시 메인 스레드에서
+    on_done(result_dict|None, error|None)을 호출한다. result_dict 는 http_worker.perform 의 반환값이다.
 
-    def _run():
-        try:
-            result, error = work()
-        except Exception as e:  # 워커에서 새는 예외가 펌프를 죽이지 않도록
-            log.exception("HTTP 작업 실패")
-            result, error = None, "이미지 생성 오류: %s" % e
-        job["result"], job["error"] = result, error
-        job["done"] = True
-
-    job["thread"] = threading.Thread(target=_run, daemon=True)
+    스레드를 쓰지 않는다 — urllib 은 논블로킹 폴링이 안 되므로 요청을 자식 프로세스에 맡기고, 종료는 CLI 잡과
+    같은 타이머 펌프에서 poll() 로 확인한다. 취소는 프로세스를 죽여서 즉시 끊는다."""
+    global _job_counter
+    _job_counter += 1
+    work_dir = spec.get("work_dir") or os.path.dirname(spec.get("out_file") or "") or None
+    if not work_dir or not os.path.isdir(work_dir):
+        import tempfile
+        work_dir = tempfile.mkdtemp(prefix="lp3d_http_")
+    spec = dict(spec)
+    spec.setdefault("result_file", os.path.join(work_dir, f"http_result_{_job_counter}.json"))
+    spec_path = os.path.join(work_dir, f"http_spec_{_job_counter}.json")
+    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "http_worker.py")
+    job = {"on_done": on_done, "job_key": job_key, "cancelled": False,
+           "result_file": spec["result_file"], "out_path": os.path.join(work_dir, f"http_stdout_{_job_counter}.log"),
+           "err_path": os.path.join(work_dir, f"http_stderr_{_job_counter}.log"),
+           "deadline": time.monotonic() + float(spec.get("timeout", 300)) + float((spec.get("poll") or {}).get("timeout", 0)) + 30,
+           "timeout": spec.get("timeout", 300)}
+    try:
+        with open(spec_path, "w", encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=False)
+        job["out_file"] = open(job["out_path"], "w", encoding="utf-8")
+        job["err_file"] = open(job["err_path"], "w", encoding="utf-8")
+        cmd = _worker_python() + [worker, "--", spec_path]
+        job["proc"] = subprocess.Popen(cmd, cwd=work_dir, stdin=subprocess.DEVNULL,
+                                       stdout=job["out_file"], stderr=job["err_file"])
+    except Exception as e:
+        _close_job_files(job)
+        _finish_now(on_done, None, f"HTTP 워커 실행 오류: {e}")
+        return
     _http_jobs.append(job)
-    job["thread"].start()
     _ensure_pump()
 
 
@@ -107,12 +127,12 @@ def cancel(job_key=None):
         job["cancelled"] = True
         if job["proc"].poll() is None:
             job["proc"].terminate()
-    # HTTP 요청은 중간에 끊을 수 없다 — 취소 표시만 해두고 결과를 버린다.
-    # (끝난 뒤 콜백이 돌면 취소된 세션의 상태를 되살려 놓는다)
     for job in _http_jobs:
         if job_key is not None and job.get("job_key") != job_key:
             continue
         job["cancelled"] = True
+        if job["proc"].poll() is None:
+            job["proc"].terminate()
 
 
 def add_keepalive(job_key):
@@ -203,14 +223,31 @@ def _pump():
 
 
 def _pump_http():
-    """완료된 HTTP 작업의 콜백을 메인 스레드에서 실행한다."""
-    finished = [job for job in _http_jobs if job["done"]]
+    """끝난 HTTP 워커 프로세스의 결과를 읽어 콜백을 메인 스레드에서 실행한다."""
+    finished = []
+    for job in _http_jobs:
+        if job["proc"].poll() is None:
+            if time.monotonic() > job["deadline"]:
+                job["proc"].kill()
+                job["timed_out"] = True
+            continue
+        finished.append(job)
     for job in finished:
         _http_jobs.remove(job)
+        _close_job_files(job)
         if job["cancelled"]:
             continue  # 취소된 세션에 결과를 되돌려주지 않는다
+        result, error = None, None
+        if job.get("timed_out"):
+            error = f"HTTP 요청 시간 초과 ({job['timeout']}초)"
+        else:
+            try:
+                with open(job["result_file"], encoding="utf-8") as f:
+                    result = json.load(f)
+            except (OSError, ValueError):
+                error = "HTTP 워커가 결과를 남기지 않았습니다\n" + errors.tail(_read(job["err_path"]))
         try:
-            job["on_done"](job["result"], job["error"])
+            job["on_done"](result, error)
         except Exception:
             log.exception("LP3D 콜백 오류")
 

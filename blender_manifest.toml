@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "lp3d_modelmaker"
-version = "0.21.1"
+version = "0.21.2"
 name = "AI LowPoly ModelMaker"
 tagline = "GPT-6 Astra generates game-ready low-poly models in one turn"
 maintainer = "Woody <jinpyoung@loadcomplete.com>"
@@ -9,6 +9,8 @@ type = "add-on"
 
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 Woody (jinpyoung@loadcomplete.com)"]
+website = "https://github.com/zzamjak-cloud/3dmodelmaker-blender"
 
 tags = ["Modeling", "Pipeline"]
 

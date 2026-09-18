@@ -120,38 +120,71 @@ def _explain(status: int, detail: str) -> str:
     return "OpenRouter 오류 %d: %s" % (status, detail)
 
 
-def request_image(prompt: str, out_path: str, model_id: str = None, refs=None,
-                  aspect_ratio: str = "1:1", quality: str = "high",
-                  resolution: str = "2K", timeout: int = 300):
-    """이미지를 생성해 out_path에 저장한다 (블로킹 — 워커 스레드에서 호출할 것).
+def _worker_module():
+    """http_worker 를 가져온다. 패키지 밖(단위 테스트)에서 상대 임포트가 안 되면 파일로 로드한다(sys.modules 는 건드리지 않음)."""
+    try:
+        from . import http_worker
+        return http_worker
+    except ImportError:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_lp3d_http_worker", os.path.join(os.path.dirname(os.path.abspath(__file__)), "http_worker.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
-    (저장 경로, None) 또는 (None, 오류 문자열)을 돌려준다."""
+
+def build_spec(prompt: str, out_path: str, model_id: str = None, refs=None,
+               aspect_ratio: str = "1:1", quality: str = "high",
+               resolution: str = "2K", timeout: int = 300):
+    """HTTP 워커용 요청 spec. 본문은 파일로 넘긴다(참조 이미지 data URL 이 커서 인자로 못 넘긴다).
+
+    (spec, None) 또는 (None, 오류 문자열)."""
     key = api_key()
     if not key:
         return None, "OpenRouter API 키가 설정되지 않았습니다"
     body = build_body(prompt, model_id or DEFAULT_MODEL, refs=refs,
                       aspect_ratio=aspect_ratio, quality=quality, resolution=resolution)
-    req = urllib.request.Request(
-        API_URL, data=json.dumps(body).encode("utf-8"),
-        headers={"Authorization": "Bearer " + key,
-                 "Content-Type": "application/json",
-                 "X-OpenRouter-Title": APP_TITLE},
-        method="POST")
+    work_dir = os.path.dirname(os.path.abspath(out_path))
+    body_file = out_path + ".request.json"
+    response_file = out_path + ".response.json"
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.read().decode("utf-8", "replace")[:400]
-        except Exception:
-            pass
-        return None, _explain(e.code, detail)
-    except urllib.error.URLError as e:
-        return None, "OpenRouter에 연결할 수 없습니다: %s" % e.reason
-    except (ValueError, OSError) as e:
-        return None, "OpenRouter 응답 처리 실패: %s" % e
+        with open(body_file, "w", encoding="utf-8") as f:
+            json.dump(body, f)
+    except OSError as e:
+        return None, "요청 본문 저장 실패: %s" % e
+    return {"url": API_URL, "method": "POST", "body_file": body_file, "out_file": response_file,
+            "work_dir": work_dir, "timeout": timeout,
+            "headers": {"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                        "X-OpenRouter-Title": APP_TITLE}}, None
 
+
+def _online_hint() -> str:
+    """Blender 의 인터넷 접근 설정이 꺼져 있으면 원인 후보로 알려준다(요청 자체는 애드온 설정의 키로 사용자가 명시한 것)."""
+    try:
+        import bpy
+        if not getattr(bpy.app, "online_access", True):
+            return " — Blender 환경설정 > 시스템 > '온라인 접근 허용'이 꺼져 있습니다"
+    except ImportError:
+        pass
+    return ""
+
+
+def handle_result(result: dict, spec: dict, out_path: str):
+    """워커 결과 → 이미지 저장. (저장 경로, None) 또는 (None, 오류 문자열)."""
+    if not result:
+        return None, "OpenRouter 응답 없음"
+    if result.get("kind") == "http":
+        return None, _explain(int(result.get("status") or 0), result.get("detail", ""))
+    if result.get("kind") in ("url", "timeout"):
+        return None, "OpenRouter에 연결할 수 없습니다: %s%s" % (result.get("reason", ""), _online_hint())
+    if result.get("kind"):
+        return None, "OpenRouter 응답 처리 실패: %s" % result.get("reason", "")
+    try:
+        with open(spec["out_file"], encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError) as e:
+        return None, "OpenRouter 응답 처리 실패: %s" % e
     data = (payload.get("data") or [None])[0] or {}
     b64 = data.get("b64_json")
     if not b64:
@@ -161,7 +194,27 @@ def request_image(prompt: str, out_path: str, model_id: str = None, refs=None,
             f.write(base64.b64decode(b64))
     except (OSError, ValueError) as e:
         return None, "이미지 저장 실패: %s" % e
+    for temp in (spec.get("body_file"), spec.get("out_file")):
+        try:
+            if temp and os.path.exists(temp):
+                os.remove(temp)
+        except OSError:
+            pass
     return out_path, None
+
+
+def request_image(prompt: str, out_path: str, model_id: str = None, refs=None,
+                  aspect_ratio: str = "1:1", quality: str = "high",
+                  resolution: str = "2K", timeout: int = 300):
+    """이미지를 생성해 out_path에 저장한다 (블로킹 — 스모크·테스트용, 애드온 안에서는 generate 를 쓴다).
+
+    (저장 경로, None) 또는 (None, 오류 문자열)."""
+    http_worker = _worker_module()
+    spec, error = build_spec(prompt, out_path, model_id=model_id, refs=refs, aspect_ratio=aspect_ratio,
+                             quality=quality, resolution=resolution, timeout=timeout)
+    if spec is None:
+        return None, error
+    return handle_result(http_worker.perform(spec), spec, out_path)
 
 
 def generate(prompt: str, out_path: str, timeout: int, on_done, refs=None,
@@ -177,8 +230,10 @@ def generate(prompt: str, out_path: str, timeout: int, on_done, refs=None,
     model_id = getattr(prefs, "image_model", DEFAULT_MODEL)
     quality = getattr(prefs, "image_quality", "high")
 
-    def _work():
-        return request_image(prompt, out_path, model_id=model_id, refs=refs,
+    spec, error = build_spec(prompt, out_path, model_id=model_id, refs=refs,
                              aspect_ratio=aspect_ratio, quality=quality, timeout=timeout)
-
-    runner.run_http_async(_work, on_done, job_key=job_key)
+    if spec is None:
+        runner._finish_now(on_done, None, error)
+        return
+    runner.run_http_async(spec, lambda result, err=None: on_done(*(handle_result(result, spec, out_path) if not err else (None, err))),
+                          job_key=job_key)

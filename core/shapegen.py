@@ -253,67 +253,93 @@ def build_body(views: dict, octree: int = 1024, steps: int = 12, guidance: float
     return body
 
 
-def _poll_result(job: dict, timeout: int, interval: float = 3.0) -> bytes:
-    """202 응답의 job_id 로 GET /result/{id} 를 폴링한다. 202 는 진행 중, 200 은 GLB 바이트.
-
-    서버 오류(500)는 HTTPError 로 올라가 호출자가 본문을 읽어 안내한다."""
-    import time
-    job_id = job.get("job_id")
-    if not job_id:
-        raise ValueError("셰이프 서버가 job_id 없이 202를 보냈습니다")
-    url = server_url() + "/result/" + urllib.parse.quote(str(job_id))
-    deadline = time.monotonic() + timeout
-    while True:
-        req = urllib.request.Request(url, headers=auth_headers())
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            body = resp.read()
-            if resp.status == 200:
-                return body
-        if time.monotonic() > deadline:
-            raise OSError("셰이프 생성 대기 시간 초과 (%ds)" % timeout)
-        time.sleep(interval)
+def _worker_module():
+    """http_worker 를 가져온다. 패키지 밖(단위 테스트)에서 상대 임포트가 안 되면 파일로 로드한다(sys.modules 는 건드리지 않음)."""
+    try:
+        from . import http_worker
+        return http_worker
+    except ImportError:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_lp3d_http_worker", os.path.join(os.path.dirname(os.path.abspath(__file__)), "http_worker.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
 
-def request_shape(views: dict, out_path: str, timeout: int = 900, **params):
-    """셰이프를 생성해 out_path(.glb)에 저장한다 (블로킹 — 워커 스레드에서 호출).
+def build_spec(views: dict, out_path: str, timeout: int = 900, **params):
+    """HTTP 워커용 요청 spec — POST /generate, 202 면 /result/{job_id} 폴링(Modal 웹 요청 150초 한계).
 
-    (경로, None) 또는 (None, 오류 문자열)."""
+    (spec, None) 또는 (None, 오류 문자열)."""
     try:
         body = build_body(views, **params)
     except (ValueError, OSError) as e:
         return None, "셰이프 요청 구성 실패: %s" % e
-    req = urllib.request.Request(server_url() + "/generate", data=json.dumps(body).encode("utf-8"),
-                                 headers={"Content-Type": "application/json", **auth_headers()},
-                                 method="POST")
+    body_file = out_path + ".request.json"
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-            # 클라우드 서버는 웹 요청 한계(Modal 150초) 때문에 202 + job_id 를 주고 결과를 폴링시킨다.
-            # 로컬 서버처럼 200 GLB 를 바로 주면 이 분기를 타지 않는다.
-            if resp.status == 202:
-                data = _poll_result(json.loads(data.decode("utf-8")), timeout)
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.read().decode("utf-8", "replace")[:300]
-        except Exception:
-            pass
-        if e.code in (401, 403):
-            return None, "셰이프 서버 인증 실패(%d): 환경설정의 셰이프 서버 토큰을 확인하세요" % e.code
-        return None, "셰이프 서버 오류 %d: %s" % (e.code, detail)
-    except urllib.error.URLError as e:
-        return None, "셰이프 서버에 연결할 수 없습니다 (%s): %s" % (server_url(), e.reason)
+        with open(body_file, "w", encoding="utf-8") as f:
+            json.dump(body, f)
     except OSError as e:
-        return None, "셰이프 요청 실패: %s" % e
+        return None, "셰이프 요청 본문 저장 실패: %s" % e
+    headers = {"Content-Type": "application/json", **auth_headers()}
+    return {"url": server_url() + "/generate", "method": "POST", "body_file": body_file,
+            "out_file": out_path + ".response.bin", "work_dir": os.path.dirname(os.path.abspath(out_path)),
+            "timeout": timeout, "headers": headers,
+            "poll": {"url_prefix": server_url() + "/result/", "job_id_field": "job_id", "pending_status": 202,
+                     "interval": 3.0, "timeout": timeout, "headers": auth_headers(), "request_timeout": 60}}, None
+
+
+def handle_result(result: dict, spec: dict, out_path: str):
+    """워커 결과 → GLB 저장. (경로, None) 또는 (None, 오류 문자열)."""
+    if not result:
+        return None, "셰이프 서버 응답 없음"
+    kind = result.get("kind")
+    if kind == "http":
+        code = int(result.get("status") or 0)
+        if code in (401, 403):
+            return None, "셰이프 서버 인증 실패(%d): 환경설정의 셰이프 서버 토큰을 확인하세요" % code
+        return None, "셰이프 서버 오류 %d: %s" % (code, result.get("detail", "")[:300])
+    if kind == "url":
+        return None, "셰이프 서버에 연결할 수 없습니다 (%s): %s" % (server_url(), result.get("reason", ""))
+    if kind == "timeout":
+        return None, "셰이프 생성 대기 시간 초과: %s" % result.get("reason", "")
+    if kind:
+        return None, "셰이프 요청 실패: %s" % result.get("reason", "")
+    try:
+        with open(spec["out_file"], "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return None, "셰이프 응답 읽기 실패: %s" % e
     if not data or data[:4] != b"glTF":
         return None, "셰이프 서버가 GLB가 아닌 응답을 보냈습니다"
     with open(out_path, "wb") as f:
         f.write(data)
+    for temp in (spec.get("body_file"), spec.get("out_file")):
+        try:
+            if temp and os.path.exists(temp):
+                os.remove(temp)
+        except OSError:
+            pass
     return out_path, None
+
+
+def request_shape(views: dict, out_path: str, timeout: int = 900, **params):
+    """셰이프를 생성해 out_path(.glb)에 저장한다 (블로킹 — 스모크·테스트용, 애드온 안에서는 generate 를 쓴다).
+
+    (경로, None) 또는 (None, 오류 문자열)."""
+    http_worker = _worker_module()
+    spec, error = build_spec(views, out_path, timeout=timeout, **params)
+    if spec is None:
+        return None, error
+    return handle_result(http_worker.perform(spec), spec, out_path)
 
 
 def generate(views: dict, out_path: str, timeout: int, on_done, job_key=None, **params):
     """비동기 셰이프 생성 — 완료 시 메인 스레드에서 on_done(경로|None, 오류|None)."""
     from . import runner
-    runner.run_http_async(lambda: request_shape(views, out_path, timeout=timeout, **params),
-                          on_done, job_key=job_key)
+    spec, error = build_spec(views, out_path, timeout=timeout, **params)
+    if spec is None:
+        runner._finish_now(on_done, None, error)
+        return
+    runner.run_http_async(spec, lambda result, err=None: on_done(*(handle_result(result, spec, out_path) if not err else (None, err))),
+                          job_key=job_key)

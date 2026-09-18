@@ -72,10 +72,8 @@ def enum_items(context=None):
 def _save_entry(identifier, name, kind):
     entries = _entries()
     entries[identifier] = {'name': name.strip() or '사용자 템플릿', 'kind': kind}
-    path = template_root() / 'index.json'
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    from .user_files import write_json_atomic
+    write_json_atomic(template_root() / 'index.json', entries)   # 사용자 CONFIG 경로 — 설치 폴더에 쓰지 않는다
 
 
 def register_object(obj, name, kind='HUMANOID'):

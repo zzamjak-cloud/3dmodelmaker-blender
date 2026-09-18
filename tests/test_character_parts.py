@@ -24,7 +24,7 @@ class CharacterPartsTests(unittest.TestCase):
             prompt = parts.part_prompt('기사', key)
             self.assertIn('3x2', prompt); self.assertIn('80~90%', prompt); self.assertIn('참조', prompt)
             self.assertNotIn('원본 턴어라운드와 동일한', prompt)   # 공통 카메라·축척 강제(결합)는 제거됐다
-        self.assertIn('가려진', parts.part_prompt('기사', 'BODY'))
+        self.assertIn('마네킹', parts.part_prompt('기사', 'BODY'))
         self.assertIn('나란히', parts.part_prompt('기사', 'WEAPON'))
 
     def test_texture_prompt_leaves_layout_to_guide(self):

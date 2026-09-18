@@ -244,8 +244,10 @@ def _pump_http():
             try:
                 with open(job["result_file"], encoding="utf-8") as f:
                     result = json.load(f)
-            except (OSError, ValueError):
-                error = "HTTP 워커가 결과를 남기지 않았습니다\n" + errors.tail(_read(job["err_path"]))
+            except (OSError, ValueError) as exc:
+                # 자식이 결과 파일을 못 남긴 경우 — 종료 코드·표준 출력·오류 출력을 모두 남겨 원인을 추적한다
+                error = (f"HTTP 워커가 결과를 남기지 않았습니다 (종료 코드 {job['proc'].returncode}, {type(exc).__name__}: {exc})\n"
+                         + errors.tail(_read(job["err_path"])) + "\n" + errors.tail(_read(job["out_path"]), 800))
         try:
             job["on_done"](result, error)
         except Exception:

@@ -69,13 +69,14 @@ def run_cli_async(cmd: list, cwd: str, timeout: int, on_done, stdin_text: str = 
     _ensure_pump()
 
 
-def _worker_python() -> list:
-    """HTTP 워커를 돌릴 파이썬 명령. Blender 의 sys.executable 은 번들 파이썬이다(2.92+).
-    실행 파일이 Blender 자체로 잡히는 빌드에서는 배경 모드로 스크립트를 넘긴다."""
-    exe = sys.executable or ""
-    if "blender" in os.path.basename(exe).lower():
-        return [exe, "--background", "--factory-startup", "--python"]
-    return [exe]
+# 자식 파이썬이 워커 파일을 실행하는 부트 코드 — 워커 모듈에 __main__ 블록을 두지 않기 위해 main 을 직접 부른다
+_WORKER_BOOT = "import sys, runpy; sys.exit(runpy.run_path(sys.argv[1])['main'](sys.argv[2:]))"
+
+
+def _worker_command(spec_path: str) -> list:
+    """HTTP 워커 실행 명령. Blender 의 sys.executable 은 번들 파이썬이다(2.92+, 확장 플랫폼 4.2+ 전부)."""
+    from . import http_worker
+    return [sys.executable, "-c", _WORKER_BOOT, http_worker.__spec__.origin, spec_path]
 
 
 def run_http_async(spec: dict, on_done, job_key=None):
@@ -93,7 +94,6 @@ def run_http_async(spec: dict, on_done, job_key=None):
     spec = dict(spec)
     spec.setdefault("result_file", os.path.join(work_dir, f"http_result_{_job_counter}.json"))
     spec_path = os.path.join(work_dir, f"http_spec_{_job_counter}.json")
-    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "http_worker.py")
     job = {"on_done": on_done, "job_key": job_key, "cancelled": False,
            "result_file": spec["result_file"], "out_path": os.path.join(work_dir, f"http_stdout_{_job_counter}.log"),
            "err_path": os.path.join(work_dir, f"http_stderr_{_job_counter}.log"),
@@ -104,7 +104,7 @@ def run_http_async(spec: dict, on_done, job_key=None):
             json.dump(spec, f, ensure_ascii=False)
         job["out_file"] = open(job["out_path"], "w", encoding="utf-8")
         job["err_file"] = open(job["err_path"], "w", encoding="utf-8")
-        cmd = _worker_python() + [worker, "--", spec_path]
+        cmd = _worker_command(spec_path)
         job["proc"] = subprocess.Popen(cmd, cwd=work_dir, stdin=subprocess.DEVNULL,
                                        stdout=job["out_file"], stderr=job["err_file"])
     except Exception as e:

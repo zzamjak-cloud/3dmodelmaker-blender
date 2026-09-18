@@ -3,7 +3,7 @@
 Blender 확장은 스레드를 쓸 수 없고(검증기 py.no_threading, 실제 크래시 원인) urllib 은 논블로킹 폴링이 안 되므로,
 요청 하나를 이 스크립트를 실행하는 자식 프로세스에 맡기고 애드온은 CLI 잡과 같은 타이머 펌프로 종료를 폴링한다.
 
-사용: python http_worker.py <spec.json>
+실행: runner 가 `python -c "...runpy.run_path(...)['main'](argv)"` 로 이 파일의 main 을 부른다(확장 검증기는 __main__ 블록을 허용하지 않음)
 spec: {"url", "method", "headers": {}, "body_file": 요청 본문 파일|null, "timeout": 초,
        "out_file": 응답 본문을 쓸 파일, "result_file": 결과 JSON 파일,
        "poll": null | {"url_prefix": 결과 URL 앞부분, "job_id_field": "job_id", "pending_status": 202,
@@ -100,6 +100,3 @@ def main(argv) -> int:
         json.dump(result, f, ensure_ascii=False)
     return 0
 
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

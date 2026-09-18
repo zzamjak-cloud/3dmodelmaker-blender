@@ -128,7 +128,7 @@ def _worker_module():
     except ImportError:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            "_lp3d_http_worker", os.path.join(os.path.dirname(os.path.abspath(__file__)), "http_worker.py"))
+            "_lp3d_http_worker", os.path.join(os.path.dirname(os.path.abspath(__spec__.origin)), "http_worker.py"))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module

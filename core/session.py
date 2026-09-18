@@ -15,7 +15,6 @@ from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
 from . import (errors, executor, jobs, library, models, multiview,
                prompts, runner, scheduler, shapegen, snapshots, styles, texgen)
-from .character_parts import CharacterPartsMixin, LABELS, retopo_method_note
 from . import texture_stage
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
@@ -117,7 +116,7 @@ def start_job(scene_name, uid, variation_of=None, variation_count=3,
 def start_texture_job(scene_name, uid):
     """모델링이 끝난(MODELED) 잡의 컬렉션에 대해 언랩·매핑만 실행한다. 오류 메시지 또는 None.
 
-    리토폴로지·조합 결과를 사용자가 손본 뒤 부르는 것이 전제다 — 은면 정리·게임레디·레인 이동은
+    리토폴로지 결과를 사용자가 손본 뒤 부르는 것이 전제다 — 은면 정리·게임레디·레인 이동은
     이미 끝난 단계라 다시 하지 않고, 컬렉션에 남긴 매핑 컨텍스트(texture_stage.save_context)만 읽는다."""
     if uid in _sessions:
         return "이미 진행 중인 항목입니다"
@@ -190,7 +189,15 @@ def _slug(text: str) -> str:
     return ascii_part or "Model"
 
 
-class GenerationSession(CharacterPartsMixin):
+def _retopo_method_note(info):
+    """실제 처리 방법과 대체 처리 사유를 사용자 로그용으로 반환한다."""
+    note = str(info['method'])
+    if info.get('fallback_reason'):
+        note += f' (대체 처리: {info["fallback_reason"]})'
+    return note
+
+
+class GenerationSession:
     system_mode = 'OBJECT'  # prompts.build_system_prompt에 넘길 제작 모드
 
     def __init__(self, scene_name, uid, request, exe,
@@ -238,15 +245,11 @@ class GenerationSession(CharacterPartsMixin):
             self.system_mode = 'CHARACTER'
         self.character_type = (str(getattr(job, "character_type", 'AUTO') or 'AUTO')
                                if job else 'AUTO')
-        self.character_parts = str(getattr(job, 'character_parts', 'SEPARATE')) if job else 'SEPARATE'
         self.character_template = str(getattr(job, 'character_template', 'AUTO')) if job else 'AUTO'
         if self.character_template == 'AUTO':
             self.character_template = 'QUADRUPED' if self.character_type == 'ANIMAL' else 'HUMANOID'
         self._cancel_requested = False
-        self._part_records = {}
-        self._texture_part = None
-        self._texture_parts_pending = []
-        # 매핑 시점: MANUAL 이면 리토폴로지·조합 뒤 MODELED 로 멈추고 [매핑 시작]을 기다린다
+        # 매핑 시점: MANUAL 이면 리토폴로지 뒤 MODELED 로 멈추고 [매핑 시작]을 기다린다
         self.texture_stage = (str(getattr(job, 'texture_stage', 'MANUAL') or 'MANUAL')
                               if job else 'MANUAL')
         self.texture_only = False   # start_texture 로 시작한 매핑 전용 세션
@@ -419,9 +422,7 @@ class GenerationSession(CharacterPartsMixin):
         self.backend.prepare_workdir(prompts.build_system_prompt(self.system_mode, self.style))
 
     def start_texture(self, coll, ctx: dict):
-        """매핑 전용 시작 — 컬렉션의 현재 메시(사용자 수정 포함)를 그대로 언랩·6면도 채색·베이크한다.
-
-        부품 표식(`lp3d_character_part`)이 있으면 부품별로 순차 매핑하고, 각 부품의 시트를 색 참조로 쓴다."""
+        """매핑 전용 시작 — 컬렉션의 현재 메시(사용자 수정 포함)를 그대로 언랩·6면도 채색·베이크한다."""
         self.texture_only = True
         self.collection_name = coll.name
         self.multiview = ctx['multiview']
@@ -430,16 +431,9 @@ class GenerationSession(CharacterPartsMixin):
         self.character_type = ctx['character_type']
         self.modeling_type = 'TEXTURE'
         self._final_note = ctx['final_note']
-        records = texture_stage.part_records_from_objects(
-            (o.name, o) for o in coll.objects if o.type == 'MESH')
-        self._part_records = {part: {'sheet': rec['sheet'], 'object': rec['objects'][0]}
-                              for part, rec in records.items()}
-        self._texture_parts_pending = texture_stage.texture_order(records)
-        self._texture_part = self._texture_parts_pending.pop(0) if self._texture_parts_pending else None
         self._begin()
-        what = f"부품 {len(records)}개 순차" if records else "통합 메시"
         self._set_status("UV 언랩 대기중...",
-                         f"매핑 시작 — {what}, 리토폴로지 결과(수정본 포함)를 그대로 언랩·매핑", phase='TEX')
+                         "매핑 시작 — 리토폴로지 결과(수정본 포함)를 그대로 언랩·매핑", phase='TEX')
         self._submit_blender(self._blender_unwrap)
 
     def _use_multiview(self) -> bool:
@@ -458,11 +452,6 @@ class GenerationSession(CharacterPartsMixin):
                              f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')
             self._dispatch(first)
             return
-        if self.system_mode == 'CHARACTER' and self.character_parts == 'SEPARATE':
-            support_error = shapegen.parts_support_error()
-            if support_error:
-                self._finish(f'부품 분리 준비 실패: {support_error}', ok=False)
-                return
         # 신규 생성: 멀티뷰 참조 시트를 먼저 생성 (codex image_gen — 없으면 스킵)
         if self._use_multiview() and multiview.is_available():
             backend = multiview.backend_label()
@@ -473,9 +462,6 @@ class GenerationSession(CharacterPartsMixin):
                              f"멀티뷰 참조 시트 생성 시작 [{backend}]", phase='GEN')
             # 멀티뷰도 CLI 호출이므로 AI 슬롯을 점유한다
             self._submit_ai(self._run_multiview)
-            return
-        if self.system_mode == 'CHARACTER' and self.character_parts == 'SEPARATE':
-            self._finish('부품 분리 실패: 멀티뷰 참조 생성 기능이 필요합니다', ok=False)
             return
         self._start_generation()
 
@@ -518,14 +504,6 @@ class GenerationSession(CharacterPartsMixin):
             lines += [f"  · {l}" for l in errors.detail_lines(error)]
             # 상태줄에 "— 참조 없이 진행"까지 붙이면 가운데가 잘려 정작 원인이 사라진다
             self._set_status(f"멀티뷰 실패: {reason}", "\n".join(lines))
-        if self.system_mode == 'CHARACTER' and self.character_parts == 'SEPARATE':
-            if not self.multiview:
-                self._finish(f'부품 분리 실패: 원본 턴어라운드 생성 실패 ({error})', ok=False)
-            elif not shapegen.is_available():
-                self._finish('부품 분리 실패: 셰이프 서버 연결 또는 셰이프 생성 설정을 확인하세요', ok=False)
-            else:
-                self._start_character_parts()
-            return
         if self.multiview and self.system_mode == 'CHARACTER' and shapegen.is_available():
             self._start_shapegen()
             return
@@ -595,7 +573,7 @@ class GenerationSession(CharacterPartsMixin):
         self._set_status(
             "셰이프 리토폴로지 완료",
             f"셰이프: 원본 {info['raw_faces']}면, 파편 {info['floaters_removed']}개 제거, "
-            f"리메시 {info['remeshed_faces']}면 → {retopo_method_note(info)} → {info['faces']}면 "
+            f"리메시 {info['remeshed_faces']}면 → {_retopo_method_note(info)} → {info['faces']}면 "
             f"(쿼드 {info['quads']}, 밀도 축소 {info['reduced_faces']}면) = {info['tris']} tris")
         self._finalize()
 
@@ -919,8 +897,7 @@ class GenerationSession(CharacterPartsMixin):
         coll = bpy.data.collections.get(self.collection_name)
         if coll:
             mesh_objs = [o for o in coll.objects if o.type == 'MESH']
-            # 분리 부품은 장비 아래 몸체와 안쪽 의상 면까지 보존한다.
-            removed = 0 if self._part_records else cull_hidden_faces(mesh_objs)
+            removed = cull_hidden_faces(mesh_objs)
             for obj in mesh_objs:
                 game_ready(obj)
             tris = collection_tri_count(coll)
@@ -930,7 +907,7 @@ class GenerationSession(CharacterPartsMixin):
             self._final_note = f"{tris} tris{note}"
             if self.modeling_type == 'TEXTURE' and mesh_objs:
                 if self.texture_stage == 'MANUAL' and not self.texture_only:
-                    # 리토폴로지·조합에서 멈춘다. 매핑에 필요한 것은 컬렉션에 남겨 두고, 사용자가
+                    # 리토폴로지에서 멈춘다. 매핑에 필요한 것은 컬렉션에 남겨 두고, 사용자가
                     # 메시를 손본 뒤 [매핑 시작]을 누르면 start_texture_job 이 이어받는다.
                     job = self._job()
                     texture_stage.save_context(
@@ -940,15 +917,9 @@ class GenerationSession(CharacterPartsMixin):
                                  ok=True, state='MODELED')
                     return
                 if not texgen.is_available():
-                    if self._part_records:
-                        self._finish('부품 텍스처 실패: 이미지 생성 기능을 사용할 수 없습니다', ok=False)
-                        return
                     self._set_status("텍스처 생략: codex CLI 없음",
                                      "개별 매핑 생략 — codex CLI를 찾을 수 없어 팔레트로 마감")
                 else:
-                    if self._part_records:
-                        self._texture_parts_pending = list(self._part_records)
-                        self._texture_part = self._texture_parts_pending.pop(0)
                     # 언랩·렌더·베이크는 각각 한 틱을 통째로 막으므로 스텝을 나눠
                     # 상태줄이 실제로 갱신되고 다른 잡의 큐도 사이사이 진행되게 한다
                     self._set_status("UV 언랩 대기중...", phase='TEX')
@@ -978,9 +949,6 @@ class GenerationSession(CharacterPartsMixin):
     # 두고 원인만 상태·로그에 남긴다.
     def _texture_fallback(self, reason: str, error: str = None):
         from ..texturing import apply as tex_apply
-        if self._part_records:
-            self._finish(f'부품 텍스처 실패 ({LABELS.get(self._texture_part, "부품")}): {reason}', ok=False)
-            return
         coll = bpy.data.collections.get(self.collection_name)
         if coll:
             tex_apply.discard([o for o in coll.objects if o.type == 'MESH'])
@@ -995,8 +963,7 @@ class GenerationSession(CharacterPartsMixin):
 
     def _mesh_objs(self):
         coll = bpy.data.collections.get(self.collection_name)
-        return [o for o in coll.objects if o.type == 'MESH'
-                and (not self._texture_part or o.get('lp3d_character_part') == self._texture_part)] if coll else []
+        return [o for o in coll.objects if o.type == 'MESH'] if coll else []
 
     def _texture_step(self, fn, stage: str):
         """텍스처 단계 하나를 실행한다 — 예외는 세션 실패가 아니라 팔레트 폴백으로 흡수한다."""
@@ -1034,7 +1001,7 @@ class GenerationSession(CharacterPartsMixin):
         def _run():
             from ..texturing import capture as tex_capture
             self._set_status("6면도 가이드 렌더중...", phase='TEX')
-            guide_dir = os.path.join(self.workdir, "texture", self._texture_part or 'combined')
+            guide_dir = os.path.join(self.workdir, "texture")
             with _bake_context(self.scene_name) as ctx:
                 views = tex_capture.render_views(ctx, self._mesh_objs(), guide_dir)
             guide = tex_capture.join_sheet(views, os.path.join(guide_dir, "guide_sheet.png"))
@@ -1049,19 +1016,10 @@ class GenerationSession(CharacterPartsMixin):
             is_character = self.system_mode == 'CHARACTER'
             per_view = bool(getattr(self.prefs, "texture_per_view", False)) or is_character
             reference = self.multiview if is_character else None
-            request = self.request
-            texture_workdir = self.workdir
-            if self._texture_part:
-                from .character_parts import part_texture_prompt
-                reference = self._part_records[self._texture_part]['sheet']
-                request = part_texture_prompt(self.request, self._texture_part)
-                texture_workdir = os.path.join(self.workdir, 'parts', self._texture_part.lower())
             self._submit_ai_texture(lambda: texgen.generate(
-                request, guide, texture_workdir, self.prefs.timeout,
+                self.request, guide, self.workdir, self.prefs.timeout,
                 self._on_texture_sheet, job_key=self.uid,
                 reference=reference, per_view=per_view,
-                has_face=self._texture_part in (None, 'BODY'),
-                strict_views=bool(self._texture_part),
                 is_active=lambda: not self._stale() and not self._cancel_requested))
         self._texture_step(_run, "가이드 렌더")
 
@@ -1071,9 +1029,6 @@ class GenerationSession(CharacterPartsMixin):
         scheduler.release_ai(self.uid)
         # 펌프는 콜백 예외를 삼키므로 여기서 잡지 않으면 세션이 영원히 끝나지 않는다
         try:
-            if self._texture_part and isinstance(path, dict) and len(path) < 6:
-                self._submit_blender(lambda: self._texture_fallback('부품 텍스처 6시점 중 일부 생성 실패'))
-                return
             if not path:
                 reason = errors.describe(error, 'codex') if error else "원인 불명"
                 self._submit_blender(lambda: self._texture_fallback(reason, error))
@@ -1123,12 +1078,5 @@ class GenerationSession(CharacterPartsMixin):
             if job:
                 job.texture_path = saved
             self._set_status("텍스처 적용 완료", f"텍스처 저장: {saved} (머티리얼 {result['material']})")
-            if self._texture_part:
-                self._part_records[self._texture_part]['texture'] = saved
-                if self._texture_parts_pending:
-                    self._texture_part = self._texture_parts_pending.pop(0)
-                    self._submit_blender(self._blender_unwrap)
-                    return
-                self._texture_part = None
             self._finish_placed(extra=f", 텍스처 {result['image']} {resolution}px")
         self._texture_step(_run, "적용")

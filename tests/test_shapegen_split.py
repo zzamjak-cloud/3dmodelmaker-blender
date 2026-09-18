@@ -10,8 +10,6 @@ pkg = types.ModuleType("lp3dcore_split"); pkg.__path__ = [str(ROOT / "core")]
 sys.modules["lp3dcore_split"] = pkg
 spec = importlib.util.spec_from_file_location("lp3dcore_split.shapegen", ROOT / "core/shapegen.py")
 sg = importlib.util.module_from_spec(spec); sys.modules["lp3dcore_split.shapegen"] = sg; spec.loader.exec_module(sg)
-spec2 = importlib.util.spec_from_file_location("cp_split", ROOT / "core/character_parts.py")
-cp = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(cp)
 
 
 def _sheet(w, h, xcuts, ycut, gray=0.82):

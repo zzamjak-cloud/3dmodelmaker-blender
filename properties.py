@@ -78,16 +78,6 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         ],
         default='AUTO',
     )
-    character_parts: EnumProperty(
-        name="부위 생성",
-        description="몸체와 장비를 독립 메시로 생성해 옷 아래 몸체와 개별 수정을 보존",
-        items=[
-            ('SEPARATE', "몸체 / 의상·악세사리 / 무기·방어구 분리",
-             "시트와 셰이프를 부위별로 생성해 독립 오브젝트로 배치 (시트 5장·셰이프 4건 — 생성 시간과 비용이 늘어남)"),
-            ('COMBINED', "통합 생성", "기존 방식으로 하나의 셰이프 생성"),
-        ],
-        default='SEPARATE',
-    )
     # 사용자 템플릿은 UUID 문자열로 저장해 목록 순서가 바뀌어도 선택이 유지된다.
     character_template: StringProperty(name="베이스 메시", default='AUTO')
     scene_size: EnumProperty(
@@ -117,12 +107,12 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         ],
         default='PALETTE',
     )
-    # 리토폴로지·조합과 언랩·매핑을 분리한다 — 사용자가 메시를 손본 뒤 [매핑 시작]을 누르는 시점에 매핑
+    # 리토폴로지와 언랩·매핑을 분리한다 — 사용자가 메시를 손본 뒤 [매핑 시작]을 누르는 시점에 매핑
     texture_stage: EnumProperty(
         name="매핑 시점",
         description="개별 매핑을 언제 실행할지",
         items=[
-            ('MANUAL', "모델링 후 수동", "리토폴로지·조합까지 끝내고 멈춘다. 메시를 수정한 뒤 [매핑 시작]으로 언랩·매핑"),
+            ('MANUAL', "모델링 후 수동", "리토폴로지까지 끝내고 멈춘다. 메시를 수정한 뒤 [매핑 시작]으로 언랩·매핑"),
             ('AUTO', "자동", "리토폴로지 직후 곧바로 언랩·매핑까지 진행 (기존 동작)"),
         ],
         default='MANUAL',
@@ -134,7 +124,7 @@ class LP3DJobItem(bpy.types.PropertyGroup):
             ('PENDING', "대기", "아직 실행되지 않음"),
             ('RUNNING', "실행 중", "AI 호출 또는 Blender 작업 진행 중"),
             ('DONE', "완료", "생성 성공"),
-            ('MODELED', "모델링 완료", "리토폴로지·조합까지 끝남 — 메시를 수정한 뒤 [매핑 시작]"),
+            ('MODELED', "모델링 완료", "리토폴로지까지 끝남 — 메시를 수정한 뒤 [매핑 시작]"),
             ('FAILED', "실패", "생성 실패 — 원인은 상태·로그 참고"),
             ('CANCELLED', "취소됨", "사용자가 중단함"),
         ],

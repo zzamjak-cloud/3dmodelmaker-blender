@@ -25,7 +25,7 @@ TURNAROUND_CELLS = {
 # 서버에 보내는 뷰 (top·3/4은 멀티뷰 모델이 받지 않는다)
 SEND_VIEWS = ("front", "back", "left", "right")
 # 시트 분할 규칙 — 생성 모델은 격자를 정확한 1/3·1/2 위치에 그리지 않고(실측 ±5%), 라벨을 칸 위 또는 아래에 붙인다.
-# 등분으로 자르면 옆 칸의 라벨·격자선이 섞여 들어와 셰이프에 판으로 복원되고, 실루엣 bbox 가 칸 전체가 되어 부품 배치가 무너진다.
+# 등분으로 자르면 옆 칸의 라벨·격자선이 섞여 들어와 셰이프에 두께 0 의 판으로 복원된다(실측).
 DARK = 0.90            # min(RGB) 가 이보다 어두우면 배경(흰색)이 아니다 — 격자선 회색(≈0.82) 포함
 GRID_BAND = 0.12       # 격자선을 찾는 범위: 등분 위치 ±이 비율
 GRID_MIN_FRAC = 0.5    # 행/열의 이 비율 이상이 어두워야 격자선으로 인정
@@ -98,8 +98,8 @@ def label_rows(occupied, height: int) -> list:
 
 
 def clean_cell(px, w, h):
-    """셀 픽셀(RGBA float 리스트, 좌하단 원점)에서 가장자리 여백과 라벨 블록을 흰색으로 덧칠한다. 크기는 그대로 —
-    시트끼리 좌표 기준을 공유해야 부품 배치(placement)가 성립한다."""
+    """셀 픽셀(RGBA float 리스트, 좌하단 원점)에서 가장자리 여백과 라벨 블록을 흰색으로 덧칠한다. 크기는 그대로 둔다 —
+    서버가 알파 bbox 로 크롭하므로 칸을 다시 자르면 뷰끼리 축척이 어긋난다."""
     m = CELL_MARGIN if w > 4 * CELL_MARGIN and h > 4 * CELL_MARGIN else 0
     white = [1.0, 1.0, 1.0, 1.0]
 
@@ -169,29 +169,6 @@ def is_available(timeout: float = None) -> bool:
         return False
 
 
-def parts_support_error(timeout: float = None) -> str:
-    """이미지 생성 비용을 쓰기 전에 서버의 분리 부품 보존 기능을 확인한다."""
-    if not is_enabled():
-        return '환경설정에서 셰이프 생성을 켜세요'
-    if timeout is None:
-        timeout = status_timeout()
-    try:
-        req = urllib.request.Request(server_url() + '/status', headers=auth_headers())
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            status = json.loads(response.read().decode('utf-8'))
-    except urllib.error.HTTPError as exc:
-        # 401/403은 서버가 살아 있고 토큰이 틀린 것 — 연결 문제로 오해하지 않게 따로 안내한다
-        if exc.code in (401, 403):
-            return '셰이프 서버 인증 실패: 환경설정의 셰이프 서버 토큰을 확인하세요'
-        return f'셰이프 서버 오류 {exc.code}'
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        return f'셰이프 서버에 연결할 수 없습니다: {exc}'
-    if not isinstance(status, dict) or not isinstance(status.get('capabilities'), dict) or not status['capabilities'].get('preserve_parts'):
-        return ('현재 셰이프 서버가 부품 보존을 지원하지 않습니다. '
-                '저장소 scripts/trellis3d/ 의 최신 서버로 업데이트하고 재배포하세요')
-    return ''
-
-
 def split_turnaround(sheet_path: str, out_dir: str) -> dict:
     """턴어라운드 시트를 칸별 PNG로 잘라 {view: path}를 돌려준다 (bpy 이미지 API, PIL 불필요).
 
@@ -236,14 +213,12 @@ def _b64(path: str) -> str:
 
 
 def build_body(views: dict, octree: int = 1024, steps: int = 12, guidance: float = 7.5,
-               face_count: int = 0, seed: int = 7, preserve_parts: bool = False) -> dict:
+               face_count: int = 0, seed: int = 7) -> dict:
     """셰이프 요청 본문. 기본값은 TRELLIS.2 표준(12스텝·guidance 7.5·1024 캐스케이드) —
     이전 Hunyuan 기본(30스텝·5.0·256)은 TRELLIS 에서 시간·비용만 2.5배 들고 품질 이득이 없다."""
     body = {"octree_resolution": int(octree), "num_inference_steps": int(steps),
             "guidance_scale": float(guidance), "face_count": int(face_count), "seed": int(seed),
             "texture": False, "type": "glb"}
-    if preserve_parts:
-        body['preserve_parts'] = True
     for name in SEND_VIEWS:
         path = views.get(name)
         if path and os.path.isfile(path):

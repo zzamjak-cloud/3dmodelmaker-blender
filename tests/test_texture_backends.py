@@ -1,4 +1,4 @@
-"""부품 보존 서버 계약과 이미지·텍스처 백엔드 전달을 검증한다."""
+"""이미지·텍스처 백엔드 전달과 서버 후처리 계약을 검증한다."""
 import ast
 import importlib.util
 import json
@@ -56,24 +56,7 @@ class BackendTests(unittest.TestCase):
         setattr(sys.modules[parent], attr, module)
         return module
 
-    def test_override_does_not_append_character_restoration_contract(self):
-        with patch.object(self.mv, 'use_openrouter', return_value=True):
-            self.mv.generate('무기', self.directory, 30, Mock(), ref_image='original.png',
-                             sheet='TURNAROUND', prompt_override='무기만 남겨라')
-        self.assertEqual(self.imagegen.generate.call_args.args[0], '무기만 남겨라')
-        self.assertEqual(self.imagegen.generate.call_args.kwargs['refs'], ['original.png'])
-
-    def test_cli_override_preserves_save_contract(self):
-        with (patch.object(self.mv, 'use_openrouter', return_value=False),
-              patch.object(self.mv.tempfile, 'mkdtemp', return_value=self.directory)):
-            self.mv.generate('무기', self.directory, 30, Mock(), ref_image='original.png',
-                             sheet='TURNAROUND', prompt_override='무기만 남겨라')
-        prompt = self.runner.run_cli_async.call_args.kwargs['stdin_text']
-        self.assertIn('무기만 남겨라', prompt)
-        self.assertIn('multiview.png', prompt)
-        self.assertNotIn('의상·장비·', prompt)
-
-    def test_codex_texture_attaches_part_reference_without_face_requirement(self):
+    def test_codex_texture_attaches_reference_without_face_requirement(self):
         guide = str(Path(self.directory) / 'guide.png')
         reference = str(Path(self.directory) / 'ref.png')
         Path(guide).write_bytes(b'guide')
@@ -88,22 +71,6 @@ class BackendTests(unittest.TestCase):
         prompt = self.runner.run_cli_async.call_args.kwargs['stdin_text']
         self.assertNotIn('얼굴은 반드시', prompt)
         self.assertIn('장비 부품', prompt)
-
-    def test_old_server_reports_actionable_upgrade(self):
-        response = MagicMock()
-        response.__enter__.return_value.read.return_value = b'{"ok": true}'
-        with patch.object(self.shape.urllib.request, 'urlopen', return_value=response):
-            self.assertIn('업데이트', self.shape.parts_support_error())
-        response.__enter__.return_value.read.return_value = json.dumps(
-            {'ok': True, 'capabilities': {'preserve_parts': True}}).encode()
-        with patch.object(self.shape.urllib.request, 'urlopen', return_value=response):
-            self.assertEqual(self.shape.parts_support_error(), '')
-
-    def test_preserve_parts_request_flag(self):
-        front = Path(self.directory) / 'front.png'
-        front.write_bytes(b'image')
-        self.assertTrue(self.shape.build_body({'front': str(front)}, preserve_parts=True)['preserve_parts'])
-        self.assertNotIn('preserve_parts', self.shape.build_body({'front': str(front)}))
 
     def test_nonface_view_never_requires_face(self):
         prompt = self.layout.build_view_prompt('무기', 'FRONT', has_reference=True, has_face=False)

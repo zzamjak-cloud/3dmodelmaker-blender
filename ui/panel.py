@@ -149,7 +149,6 @@ class LP3D_PT_main(bpy.types.Panel):
             layout.label(text="머티리얼: 컬러 스와치 (고정)")
         elif job.creation_mode == 'CHARACTER':
             layout.prop(job, "character_type", text="캐릭터 유형")
-            layout.prop(job, "character_parts", text="부위 생성")
             from .. import preferences
             from . import template_operators
             prefs = preferences.get_prefs()

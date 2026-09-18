@@ -53,7 +53,7 @@ index_path = templates.template_root() / 'index.json'
 index_backup = index_path.read_text(encoding='utf-8')
 try:
     index_path.write_text('{broken', encoding='utf-8')
-    assert len(templates.enum_items()) == 2
+    assert len(templates.enum_items()) == len(templates._BUILTINS)   # 손상된 index.json 이면 내장 목록만 남는다
     obj = templates.load_template('HUMANOID', collection)
     try:
         templates.register_object(obj, '손상 목록 보존')

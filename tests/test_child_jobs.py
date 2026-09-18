@@ -107,10 +107,8 @@ class TestCharacterDuplicate(unittest.TestCase):
         source = jobs.add_job(props, "늑대 전사")
         source.creation_mode = 'CHARACTER'
         source.character_template = 'user_wolf'
-        source.character_parts = 'COMBINED'
         result = jobs.duplicate_job(props, 0)
         self.assertEqual(getattr(result, 'character_template', None), 'user_wolf')
-        self.assertEqual(getattr(result, 'character_parts', None), 'COMBINED')
 
 
 class ChildJobTestCase(unittest.TestCase):

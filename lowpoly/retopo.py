@@ -35,10 +35,17 @@ def import_glb(path: str) -> list:
     return meshes
 
 
-def keep_largest_island(obj, min_ratio: float = 0.0) -> int:
-    """가장 큰 연결 덩어리만 남긴다. 제거한 덩어리 수를 돌려준다.
+# 가장 큰 덩어리 대비 이 비율 이상인 셸은 파편이 아니라 본체의 일부다 — 실측(2026-09-18): TRELLIS.2 캐릭터가
+# 상체(259,941면) + 하체·다리(83,929면, 32%) 두 셸로 와서, 가장 큰 것만 남기면 다리가 통째로 사라지고
+# 남은 상체가 키 기준 정규화로 늘어났다. 실제 파편(귀·머리카락 조각)은 1% 미만이다.
+KEEP_ISLAND_RATIO = 0.05
 
-    이미지→3D 결과에는 몸에서 떨어진 작은 파편이 수십 개 붙어 나온다."""
+
+def keep_largest_island(obj, min_ratio: float = KEEP_ISLAND_RATIO) -> int:
+    """작은 파편 덩어리를 지운다 — 가장 큰 덩어리와 그 min_ratio 이상인 덩어리는 남긴다. 제거한 덩어리 수를 돌려준다.
+
+    이미지→3D 결과에는 몸에서 떨어진 작은 파편이 수십 개 붙어 나온다. 반대로 다리·부츠·들고 있는 무기가
+    본체와 떨어진 큰 셸로 오는 경우도 있어, 크기로 구분하지 않으면 멀쩡한 부위를 지운다."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     bm.verts.ensure_lookup_table()
@@ -119,9 +126,9 @@ def _division_ladder(obj, hi, extent: float, target_faces: int) -> list:
     부츠처럼 작은 셸은 90분할에서도 목표의 28배 면수가 나와 QuadriFlow 가 죽었다(QF_MAX_INPUT_RATIO 참고).
     복셀 면수는 분할 수의 제곱에 비례하므로 sqrt 로 맞추고, 그 밀도와 0.75배·0.5배를 차례로 시도한다."""
     obj.data = hi.data.copy()
-    keep_largest_island(obj, 0.0)
+    keep_largest_island(obj)
     voxel_remesh(obj, extent / 90.0)
-    keep_largest_island(obj, 0.0)
+    keep_largest_island(obj)
     faces = max(len(obj.data.polygons), 1)
     want = max(int(target_faces) * 2.5, 1.0)
     base = 90 if faces <= want * 1.2 else max(12, int(90 * (want / faces) ** 0.5))
@@ -158,9 +165,9 @@ def retopo_robust(obj, hi, target_faces: int, height_units: float) -> tuple:
     for divisions in _division_ladder(obj, hi, extent, target_faces):
         for target_size in (10.0, 20.0, 40.0):
             obj.data = hi.data.copy()
-            keep_largest_island(obj, 0.0)
+            keep_largest_island(obj)
             voxel_remesh(obj, extent / divisions)
-            keep_largest_island(obj, 0.0)
+            keep_largest_island(obj)
             remeshed = len(obj.data.polygons)
             scale = target_size / extent
             obj.data.transform(Matrix.Scale(scale, 4))
@@ -170,9 +177,9 @@ def retopo_robust(obj, hi, target_faces: int, height_units: float) -> tuple:
             if ok:
                 return "quadriflow", remeshed
     obj.data = hi.data.copy()
-    keep_largest_island(obj, 0.0)
+    keep_largest_island(obj)
     voxel_remesh(obj, extent / 90.0)
-    keep_largest_island(obj, 0.0)
+    keep_largest_island(obj)
     remeshed = len(obj.data.polygons)
     # 3차 — 데시메이트 (기존 폴백)
     obj.data.calc_loop_triangles()

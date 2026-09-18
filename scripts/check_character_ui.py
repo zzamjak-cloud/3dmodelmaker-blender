@@ -23,7 +23,6 @@ assert hasattr(bpy.ops.lp3d, 'template_load'), '템플릿 로드 연산자 미�
 props = bpy.context.scene.lp3d
 job = jobs.add_job(props, '템플릿 검증')
 job.creation_mode = 'CHARACTER'
-assert job.character_parts == 'SEPARATE'
 assert job.character_template == 'AUTO'
 job.character_type = 'ANIMAL'
 assert template_ui.selected_id(job) == 'QUADRUPED'
@@ -55,11 +54,9 @@ source = out / 'external-template.blend'
 bpy.data.libraries.write(str(source), {custom}, fake_user=True)
 assert bpy.ops.lp3d.template_import(filepath=str(source), template_name='외부 등록',
                                   kind='HUMANOID') == {'FINISHED'}
-job.character_parts = 'COMBINED'
 source_id = job.character_template
 duplicate = jobs.duplicate_job(props, props.job_index)
 assert duplicate.character_template == source_id
-assert duplicate.character_parts == 'COMBINED'
 
 report = {'blender': bpy.app.version_string, 'profile': bpy.utils.resource_path('USER'),
           'human_faces': len(human.data.polygons), 'user_templates': len(templates.enum_items()) - 2,

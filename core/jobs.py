@@ -164,7 +164,6 @@ def duplicate_job(props, index: int):
         "style": src.style,
         "character_type": getattr(src, "character_type", 'AUTO'),
         "character_template": getattr(src, "character_template", 'AUTO'),
-        "character_parts": getattr(src, "character_parts", 'SEPARATE'),
     }
     job = add_job(props, src.prompt)
     for key, value in values.items():

@@ -70,6 +70,8 @@ class LP3D_UL_jobs(bpy.types.UIList):
             row.label(text="실패")
         elif item.state == 'DONE':
             row.label(text="완료")
+        elif item.state == 'MODELED':
+            row.label(text="모델링 완료 · 매핑 대기")
 
 
 class LP3D_PT_main(bpy.types.Panel):
@@ -162,6 +164,8 @@ class LP3D_PT_main(bpy.types.Panel):
                 row.operator('lp3d.template_import', text='.blend 등록')
                 box.label(text='기준: 정면 -Y, 위쪽 +Z, 중립 자세', icon='INFO')
             layout.prop(job, "modeling_type", text="모델링 타입")
+            if job.modeling_type == 'TEXTURE':
+                layout.prop(job, "texture_stage", text="매핑 시점")
             hint = layout.column(align=True)
             hint.scale_y = 0.85
             if job.ref_image_path.strip():
@@ -172,6 +176,8 @@ class LP3D_PT_main(bpy.types.Panel):
                 hint.label(text="얼굴·의상 디테일은 '개별 매핑'이 유리합니다", icon='INFO')
         else:
             layout.prop(job, "modeling_type", text="모델링 타입")
+            if job.modeling_type == 'TEXTURE':
+                layout.prop(job, "texture_stage", text="매핑 시점")
 
     def _draw_multiview(self, layout, props, job):
         """AI가 만든 멀티뷰(3면도) 시트 — 패널에서 바로 확인하고 참조로 재사용할 수 있게 한다.
@@ -239,6 +245,9 @@ class LP3D_PT_main(bpy.types.Panel):
             box.label(text="자세한 원인은 [로그] 패널 참고", icon='TEXT')
         if job.state in ('FAILED', 'CANCELLED'):
             box.operator("lp3d.job_retry", icon='FILE_REFRESH')
+        if job.state == 'MODELED':
+            box.label(text="메시를 수정한 뒤 매핑을 시작하세요", icon='INFO')
+            box.operator("lp3d.job_texture", icon='TEXTURE')
         if not session.is_active(job.uid):
             return
         box.operator("lp3d.job_cancel", icon='CANCEL')

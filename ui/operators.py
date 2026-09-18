@@ -117,6 +117,25 @@ class LP3D_OT_job_retry(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LP3D_OT_job_texture(bpy.types.Operator):
+    bl_idname = "lp3d.job_texture"
+    bl_label = "매핑 시작"
+    bl_description = ("리토폴로지·조합이 끝난 결과(메시를 수정했다면 수정본 그대로)를 언랩하고 6면도 AI 텍스처를 베이크한다. "
+                      "실패해도 메시는 유지되며 다시 누를 수 있다")
+
+    @classmethod
+    def poll(cls, context):
+        job = _standalone_job(context)
+        return job is not None and job.state == 'MODELED' and not session.is_active(job.uid)
+
+    def execute(self, context):
+        error = session.start_texture_job(context.scene.name, context.scene.lp3d.active_job().uid)
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
 class LP3D_OT_job_cancel(bpy.types.Operator):
     bl_idname = "lp3d.job_cancel"
     bl_label = "항목 중단"
@@ -503,7 +522,7 @@ _CLASSES = (
     LP3D_OT_load_last_multiview,
     LP3D_OT_paste_ref_image, LP3D_OT_clear_ref_image,
     LP3D_OT_job_add, LP3D_OT_job_remove, LP3D_OT_job_duplicate, LP3D_OT_job_move,
-    LP3D_OT_job_retry, LP3D_OT_job_cancel,
+    LP3D_OT_job_retry, LP3D_OT_job_texture, LP3D_OT_job_cancel,
     LP3D_OT_queue_start, LP3D_OT_queue_stop,
     LP3D_OT_variation,
     LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,

@@ -137,11 +137,20 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=12000, min=2000, max=100000,
         update=_persist_cb,
     )
+    shapegen_carve_outfit: BoolProperty(
+        name="의상에서 몸체 근접 면 자동 삭제 (실험)",
+        description="부위 분리 시 '옷 입은 전신' 의상 메시에서 몸체 표면 근처·내부 면을 지워 의상만 남긴다. "
+                    "몸체와 의상은 따로 생성돼 수 cm 어긋나므로 결과가 파편(머리카락 잔재·소매 결손)이 되기 쉽다 — "
+                    "기본은 끔: 깨끗한 전신 셸에서 옷 속 몸체 면을 직접 지우는 편이 빠르다",
+        default=False,
+        update=_persist_cb,
+    )
     shapegen_method: EnumProperty(
         name="리토폴로지 방식",
         description="이미지→3D 셰이프를 게임용 메시로 줄이는 방법",
         items=[
-            ('TEMPLATE', "베이스 메시 템플릿", "몸체에 얼굴·관절 루프를 가진 템플릿을 적합. 극단적인 비율은 수동 보정 필요"),
+            ('TEMPLATE', "베이스 메시 템플릿", "몸체에 얼굴·관절 루프를 가진 템플릿을 적합. 극단적인 비율은 수동 보정 필요. "
+                                          "내장 템플릿은 A-포즈라 T-포즈 시트와 팔 각도가 어긋날 수 있다"),
             ('QUADRIFLOW', "QuadriFlow 쿼드", "복셀 리메시 → QuadriFlow → 하이폴리 슈링크랩 — 균일 쿼드 메시"),
             ('DECIMATE', "데시메이트 (트라이)", "조각 제거 후 데시메이트 — 빠르지만 삼각형 그대로라 수정이 어렵다"),
         ],
@@ -233,6 +242,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
             char_box.prop(self, "shapegen_token")
             char_box.prop(self, "shapegen_faces")
             char_box.prop(self, "shapegen_method")
+            char_box.prop(self, "shapegen_carve_outfit")
             char_box.prop(self, "character_height")
         char_box.prop(self, "character_compare_turns")
         img_box = self.layout.box()
@@ -281,6 +291,7 @@ class _Defaults:
     shapegen_token = ""
     shapegen_faces = 12000
     shapegen_method = 'QUADRIFLOW'
+    shapegen_carve_outfit = False
     character_height = 1.8
     scene_tri_budget = 0
     scene_max_assets = 0

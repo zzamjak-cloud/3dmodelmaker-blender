@@ -137,7 +137,7 @@ def _multiview_note(multiview: str, mode: str = "OBJECT") -> str:
 # 캐릭터 유형별 비율·골격 지시 — 시스템 지침 규칙 7의 어느 항을 적용할지 못 박는다
 _CHARACTER_TYPE_NOTE = {
     "AUTO": "유형은 요청문·원화에서 판단하라(인간형/동물형/크리처형) — 판단한 유형의 비율 규칙을 적용한다.",
-    "HUMANOID": "유형: **인간형**. 머리 크기 기준 두신 비율(스타일이 정함), A-포즈, 어깨 폭은 머리 1.5~2배.",
+    "HUMANOID": "유형: **인간형**. 머리 크기 기준 두신 비율(스타일이 정함), T-포즈(양팔 수평), 어깨 폭은 머리 1.5~2배.",
     "ANIMAL": ("유형: **동물형**. 실제 동물의 골격 비율과 관절 방향(앞다리 팔꿈치 뒤·뒷다리 무릎 앞·"
                "발목 뒤)을 지키고, 네 발로 선 중립 자세로 만든다."),
     "CREATURE": ("유형: **크리처형**. 동물 2~3종의 부위를 조합하되 팔·다리·꼬리·날개가 하나의 골격 "
@@ -194,7 +194,7 @@ def build_initial_prompt(user_request: str, ref_image: str = None, multiview: st
         head = (
             f"다음 게임 캐릭터를 만들어라: {user_request}\n"
             f"{character_type_note(character_type)}\n\n"
-            "리깅 자세(A-포즈 / 네 발 중립), 정면 -Y, 발바닥 z=0, 관절 단위 파트 분할, "
+            "리깅 자세(T-포즈 / 네 발 중립), 정면 -Y, 발바닥 z=0, 관절 단위 파트 분할, "
             "반쪽 모델링 + lp.mirror_x를 반드시 지켜라. "
             "시스템 지침의 출력 형식(STATUS 헤더 + python 코드 블록 1개)을 반드시 지켜라."
         )

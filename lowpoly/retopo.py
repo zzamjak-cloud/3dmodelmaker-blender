@@ -83,9 +83,15 @@ def voxel_remesh(obj, voxel_size: float) -> None:
         bpy.ops.object.voxel_remesh()
 
 
+QF_MAX_INPUT_RATIO = 6.0   # 입력 면수 / 목표 면수 상한 — 실측(2026-09-18): 28배에서 QuadriFlow 가 메모리 폭주로 SIGKILL,
+                           # 6~12배는 'Remeshing failed', 3배 이하 성공. 가드가 없으면 Blender 프로세스 자체가 죽는다.
+
+
 def _quadriflow_once(obj, target_faces: int) -> bool:
     """QuadriFlow 한 번 시도. 면수가 바뀌었으면 성공. (실패 시 조용히 아무것도 안 하거나 RuntimeError)"""
     before = len(obj.data.polygons)
+    if before > int(target_faces) * QF_MAX_INPUT_RATIO:
+        return False
     try:
         with _override(obj):
             bpy.ops.object.quadriflow_remesh(target_faces=int(target_faces),
@@ -105,6 +111,26 @@ def _dissolve_degenerate(obj, dist: float) -> None:
     bm.to_mesh(obj.data)
     bm.free()
     obj.data.update()
+
+
+def _division_ladder(obj, hi, extent: float, target_faces: int) -> list:
+    """2차 시도의 복셀 분할 수 사다리. 90분할로 한 번 재서 입력 면수가 목표의 2.5배쯤 되도록 낮춘다.
+
+    부츠처럼 작은 셸은 90분할에서도 목표의 28배 면수가 나와 QuadriFlow 가 죽었다(QF_MAX_INPUT_RATIO 참고).
+    복셀 면수는 분할 수의 제곱에 비례하므로 sqrt 로 맞추고, 그 밀도와 0.75배·0.5배를 차례로 시도한다."""
+    obj.data = hi.data.copy()
+    keep_largest_island(obj, 0.0)
+    voxel_remesh(obj, extent / 90.0)
+    keep_largest_island(obj, 0.0)
+    faces = max(len(obj.data.polygons), 1)
+    want = max(int(target_faces) * 2.5, 1.0)
+    base = 90 if faces <= want * 1.2 else max(12, int(90 * (want / faces) ** 0.5))
+    ladder = []
+    for d in (base, int(base * 0.75), int(base * 0.5)):
+        d = max(12, d)
+        if d not in ladder:
+            ladder.append(d)
+    return ladder
 
 
 def retopo_robust(obj, hi, target_faces: int, height_units: float) -> tuple:
@@ -129,7 +155,7 @@ def retopo_robust(obj, hi, target_faces: int, height_units: float) -> tuple:
     extent = max(max(c[a] for c in coords) - min(c[a] for c in coords) for a in range(3)) if coords else 1.0
     extent = max(extent, 1e-6)
     remeshed = 0
-    for divisions in (90, 64, 45):
+    for divisions in _division_ladder(obj, hi, extent, target_faces):
         for target_size in (10.0, 20.0, 40.0):
             obj.data = hi.data.copy()
             keep_largest_island(obj, 0.0)
@@ -156,6 +182,185 @@ def retopo_robust(obj, hi, target_faces: int, height_units: float) -> tuple:
     with _override(obj):
         bpy.ops.object.modifier_apply(modifier=mod.name)
     return "decimate", remeshed
+
+
+def _face_islands(bm) -> list:
+    """bmesh 면의 연결 요소(면 인덱스 리스트) 목록."""
+    bm.faces.ensure_lookup_table()
+    seen = set()
+    islands = []
+    for f in bm.faces:
+        if f.index in seen:
+            continue
+        stack, comp = [f], []
+        while stack:
+            cur = stack.pop()
+            if cur.index in seen:
+                continue
+            seen.add(cur.index)
+            comp.append(cur.index)
+            for e in cur.edges:
+                for lf in e.link_faces:
+                    if lf.index not in seen:
+                        stack.append(lf)
+        islands.append(comp)
+    return islands
+
+
+def split_islands(obj, collection, min_face_ratio: float = 0.002) -> list:
+    """오브젝트를 연결 요소(셸)별 오브젝트로 나눈다. 전체 면수의 min_face_ratio 미만인 극소 파편은 버린다.
+
+    부품 보존 모드에서 의상 GLB 는 몸통·소매 셸 + 부츠 셸 둘처럼 여러 셸로 온다. 통째로 QuadriFlow 에 넣으면
+    작은 셸이 사라지고(실측: 부츠 소실 → 시트 높이로 정규화하며 몸통만 2.8배 확대), 폴백의 섬 제거도 지운다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    islands = _face_islands(bm)
+    bm.free()
+    total = max(len(obj.data.polygons), 1)
+    islands = [c for c in islands if len(c) >= max(1, int(total * min_face_ratio))]
+    if len(islands) <= 1:
+        return [obj]
+    out = []
+    for i, comp in enumerate(sorted(islands, key=len, reverse=True)):
+        keep = set(comp)
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        bm.faces.ensure_lookup_table()
+        bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.index not in keep], context='FACES')
+        me = bpy.data.meshes.new(f"{obj.data.name}_island{i:02d}")
+        bm.to_mesh(me)
+        bm.free()
+        piece = bpy.data.objects.new(f"{obj.name}_island{i:02d}", me)
+        piece.matrix_world = obj.matrix_world.copy()
+        collection.objects.link(piece)
+        out.append(piece)
+    bpy.data.objects.remove(obj, do_unlink=True)
+    return out
+
+
+CARVE_SKIN_DIST_RATIO = 0.015   # 몸체 표면에서 이 거리(키 대비 1.5% ≈ 2.7cm) 안의 면은 피부·머리카락으로 보고 지운다
+CARVE_MIN_ISLAND = 0.003        # 차감 뒤 전체 면수의 이 비율 미만인 파편(피부·머리카락 잔재)은 버린다
+CARVE_MAX_ISLANDS = 8           # 파편 정리 뒤에도 조각이 이보다 많으면 두 생성물이 어긋난 것 — 차감을 되돌리고 전신 셸을 둔다
+CARVE_MIN_KEEP = 0.45           # 옷은 전신 표면의 절반 이상을 덮는다 — 이보다 적게 남으면 피부가 아닌 옷까지 지운 것이라 되돌린다
+
+
+def _drop_small_islands(obj, min_ratio: float) -> int:
+    """전체 면수의 min_ratio 미만인 연결 요소를 지운다. 지운 파편 수를 돌려준다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    islands = _face_islands(bm)
+    limit = max(1, int(len(bm.faces) * min_ratio))
+    small = [c for c in islands if len(c) < limit]
+    dropped = 0
+    if small and len(small) < len(islands):
+        drop = {i for c in small for i in c}
+        bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.index in drop], context='FACES')
+        bm.to_mesh(obj.data)
+        dropped = len(small)
+    bm.free()
+    obj.data.update()
+    return dropped
+
+
+def carve_body(outfit, body, height: float) -> dict:
+    """옷 입은 전신 메시에서 몸체와 겹치는 면(몸체 표면 근접 또는 몸체 내부)을 지워 의상 셸만 남긴다.
+
+    사람 없는 옷만 그린 시트로는 TRELLIS.2 가 속이 빈 옷을 만들지 못한다(실측 2026-09-18: 좌우 반쪽으로 쪼개고
+    반바지를 빼먹고 세로를 2.4배 눌렀다). 그래서 의상은 '옷 입은 전신'으로 생성하고, 같은 시트 축척으로 배치된
+    몸체를 기준으로 피부·머리카락 면을 걷어낸다. 불리언 차감은 팽창 사본의 자기교차(손가락·머리카락)로 EXACT 가
+    부분 결과를 내서 쓰지 않는다 — 근접 삭제는 쿼드를 그대로 두고 결과가 예측 가능하다. 결과는 열린 의상 셸이며,
+    몸체와 이 거리보다 가까운 밀착 의상은 함께 사라진다(모델링 완료 단계에서 사용자가 손본다)."""
+    from mathutils.bvhtree import BVHTree
+    before = len(outfit.data.polygons)
+    body_bm = bmesh.new()
+    body_bm.from_mesh(body.data)
+    body_bm.transform(body.matrix_world)
+    tree = BVHTree.FromBMesh(body_bm)
+    body_bm.free()
+    eps = float(height) * CARVE_SKIN_DIST_RATIO
+    bm = bmesh.new()
+    bm.from_mesh(outfit.data)
+    to_world = outfit.matrix_world
+    kill = []
+    for f in bm.faces:
+        center = to_world @ f.calc_center_median()
+        loc, nor, _, dist = tree.find_nearest(center)
+        if loc is None:
+            continue
+        inside = (center - loc).dot(nor) < 0.0
+        if inside or dist <= eps:
+            kill.append(f)
+    if not kill or len(kill) == len(bm.faces):
+        bm.free()
+        return {'ok': False, 'before': before, 'faces': before, 'dropped': 0, 'islands': 0, 'reason': '지울 면 없음/전부'}
+    backup = outfit.data.copy()   # 파편화되면 되돌린다 — 몸체와 옷 입은 전신은 따로 생성돼 몇 cm 어긋날 수 있다
+    bmesh.ops.delete(bm, geom=kill, context='FACES')
+    bm.to_mesh(outfit.data)
+    bm.free()
+    outfit.data.update()
+    dropped = _drop_small_islands(outfit, CARVE_MIN_ISLAND)
+    bm = bmesh.new()
+    bm.from_mesh(outfit.data)
+    islands = len(_face_islands(bm))
+    bm.free()
+    kept = len(outfit.data.polygons) / max(before, 1)
+    if islands > CARVE_MAX_ISLANDS or kept < CARVE_MIN_KEEP:
+        carved = outfit.data
+        outfit.data = backup
+        bpy.data.meshes.remove(carved, do_unlink=True)
+        return {'ok': False, 'before': before, 'faces': before, 'dropped': dropped, 'islands': islands,
+                'reason': f'조각 {islands}개로 파편화' if islands > CARVE_MAX_ISLANDS else f'{kept:.0%}만 남음(옷까지 지워짐)'}
+    bpy.data.meshes.remove(backup, do_unlink=True)
+    return {'ok': True, 'before': before, 'faces': len(outfit.data.polygons), 'dropped': dropped, 'islands': islands}
+
+
+def _mesh_area(obj) -> float:
+    return sum(p.area for p in obj.data.polygons) or 1e-9
+
+
+def _retopo_islands(obj, hi, collection, target_faces: int, height_units: float, name: str):
+    """부품 보존용: 셸별로 복셀 리메시 → QuadriFlow → 하이폴리 슈링크랩 → 다시 한 오브젝트로 합친다.
+
+    면수 예산은 셸 표면적 비율로 배분한다(하한 500). 복셀 크기는 전체 기준으로 통일해 셸 간 밀도가 맞게 한다."""
+    pieces = split_islands(obj, collection)
+    if len(pieces) == 1:
+        obj = pieces[0]
+        voxel_remesh(obj, height_units / 350.0)
+        method, remeshed = retopo_robust(obj, hi, target_faces, height_units)
+        _shrinkwrap(obj, hi)
+        bpy.data.objects.remove(hi, do_unlink=True)
+        return obj, method, remeshed
+    bpy.data.objects.remove(hi, do_unlink=True)   # 셸별 하이폴리 사본을 따로 만든다
+    total_area = sum(_mesh_area(p) for p in pieces)
+    methods, remeshed = [], 0
+    for piece in pieces:
+        hi_piece = piece.copy()
+        hi_piece.data = piece.data.copy()
+        collection.objects.link(hi_piece)
+        budget = max(500, int(round(target_faces * _mesh_area(piece) / total_area)))
+        voxel_remesh(piece, height_units / 350.0)
+        method, n = retopo_robust(piece, hi_piece, budget, height_units)
+        methods.append(method)
+        remeshed += n
+        _shrinkwrap(piece, hi_piece)
+        bpy.data.objects.remove(hi_piece, do_unlink=True)
+    first = pieces[0]
+    with bpy.context.temp_override(object=first, active_object=first,
+                                   selected_objects=pieces, selected_editable_objects=pieces):
+        bpy.ops.object.join()
+    first.name = safe_id_name(name)
+    first.data.name = first.name
+    method = "quadriflow" if all(m == "quadriflow" for m in methods) else "quadriflow+decimate"
+    return first, method, remeshed
+
+
+def _shrinkwrap(obj, target) -> None:
+    """리토폴로지 결과를 하이폴리 표면에 붙여 복셀 리메시·QuadriFlow 가 뭉갠 디테일을 되찾는다."""
+    mod = obj.modifiers.new("LP3D_Shrinkwrap", 'SHRINKWRAP')
+    mod.target = target
+    mod.wrap_method = 'NEAREST_SURFACEPOINT'
+    with _override(obj):
+        bpy.ops.object.modifier_apply(modifier=mod.name)
 
 
 def retopo(obj, target_faces: int) -> str:
@@ -503,24 +708,22 @@ def _process_glb(path: str, name: str, collection, height: float = 1.8,
         # 부품 보존은 GLB 안에 메시가 여러 개일 때만 복셀 리메시를 건너뛴다(합쳐진 셸이 녹아
         # 붙는다). 3분할 생성처럼 부품이 각각 한 GLB로 오면 셸 하나라 리메시해도 된다 —
         # 건너뛰면 마칭큐브 원본이 매니폴드가 아니라 QuadriFlow가 조용히 실패해 삼각형이 남는다
-        if not preserve_parts or len(meshes) == 1:
-            voxel_remesh(obj, height_units / 350.0)  # 복셀 상자 350칸 — 눈·주둥이가 살아남는 해상도
-        remeshed = len(obj.data.polygons)
         # 밀도 분포: 균일 고밀도(목표 x2.5)로 뽑은 뒤 평평한 영역만 un-subdivide(4면→1면).
         # 얼굴·손·곡률 높은 곳은 촘촘하게, 팔·다리·갑옷 판은 성기게 — 리깅용 분포
         dense_target = int(target_faces * 2.5) if adaptive else int(target_faces)
-        method, remeshed = retopo_robust(obj, hi, dense_target, height_units)
         reduced = 0
-        if adaptive and method == "quadriflow":
-            weights = importance_weights(obj, head_frac=head_frac)
-            reduced = adaptive_unsubdivide(obj, weights)
-            method = "quadriflow+adaptive"
-        mod = obj.modifiers.new("LP3D_Shrinkwrap", 'SHRINKWRAP')
-        mod.target = hi
-        mod.wrap_method = 'NEAREST_SURFACEPOINT'
-        with _override(obj):
-            bpy.ops.object.modifier_apply(modifier=mod.name)
-        bpy.data.objects.remove(hi, do_unlink=True)
+        if preserve_parts:
+            # 부품 GLB 는 여러 셸(몸통+부츠, 검+방패)로 온다 — 셸별로 처리해 작은 셸이 사라지지 않게 한다
+            obj, method, remeshed = _retopo_islands(obj, hi, collection, dense_target, height_units, name)
+        else:
+            voxel_remesh(obj, height_units / 350.0)  # 복셀 상자 350칸 — 눈·주둥이가 살아남는 해상도
+            method, remeshed = retopo_robust(obj, hi, dense_target, height_units)
+            if adaptive and method == "quadriflow":
+                weights = importance_weights(obj, head_frac=head_frac)
+                reduced = adaptive_unsubdivide(obj, weights)
+                method = "quadriflow+adaptive"
+            _shrinkwrap(obj, hi)
+            bpy.data.objects.remove(hi, do_unlink=True)
     else:
         remeshed = len(obj.data.polygons)
         decimate(obj, int(target_faces) * 2)  # target_faces는 쿼드 기준 — 트라이는 2배

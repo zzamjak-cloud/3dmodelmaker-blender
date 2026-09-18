@@ -49,7 +49,7 @@ class TestSystemPrompt(unittest.TestCase):
     def test_character_md_pins_engine_conventions(self):
         with open(os.path.join(_ROOT, "prompts", "system_character.md"), encoding="utf-8") as f:
             md = f.read()
-        for needle in ("-Y", "z=0", "mirror_x", "A-포즈", "관절"):
+        for needle in ("-Y", "z=0", "mirror_x", "T-포즈", "관절"):
             self.assertIn(needle, md)
 
 
@@ -58,7 +58,7 @@ class TestInitialPrompt(unittest.TestCase):
         p = prompts.build_initial_prompt("늑대 전사", mode="CHARACTER", character_type="ANIMAL")
         self.assertIn("게임 캐릭터를 만들어라", p)
         self.assertIn("동물형", p)
-        self.assertIn("A-포즈", p)
+        self.assertIn("T-포즈", p)
 
     def test_auto_type_asks_model_to_decide(self):
         p = prompts.build_initial_prompt("정체불명", mode="CHARACTER", character_type="AUTO")
@@ -88,7 +88,7 @@ class TestTurnaroundSheet(unittest.TestCase):
         self.assertIn("3x2", p)
         for view in ("FRONT", "BACK", "LEFT", "RIGHT", "TOP", "3/4"):
             self.assertIn(view, p)
-        self.assertIn("A-포즈", p)
+        self.assertIn("T-포즈", p)
 
     def test_turnaround_aspect_is_landscape(self):
         self.assertEqual(multiview.sheet_aspect("TURNAROUND"), "3:2")
@@ -104,7 +104,7 @@ class TestTurnaroundSheet(unittest.TestCase):
     def test_default_sheet_is_the_old_multiview(self):
         old = multiview.build_image_prompt("배럴")
         self.assertIn("2x2", old)
-        self.assertNotIn("A-포즈", old)
+        self.assertNotIn("T-포즈", old)
 
     def test_codex_prompt_also_takes_sheet(self):
         p = multiview.build_prompt("기사", sheet="TURNAROUND")

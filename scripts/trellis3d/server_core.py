@@ -131,6 +131,35 @@ class FloaterRemover:
         return trimesh.util.concatenate(keep) if len(keep) > 1 else keep[0]
 
 
+class PlaneRemover:
+    """두께가 거의 0인 대형 평면 셸(바닥판) 제거 — 시트의 격자선·그림자를 모델이 바닥으로 복원한 것.
+
+    부품 보존(preserve_parts)과 무관하게 항상 적용한다: 두께 0의 판은 어떤 부품도 아니다.
+    (실측: 몸체 시트에서 1.0×1.0×0.0 셸 18만 면이 몸체와 함께 나왔다)"""
+
+    def __init__(self, thickness_ratio: float = 0.01, footprint_ratio: float = 0.25):
+        self.thickness_ratio = thickness_ratio
+        self.footprint_ratio = footprint_ratio
+
+    def is_plane(self, part, whole_extent) -> bool:
+        ext = part.bounds[1] - part.bounds[0]
+        ext_sorted = sorted(float(e) for e in ext)
+        thin = ext_sorted[0] < self.thickness_ratio * whole_extent
+        wide = ext_sorted[1] * ext_sorted[2] > self.footprint_ratio * whole_extent * whole_extent
+        return thin and wide
+
+    def __call__(self, mesh):
+        import trimesh
+        parts = mesh.split(only_watertight=False)
+        if len(parts) <= 1:
+            return mesh
+        whole = float(max(mesh.bounds[1] - mesh.bounds[0]))
+        keep = [p for p in parts if not self.is_plane(p, whole)]
+        if not keep or len(keep) == len(parts):
+            return mesh
+        return trimesh.util.concatenate(keep) if len(keep) > 1 else keep[0]
+
+
 class DegenerateFaceRemover:
     """면적 0인 퇴화 면과 참조되지 않는 정점을 제거한다."""
 
@@ -159,7 +188,9 @@ class FaceReducer:
 
 
 def _postprocess_mesh(mesh, params):
-    """부품 보존 요청이면 파편 제거만 건너뛴다 — 작은 장비(단검·버클)가 파편으로 지워지지 않게."""
+    """부품 보존 요청이면 파편 제거만 건너뛴다 — 작은 장비(단검·버클)가 파편으로 지워지지 않게.
+    두께 0의 대형 평면(바닥판)은 부품 보존 여부와 무관하게 항상 지운다."""
+    mesh = PlaneRemover()(mesh)
     if not params.get('preserve_parts', False):
         mesh = FloaterRemover()(mesh)
     mesh = DegenerateFaceRemover()(mesh)

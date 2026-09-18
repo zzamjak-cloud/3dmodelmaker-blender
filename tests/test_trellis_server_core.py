@@ -3,6 +3,7 @@ import base64
 import importlib.util
 import io
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import numpy as np
@@ -82,6 +83,35 @@ class DecodeAndCollectTests(unittest.TestCase):
         self.assertEqual(set(sc.collect_views({"image": cell})), {"front"})
         with self.assertRaises(ValueError):
             sc.collect_views({})
+
+
+class _FakePart:
+    def __init__(self, lo, hi, faces=10):
+        self.bounds = np.array([lo, hi], dtype=float); self.faces = [0] * faces
+
+
+class PlaneRemoverTests(unittest.TestCase):
+    def test_flat_wide_shell_is_a_plane_but_thin_sword_is_not(self):
+        pr = sc.PlaneRemover()
+        self.assertTrue(pr.is_plane(_FakePart([-.5, -.5, -.43], [.5, .5, -.43]), 1.0))       # 바닥판
+        self.assertFalse(pr.is_plane(_FakePart([-.5, -.1, -.43], [.5, .1, .46]), 1.0))       # 몸체
+        self.assertFalse(pr.is_plane(_FakePart([.4, -.01, -.2], [.42, .01, .5]), 1.0))       # 가느다란 검(좁아서 판 아님)
+
+    def test_postprocess_always_runs_plane_removal_before_floaters(self):
+        calls = []
+        class M:  # 최소 메시 대역
+            faces = [0] * 100
+        with unittest.mock.patch.object(sc, "PlaneRemover") as plane, \
+             unittest.mock.patch.object(sc, "FloaterRemover") as floater, \
+             unittest.mock.patch.object(sc, "DegenerateFaceRemover") as degen:
+            plane.return_value.side_effect = lambda m: (calls.append("plane"), m)[1]
+            floater.return_value.side_effect = lambda m: (calls.append("floater"), m)[1]
+            degen.return_value.side_effect = lambda m: (calls.append("degen"), m)[1]
+            sc._postprocess_mesh(M(), {"preserve_parts": True})
+            self.assertEqual(calls, ["plane", "degen"])
+            calls.clear()
+            sc._postprocess_mesh(M(), {})
+            self.assertEqual(calls, ["plane", "floater", "degen"])
 
 
 class ParamAndFrameTests(unittest.TestCase):

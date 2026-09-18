@@ -30,6 +30,7 @@ STATE_ICONS = {
     'PENDING': 'DOT',
     'RUNNING': 'PLAY',
     'DONE': 'CHECKMARK',
+    'MODELED': 'MESH_DATA',
     'FAILED': 'ERROR',
     'CANCELLED': 'X',
 }
@@ -71,7 +72,7 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         description="비율·골격 규칙을 정한다 — 자동이면 요청문·원화에서 판단",
         items=[
             ('AUTO', "자동", "요청문과 원화에서 유형을 판단"),
-            ('HUMANOID', "인간형", "두신 비율, A-포즈"),
+            ('HUMANOID', "인간형", "두신 비율, T-포즈 (팔 수평 — 옆면 매핑에 팔이 겹치지 않게)"),
             ('ANIMAL', "동물형", "실제 동물 골격 비율과 관절 방향, 네 발 중립 자세"),
             ('CREATURE', "크리처형", "동물 부위 조합이되 하나의 골격 논리"),
         ],
@@ -81,7 +82,8 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         name="부위 생성",
         description="몸체와 장비를 독립 메시로 생성해 옷 아래 몸체와 개별 수정을 보존",
         items=[
-            ('SEPARATE', "몸체 / 의상 / 무기 분리", "시트와 셰이프를 부위별로 생성 (생성 시간이 늘어남)"),
+            ('SEPARATE', "몸체 / 의상·악세사리 / 무기·방어구 분리",
+             "시트와 셰이프를 부위별로 생성해 독립 오브젝트로 배치 (시트 5장·셰이프 4건 — 생성 시간과 비용이 늘어남)"),
             ('COMBINED', "통합 생성", "기존 방식으로 하나의 셰이프 생성"),
         ],
         default='SEPARATE',
@@ -115,6 +117,16 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         ],
         default='PALETTE',
     )
+    # 리토폴로지·조합과 언랩·매핑을 분리한다 — 사용자가 메시를 손본 뒤 [매핑 시작]을 누르는 시점에 매핑
+    texture_stage: EnumProperty(
+        name="매핑 시점",
+        description="개별 매핑을 언제 실행할지",
+        items=[
+            ('MANUAL', "모델링 후 수동", "리토폴로지·조합까지 끝내고 멈춘다. 메시를 수정한 뒤 [매핑 시작]으로 언랩·매핑"),
+            ('AUTO', "자동", "리토폴로지 직후 곧바로 언랩·매핑까지 진행 (기존 동작)"),
+        ],
+        default='MANUAL',
+    )
 
     # --- 실행 상태 ---
     state: EnumProperty(
@@ -122,6 +134,7 @@ class LP3DJobItem(bpy.types.PropertyGroup):
             ('PENDING', "대기", "아직 실행되지 않음"),
             ('RUNNING', "실행 중", "AI 호출 또는 Blender 작업 진행 중"),
             ('DONE', "완료", "생성 성공"),
+            ('MODELED', "모델링 완료", "리토폴로지·조합까지 끝남 — 메시를 수정한 뒤 [매핑 시작]"),
             ('FAILED', "실패", "생성 실패 — 원인은 상태·로그 참고"),
             ('CANCELLED', "취소됨", "사용자가 중단함"),
         ],

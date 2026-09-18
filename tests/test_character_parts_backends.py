@@ -141,9 +141,11 @@ class ServerPostprocessTests(unittest.TestCase):
         # GPU 모델을 로드하지 않고 실제 서버의 후처리 함수를 실행한다.
         tree = ast.parse((ROOT / 'scripts/trellis3d/server_core.py').read_text(encoding='utf-8'))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_postprocess_mesh')
-        floater, degenerate, reducer = Mock(), Mock(), Mock()
+        floater, degenerate, reducer, plane = Mock(), Mock(), Mock(), Mock()
         degenerate.return_value.return_value = 'clean'
-        namespace = {'FloaterRemover': floater, 'DegenerateFaceRemover': degenerate, 'FaceReducer': reducer}
+        plane.return_value.side_effect = lambda m: m   # 평면 제거는 항상 돌지만 여기서는 통과
+        namespace = {'FloaterRemover': floater, 'DegenerateFaceRemover': degenerate, 'FaceReducer': reducer,
+                     'PlaneRemover': plane}
         exec(compile(ast.Module(body=[function], type_ignores=[]), '<server-postprocess>', 'exec'), namespace)
         self.assertEqual(namespace['_postprocess_mesh']('mesh', {'preserve_parts': True}), 'clean')
         floater.assert_not_called()

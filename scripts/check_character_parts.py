@@ -14,21 +14,26 @@ out.mkdir(parents=True, exist_ok=True)
 session = importlib.import_module(PACKAGE + '.core.session')
 jobs = importlib.import_module(PACKAGE + '.core.jobs')
 multiview = importlib.import_module(PACKAGE + '.core.multiview')
+character_parts = importlib.import_module(PACKAGE + '.core.character_parts')
 shapegen = importlib.import_module(PACKAGE + '.core.shapegen')
 runner = importlib.import_module(PACKAGE + '.core.runner')
 scheduler = importlib.import_module(PACKAGE + '.core.scheduler')
 prefs = importlib.import_module(PACKAGE + '.preferences').get_prefs()
 
 
-def sheet(name, box):
+def sheet(name, *boxes):
     """라벨 영역을 비운 동일 축척의 검증 시트를 만든다."""
     import numpy as np
     width, height = 192, 128
     pixels = np.ones((height, width, 4), dtype=np.float32)
     for row in range(2):
         for col in range(3):
-            x0, y0, x1, y1 = box
-            pixels[row * 64 + y0:row * 64 + y1, col * 64 + x0:col * 64 + x1, :3] = .2
+            for x0, y0, x1, y1 in boxes:
+                pixels[row * 64 + y0:row * 64 + y1, col * 64 + x0:col * 64 + x1, :3] = .2
+    # 실제 시트처럼 칸 경계에 격자선을 그린다 — 분할기는 등분이 아니라 격자선을 찾아 자른다
+    for x in (63, 64, 127, 128):
+        pixels[:, x, :3] = .1
+    pixels[63:65, :, :3] = .1
     image = bpy.data.images.new(name, width, height, alpha=True)
     image.pixels.foreach_set(pixels.ravel())
     image.filepath_raw = str(out / (name + '.png'))
@@ -57,9 +62,11 @@ def shape(name, dimensions):
     return path
 
 
-sheets = {'BODY': sheet('body-sheet', (20, 4, 44, 52)),
-          'OUTFIT': sheet('outfit-sheet', (18, 20, 46, 45)),
-          'WEAPON': sheet('weapon-sheet', (48, 10, 54, 34))}
+# 실루엣은 격자 여백(GRID_MARGIN 8px) 밖에 둔다 — 실제 시트도 여백을 유지한다. 무기 키 = 몸체 키의 절반
+BOXES = {'BODY': (20, 10, 44, 54), 'OUTFIT': (18, 20, 46, 45), 'WEAPON': (48, 12, 54, 34)}
+sheets = {part: sheet(part.lower() + '-sheet', box) for part, box in BOXES.items()}
+# 원본 턴어라운드는 몸체·의상·무기를 모두 담는다 — 환각 게이트는 부품 실루엣이 원본 밖에 있는 비율로 판정한다
+original = sheet('original-sheet', *BOXES.values())
 shapes = {part: shape(part.lower(), (.2, .15, 1.0)) for part in sheets}
 request_order = []
 
@@ -68,7 +75,7 @@ def generated_sheet(request, workdir, timeout, on_done, **kwargs):
     """실제 요청의 부품 순서와 공통 참조 계약을 확인한다."""
     part = Path(workdir).name.upper()
     assert kwargs.get('prompt_override')
-    assert kwargs['ref_image'] == sheets['BODY']
+    assert kwargs['ref_image'] == original
     request_order.append('sheet:' + part)
     on_done(sheets[part], None)
 
@@ -91,8 +98,9 @@ prefs.use_library = False
 runtime = session.GenerationSession(bpy.context.scene.name, job.uid, job.prompt, exe='fixture')
 session._sessions[job.uid] = runtime
 job.state = 'RUNNING'
-runtime.multiview = sheets['BODY']
-with patch.object(multiview, 'generate', generated_sheet), \
+runtime.multiview = original
+with patch.object(character_parts, 'presence_cli', lambda: ''), \
+        patch.object(multiview, 'generate', generated_sheet), \
         patch.object(multiview, 'archive', lambda path, name: path), \
         patch.object(shapegen, 'generate', generated_shape):
     runtime._start_character_parts()

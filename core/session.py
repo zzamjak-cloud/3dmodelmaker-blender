@@ -16,6 +16,7 @@ from ..agents.parsing import parse_agent_reply
 from . import (errors, executor, jobs, library, models, multiview,
                prompts, runner, scheduler, shapegen, snapshots, styles, texgen)
 from .character_parts import CharacterPartsMixin, LABELS, retopo_method_note
+from . import texture_stage
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
 
@@ -110,6 +111,38 @@ def start_job(scene_name, uid, variation_of=None, variation_count=3,
         session = GenerationSession(**kwargs)
     _sessions[uid] = session
     session.start()
+    return None
+
+
+def start_texture_job(scene_name, uid):
+    """모델링이 끝난(MODELED) 잡의 컬렉션에 대해 언랩·매핑만 실행한다. 오류 메시지 또는 None.
+
+    리토폴로지·조합 결과를 사용자가 손본 뒤 부르는 것이 전제다 — 은면 정리·게임레디·레인 이동은
+    이미 끝난 단계라 다시 하지 않고, 컬렉션에 남긴 매핑 컨텍스트(texture_stage.save_context)만 읽는다."""
+    if uid in _sessions:
+        return "이미 진행 중인 항목입니다"
+    scene = bpy.data.scenes.get(scene_name)
+    if not scene or not getattr(scene, "lp3d", None):
+        return "씬을 찾을 수 없습니다"
+    job = scene.lp3d.job_by_uid(uid)
+    if job is None:
+        return "항목을 찾을 수 없습니다"
+    coll = bpy.data.collections.get(job.collection_name)
+    if coll is None:
+        return f"결과 컬렉션을 찾을 수 없습니다: {job.collection_name or '(없음)'}"
+    if not any(o.type == 'MESH' for o in coll.objects):
+        return "컬렉션에 메시가 없습니다"
+    try:
+        ctx = texture_stage.load_context(coll)
+    except ValueError as e:
+        return str(e)
+    if not texgen.is_available():
+        return "이미지 생성 기능을 사용할 수 없습니다 — OpenRouter 키 또는 codex CLI를 확인하세요"
+    scheduler.set_ai_limit(getattr(preferences.get_prefs(), "ai_concurrency", 3))
+    session = GenerationSession(scene_name, uid, ctx['request'],
+                                preferences.resolve_cli_path('CODEX') or "", lane=job.lane)
+    _sessions[uid] = session
+    session.start_texture(coll, ctx)
     return None
 
 
@@ -213,6 +246,10 @@ class GenerationSession(CharacterPartsMixin):
         self._part_records = {}
         self._texture_part = None
         self._texture_parts_pending = []
+        # 매핑 시점: MANUAL 이면 리토폴로지·조합 뒤 MODELED 로 멈추고 [매핑 시작]을 기다린다
+        self.texture_stage = (str(getattr(job, 'texture_stage', 'MANUAL') or 'MANUAL')
+                              if job else 'MANUAL')
+        self.texture_only = False   # start_texture 로 시작한 매핑 전용 세션
         # 캐릭터는 실행 후 시트와 같은 6시점으로 렌더해 시트와 대조하는 턴을 돈다.
         # 첫 생성은 시트를 '보고' 만들지만 결과가 얼마나 다른지는 모른다 — 나란히
         # 놓고 비교시켜야 빠진 요소·비율 오차·떨어진 파트가 잡힌다.
@@ -380,6 +417,30 @@ class GenerationSession(CharacterPartsMixin):
         self._set_status("대기 중 (순서 기다리는 중)", self._model_log())
         runner.add_keepalive(self.uid)
         self.backend.prepare_workdir(prompts.build_system_prompt(self.system_mode, self.style))
+
+    def start_texture(self, coll, ctx: dict):
+        """매핑 전용 시작 — 컬렉션의 현재 메시(사용자 수정 포함)를 그대로 언랩·6면도 채색·베이크한다.
+
+        부품 표식(`lp3d_character_part`)이 있으면 부품별로 순차 매핑하고, 각 부품의 시트를 색 참조로 쓴다."""
+        self.texture_only = True
+        self.collection_name = coll.name
+        self.multiview = ctx['multiview']
+        self.style = ctx['style'] or self.style
+        self.system_mode = ctx['system_mode']
+        self.character_type = ctx['character_type']
+        self.modeling_type = 'TEXTURE'
+        self._final_note = ctx['final_note']
+        records = texture_stage.part_records_from_objects(
+            (o.name, o) for o in coll.objects if o.type == 'MESH')
+        self._part_records = {part: {'sheet': rec['sheet'], 'object': rec['objects'][0]}
+                              for part, rec in records.items()}
+        self._texture_parts_pending = texture_stage.texture_order(records)
+        self._texture_part = self._texture_parts_pending.pop(0) if self._texture_parts_pending else None
+        self._begin()
+        what = f"부품 {len(records)}개 순차" if records else "통합 메시"
+        self._set_status("UV 언랩 대기중...",
+                         f"매핑 시작 — {what}, 리토폴로지 결과(수정본 포함)를 그대로 언랩·매핑", phase='TEX')
+        self._submit_blender(self._blender_unwrap)
 
     def _use_multiview(self) -> bool:
         """이 세션이 참조 시트를 만들지 여부 — 오버라이드가 있으면 환경설정보다 우선."""
@@ -584,11 +645,14 @@ class GenerationSession(CharacterPartsMixin):
     def _finish(self, status: str, ok: bool, detail=None, hint: str = "", state=None):
         job = self._job()
         if job:
+            if self.texture_only and not ok:
+                state = 'MODELED'   # 매핑만 실패 — 메시는 그대로이므로 [매핑 시작]을 다시 누를 수 있게
             job.state = state or ('DONE' if ok else 'FAILED')
             if ok:
                 job.collection_name = self.collection_name
-                job.code = self.last_code or ""
-                job.entry_id = self._archive(job.code)
+                if not self.texture_only:   # 매핑 전용 세션은 코드가 없다 — 라이브러리 항목을 새로 만들지 않는다
+                    job.code = self.last_code or ""
+                    job.entry_id = self._archive(job.code)
         # 상태줄은 한 줄뿐이라 원인을 다 담을 수 없다 — 상세는 로그 패널에 남긴다
         log_text = self._model_log(include_requested=False) + f"\n세션 종료: {status}"
         if detail:
@@ -865,6 +929,16 @@ class GenerationSession(CharacterPartsMixin):
             note = f", 은면 {removed}개 제거" if removed else ""
             self._final_note = f"{tris} tris{note}"
             if self.modeling_type == 'TEXTURE' and mesh_objs:
+                if self.texture_stage == 'MANUAL' and not self.texture_only:
+                    # 리토폴로지·조합에서 멈춘다. 매핑에 필요한 것은 컬렉션에 남겨 두고, 사용자가
+                    # 메시를 손본 뒤 [매핑 시작]을 누르면 start_texture_job 이 이어받는다.
+                    job = self._job()
+                    texture_stage.save_context(
+                        coll, self.request, self.multiview or (job.multiview_path if job else ""),
+                        self.style, self.system_mode, self.character_type, self._final_note)
+                    self._finish(f"모델링 완료 — {self.collection_name} ({self._final_note}) · 메시 수정 후 [매핑 시작]",
+                                 ok=True, state='MODELED')
+                    return
                 if not texgen.is_available():
                     if self._part_records:
                         self._finish('부품 텍스처 실패: 이미지 생성 기능을 사용할 수 없습니다', ok=False)

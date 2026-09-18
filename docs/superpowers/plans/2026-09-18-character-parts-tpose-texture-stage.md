@@ -1,0 +1,63 @@
+# 캐릭터 부위 4분류 · T-포즈 · 매핑 단계 분리 (v0.21.0 계획)
+
+작성: 2026-09-18. 셰이프 서버가 TRELLIS.2 Modal(v0.20.0)로 바뀐 뒤의 첫 기능 계획.
+
+## 요구 (사용자)
+
+1. 캐릭터가 한 덩어리로 나온다 → **몸체 / 의상 / 악세사리 / 무기·방어구**를 각각 별도 요소로 분리 생성·리토폴로지하고 위치를 조합한다.
+2. **리토폴로지·조합**과 **언랩·매핑**을 완전히 분리한다. 리토폴로지가 끝나면 멈추고, 사용자가 메시를 손본 뒤 "모델링 완료"를 선언하는 시점에 언랩·매핑을 돈다.
+3. A-포즈는 매핑 시 옆면에 팔이 겹쳐 찍힌다 → **T-포즈**로 바꾼다.
+4. 수정 후 분리·조합부터 재테스트하고, 매핑 테스트는 그 뒤에.
+
+## 현재 구조 (있는 것)
+
+- `core/character_parts.py`: `PARTS=('BODY','OUTFIT','WEAPON')`, 부품별 시트(`part_prompt`, 원본 턴어라운드를 참조로) → `split_turnaround` → 실루엣 bbox → 셰이프(`preserve_parts=True`) → `process_glb` → `placement()`로 몸체 시트 축척 기준 x/z(정면)·y(좌측면) 배치. 잡 기본값이 `SEPARATE`.
+- `core/session.py` `_blender_finalize`: 은면 정리·게임레디 → `modeling_type=='TEXTURE'`면 **곧바로** 언랩→가이드 렌더→AI 채색→베이크(부품은 순차). 세션은 `_finish`에서 `_end_session`으로 사라진다.
+- 포즈 문구: `core/multiview.py:177`(턴어라운드 지시), `core/prompts.py:140,197`(코드 모델링), `properties.py`(유형 설명). 베이스 메시 템플릿(`retopo.fit_template`)은 A-포즈 전제.
+
+## 변경
+
+### A. 부위 4분류 (`core/character_parts.py`, `properties.py`, 테스트)
+- `PARTS=('BODY','OUTFIT','ACCESSORY','WEAPON')`, `LABELS`: 몸체 / 의상 / 악세사리 / 무기·방어구.
+- `part_prompt` 상세: OUTFIT=옷·신발·장갑만(갑옷·악세사리·무기 제외), ACCESSORY=배낭·가방·벨트·장신구·모자·안경·스카프 등 착용 소품, WEAPON=무기+방어구(갑옷·방패·투구·견갑). BODY 문구 유지(가려진 몸체 복원, 밀착 기본복).
+- `part_texture_prompt` 동일 확장. `_retopo_part`의 "BODY 외는 QUADRIFLOW" 규칙 유지.
+- 잡 enum 라벨 "몸체 / 의상 / 악세사리 / 무기·방어구 분리". 빈 시트(부품 없음)는 기존처럼 생략.
+- 조합: 기존 `placement` 유지. 부품 오브젝트에 `lp3d_character_part` 외 `lp3d_part_sheet`(시트 경로) 커스텀 프로퍼티를 남겨 매핑 단계가 세션 없이도 참조를 찾게 한다.
+
+### B. T-포즈
+- `multiview.py` 턴어라운드 자세: "인간형은 T-포즈(팔을 좌우로 수평, 손바닥 아래, 다리 살짝 벌림)". 부품 시트는 "동일한 자세"를 이미 강제.
+- `prompts.py` HUMANOID 규칙·코드 모델링 지시의 A-포즈 → T-포즈. `properties.py` 설명 갱신.
+- 한계(문서화): 베이스 메시 템플릿은 A-포즈라 `TEMPLATE` 방식은 T-포즈 시트와 팔 각도가 어긋난다. 기본 `QUADRIFLOW`는 영향 없음. 환경설정 설명에 경고 추가. 템플릿 T-포즈화는 별도 작업.
+
+### C. 매핑 단계 분리 (`properties.py`, `core/session.py`, `ui/operators.py`, `ui/panel.py`, `core/jobs.py`)
+- 잡 속성 `texture_stage`: `MANUAL`(기본, 리토폴로지 후 대기) / `AUTO`(기존 동작).
+- 잡 상태 `MODELED` 추가: 모델링 완료, 매핑 대기.
+- `_blender_finalize`: `TEXTURE`+`MANUAL`이면 컬렉션에 매핑 컨텍스트를 커스텀 프로퍼티로 저장(`lp3d_request`, `lp3d_multiview`, `lp3d_style`, `lp3d_system_mode`, `lp3d_character_type`, 부품별 `lp3d_part_sheet`)하고 `_finish(..., state='MODELED')`.
+- 오퍼레이터 `lp3d.job_texture`(패널 잡 행, 상태 `MODELED`일 때 "매핑 시작"): 잡의 컬렉션에서 컨텍스트를 읽어 `Session(job, texture_only=True)`를 만들고 언랩→가이드→채색→베이크 체인만 실행. 부품은 `lp3d_character_part`로 묶어 순차 처리(사용자가 메시를 수정·병합했어도 프로퍼티가 남은 오브젝트 기준). 성공 시 `DONE`.
+- 사용자 편집 보존: 매핑 세션은 은면 정리·게임레디·레인 이동을 **다시 하지 않는다**(이미 끝난 단계).
+
+### D. 테스트
+- 유닛: `PARTS` 4개·순서, ACCESSORY 프롬프트 키워드, `part_texture_prompt`, 매핑 컨텍스트 직렬화/복원(순수 함수로 분리해 bpy 없이 검증).
+- Blender 헤드리스 e2e(클라우드 서버, 비용 발생): SEPARATE 잡 1건 실행 → 부품 오브젝트 4개(없는 부품은 생략 허용) 생성·`lp3d_character_part` 표식·몸체 기준 배치(발바닥 z≈0, x 중심 정렬) 확인 → 상태 `MODELED`로 멈추는지 확인 → Drive `Character/` 저장. 매핑은 사용자 확인 뒤 별도 테스트.
+
+## 실측으로 추가된 변경 (첫 e2e 07:30 실패 분석)
+
+- 모든 부품이 높이 1.8·중심 동일 → `silhouette_bbox`가 격자선·하단 라벨을 실루엣으로 셈. 여백 무시 + 상/하단 라벨 블록 제외.
+- 무기 시트 환각(원화에 없는 검·방패) → `silhouette_mask`/`outside_ratio`: 원본 실루엣 밖 비율 ≥ 0.5면 "없는 부품"으로 생략.
+- 몸체 아래 1.0×1.0 두께 0 평면 → 등분 분할이 옆 칸 라벨·격자선을 끌어들인 입력 문제(1024·256 동일 재현). `split_turnaround`를 격자선 감지 + 라벨·여백 덧칠로 재작성, 서버 `PlaneRemover` 상시 적용.
+- 부품마다 12k 동일(사용자 지적) → `part_face_budget` 면적비 배분.
+- 셰이프 요청 기본값 Hunyuan(256·30·5.0) → TRELLIS.2(1024·12·7.5). 원격 `/status` 타임아웃 1.5→20초(웨이크업 실패로 분리 준비 즉시 FAILED 났던 원인).
+
+## 리스크
+- 부품 시트 생성 5장(원본+4) + 셰이프 4건: 이미지 비용이 지배적. 시트 크기 불일치·정면 실루엣 비어 있음은 기존 실패 경로로 보고.
+- 악세사리는 실루엣이 작아 `silhouette_bbox`의 최소 픽셀 조건에 걸릴 수 있다 → "부품 없음"으로 생략되는 것이 정상 동작.
+- T-포즈로 바뀐 시트에서 `TEMPLATE` 방식 품질 미검증.
+- (v2 e2e) 의상 부츠 소실·폭 2.81: 원본 GLB 는 몸통+부츠 2 셸인데 통째 QuadriFlow 로 작은 셸이 사라짐 → `_retopo_islands` 셸별 처리(실측: 3셸, 1.81×0.36×1.35 복원).
+- (v2 e2e) 악세사리 한 셸 (1.0,1.0,0.37) 슬랩: 입력 뷰는 깨끗, TRELLIS 가 벨트 고리 안을 채움(모델 경향). 사용자 결정: 악세사리 분리 보류 → 의상 시트에 포함(3분류 BODY/OUTFIT/WEAPON).
+- (v3 e2e 1차) 의상 리토폴로지 중 Blender SIGKILL(exit 137): 부츠 셸 2차 QuadriFlow 입력 23,888면·목표 845면(28배)에서 메모리 폭주. 격리 실험: 목표 845 → 킬, 2000·4000 → 'Remeshing failed', 8000 → 성공. `QF_MAX_INPUT_RATIO=6` 가드 + `_division_ladder`(목표×2.5 면수에 맞춘 분할) + 셸 예산 하한 500.
+- (v3 e2e 2차) 몸체·부츠·배치·MODELED 통과. 의상 GLB 불량: 입력 뷰는 깨끗한데 좌우 반쪽 분리·반바지 소실·세로 2.4배 눌림(v2 동일). 사용자 결정: 의상은 '옷 입은 전신'(무기·방어구만 제거)으로 생성 → 몸체 표면 근접(키 1.5%)·내부 면 삭제(`carve_body`, BVH). 불리언 EXACT 는 팽창 사본 자기교차로 부분 결과(스모크 493면) → 폐기. 미리보기의 상자는 기본 씬 Cube(구동기 수정).
+- (v4 e2e) ALL PASS 이나 차감 결과 파편화(셔츠 소실, 피부·머리카락 조각). 오프라인 비교: 2.7cm → 9조각, 5.4cm → 1,219면(11%), 9cm → 417면. `CARVE_MAX_ISLANDS=8` 초과 시 되돌리기. 실질 산출물 = 몸체(맨몸) + 옷 입은 전신, 옷 속 몸체 면은 수동 삭제.
+- (v5 e2e) 빈 무기 시트의 격자 검출 크기 차이(>4%)로 잡 전체 FAILED → 크기 불일치는 15%까지 진행·초과 시 부품 생략. 차감 27% 잔존도 통과 → `CARVE_MIN_KEEP=0.45` 추가.
+- (v6 e2e) 환각 검·방패가 몸 실루엣 안에 크게 그려져 게이트 통과(outside 0.21). 색 불일치 게이트 시도 → 환각 0.45/의상 0.00/구형 옷-only 0.36~0.45 로 판별력 없음, 폐기. 시트 전 codex 비전 YES/NO 유무 판독(`presence_*`) 도입.
+- (v7 e2e) 판독 정상(무기 NO). 격자선 없는 의상 시트에서 3/4뷰 몸통 열(x=1207)이 격자선으로 오검출 → 칸 크기 18% 차이로 의상 생략. `grid_cuts`에 얇은 선(이웃 대비 0.25) 조건 추가.
+- (v8 e2e) ALL PASS. 차감이 기준(46% 잔존·≤8조각)을 통과했지만 머리카락 잔재·소매 결손 → 자동 차감을 환경설정 실험 옵션(기본 꺼짐)으로 내림. 기본 산출물 = 몸체 + 옷 입은 전신.

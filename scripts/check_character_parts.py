@@ -62,11 +62,10 @@ def shape(name, dimensions):
     return path
 
 
-# 실루엣은 격자 여백(GRID_MARGIN 8px) 밖에 둔다 — 실제 시트도 여백을 유지한다. 무기 키 = 몸체 키의 절반
-BOXES = {'BODY': (20, 10, 44, 54), 'OUTFIT': (18, 20, 46, 45), 'WEAPON': (48, 12, 54, 34)}
+# 부품마다 독립 시트: 대상이 칸 중앙에 크게. 크기 관계는 시트끼리 비교하지 않는다(결합 제거)
+BOXES = {'BODY': (16, 10, 48, 56), 'OUTFIT': (14, 12, 50, 54), 'WEAPON': (26, 10, 38, 56)}
 sheets = {part: sheet(part.lower() + '-sheet', box) for part, box in BOXES.items()}
-# 원본 턴어라운드는 몸체·의상·무기를 모두 담는다 — 환각 게이트는 부품 실루엣이 원본 밖에 있는 비율로 판정한다
-original = sheet('original-sheet', *BOXES.values())
+original = sheet('original-sheet', *BOXES.values())   # 디자인 참조(원본 턴어라운드 대역)
 shapes = {part: shape(part.lower(), (.2, .15, 1.0)) for part in sheets}
 request_order = []
 
@@ -117,15 +116,22 @@ assert set(objects) == {'BODY', 'OUTFIT', 'WEAPON'}
 assert all(len(obj.data.polygons) == 24 for obj in objects.values()), '부품 또는 몸체 면 손실'
 bpy.context.view_layer.update()
 assert abs(objects['BODY'].dimensions.z - 1.8) < .001
-assert abs(objects['WEAPON'].dimensions.z - .9) < .001, '무기 키가 몸체 키로 확대됨'
-assert objects['WEAPON'].location.x > .6, '무기 상대 위치 손실'
+assert abs(objects['OUTFIT'].dimensions.z - 1.8 * character_parts.DEFAULT_HEIGHT_RATIO['OUTFIT']) < .001, '의상 기본 키 비율'
+assert abs(objects['WEAPON'].dimensions.z - 1.8 * character_parts.DEFAULT_HEIGHT_RATIO['WEAPON']) < .001, '무기 기본 키 비율'
+# 나란히 배치: 몸체 원점, 나머지는 오른쪽으로 겹치지 않게
+xs = [objects[p].location.x for p in ('BODY', 'OUTFIT', 'WEAPON')]
+assert abs(xs[0]) < 1e-5 and xs[0] < xs[1] < xs[2], f'나란히 배치 순서 {xs}'
+for a, b in (('BODY', 'OUTFIT'), ('OUTFIT', 'WEAPON')):
+    right_a = objects[a].location.x + objects[a].dimensions.x / 2
+    left_b = objects[b].location.x - objects[b].dimensions.x / 2
+    assert left_b - right_a > 0.25, f'{a}-{b} 겹침 또는 간격 부족'
 for part in objects:
     runtime._texture_part = part
     assert runtime._mesh_objs() == [objects[part]], '다른 부품이 텍스처 대상에 섞임'
 runtime._texture_part = None
 report = {'external_ai': 'fixture', 'request_order': request_order,
           'part_faces': {part: len(obj.data.polygons) for part, obj in objects.items()},
-          'weapon_height': objects['WEAPON'].dimensions.z, 'body_height': objects['BODY'].dimensions.z,
+          'weapon_height': objects['WEAPON'].dimensions.z, 'body_height': objects['BODY'].dimensions.z, 'row_x': xs,
           'texture_targets_isolated': True, 'scheduler': scheduler.counts()}
 assert not scheduler.has_work()
 (out / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')

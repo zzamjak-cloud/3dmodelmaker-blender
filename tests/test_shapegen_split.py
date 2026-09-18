@@ -69,14 +69,6 @@ class CleanCellTests(unittest.TestCase):
         self.assertTrue(is_white(2, 60))              # 좌측 여백
 
 
-class SizesMatchTests(unittest.TestCase):
-    def test_small_pixel_differences_are_tolerated(self):
-        a = {'front': (512, 451), 'left': (508, 451)}
-        b = {'front': (505, 460), 'left': (512, 449)}
-        self.assertTrue(cp.sizes_match(a, b))
-        self.assertFalse(cp.sizes_match(a, {'front': (400, 451), 'left': (508, 451)}))
-        self.assertFalse(cp.sizes_match(a, {'front': (512, 451)}))
-
 
 class ThinLineTests(unittest.TestCase):
     def test_wide_dark_body_column_is_not_a_grid_line(self):

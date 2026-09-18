@@ -81,22 +81,23 @@ class PartsCatalogTests(unittest.TestCase):
         p = parts.part_prompt("기사", "WEAPON")
         self.assertIn("방어구", p); self.assertIn("갑옷", p)
 
-    def test_outfit_prompt_keeps_clothed_body_and_removes_weapons(self):
-        # 속이 빈 옷은 셰이프 모델이 못 만든다 — 옷 입은 전신으로 요청하고 몸체는 나중에 뺀다
+    def test_outfit_prompt_is_garment_only_object(self):
         p = parts.part_prompt("기사", "OUTFIT")
-        self.assertIn("무기·방어구", p); self.assertIn("몸체·머리카락", p); self.assertIn("입힌 전신", p)
+        self.assertIn("몸체·머리카락·피부·무기·방어구는 그리지 않는다", p); self.assertIn("두께", p)
 
 
 class PresenceCheckTests(unittest.TestCase):
-    def test_parse_presence(self):
-        self.assertTrue(parts.parse_presence("YES"))
-        self.assertFalse(parts.parse_presence("No."))
-        self.assertIsNone(parts.parse_presence("")); self.assertIsNone(parts.parse_presence("yes or no"))
-        self.assertFalse(parts.parse_presence("판단: NO\n"))
+    def test_parse_presence_with_height_ratio(self):
+        self.assertEqual(parts.parse_presence("YES 0.65"), (True, 0.65))
+        self.assertEqual(parts.parse_presence("YES"), (True, None))
+        self.assertEqual(parts.parse_presence("No."), (False, None))
+        self.assertEqual(parts.parse_presence(""), (None, None)); self.assertEqual(parts.parse_presence("yes or no"), (None, None))
+        self.assertEqual(parts.parse_presence("판단: NO\n"), (False, None))
+        self.assertEqual(parts.parse_presence("YES 7.0"), (True, None))   # 비현실적 비율은 버림
 
     def test_presence_prompt_and_command(self):
         p = parts.presence_prompt("기사", "WEAPON")
-        self.assertIn("방어구", p); self.assertIn("YES 또는 NO", p)
+        self.assertIn("방어구", p); self.assertIn("YES 비율", p); self.assertIn("NO", p)
         cmd = parts.presence_command("codex", "/w", "/w/orig.png")
         self.assertEqual(cmd[-1], "-"); self.assertIn("read-only", cmd); self.assertEqual(cmd[cmd.index("-i") + 1], "/w/orig.png")
 

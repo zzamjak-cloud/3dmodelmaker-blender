@@ -19,12 +19,13 @@ class CharacterPartsTests(unittest.TestCase):
         self.assertIn('대체 처리', note)
         self.assertEqual(parts.retopo_method_note({'method': 'template'}), 'template')
 
-    def test_each_part_uses_original_frame(self):
+    def test_each_part_is_an_independent_object_sheet(self):
         for key in parts.PARTS:
             prompt = parts.part_prompt('기사', key)
-            self.assertIn('원본', prompt)
-            self.assertIn('축척', prompt)
+            self.assertIn('3x2', prompt); self.assertIn('80~90%', prompt); self.assertIn('참조', prompt)
+            self.assertNotIn('원본 턴어라운드와 동일한', prompt)   # 공통 카메라·축척 강제(결합)는 제거됐다
         self.assertIn('가려진', parts.part_prompt('기사', 'BODY'))
+        self.assertIn('나란히', parts.part_prompt('기사', 'WEAPON'))
 
     def test_texture_prompt_leaves_layout_to_guide(self):
         for part in parts.PARTS:
@@ -33,18 +34,26 @@ class CharacterPartsTests(unittest.TestCase):
             self.assertNotIn('라벨', prompt)
             self.assertIn('가이드', prompt)
 
-    def test_relative_weapon_height_and_position(self):
-        result = parts.placement((.2, .1, .8, .9), (.75, .2, .85, .6), 1.8)
-        self.assertAlmostEqual(result['height'], .9)
-        self.assertAlmostEqual(result['x'], .675)
-        self.assertAlmostEqual(result['z'], .225)
+    def test_row_layout_places_body_at_origin_and_others_right(self):
+        xs = parts.row_layout([1.6, 1.0, 0.4], gap=0.3)
+        self.assertEqual(xs[0], 0.0)
+        self.assertAlmostEqual(xs[1], 0.8 + 0.3 + 0.5)
+        self.assertAlmostEqual(xs[2], 0.8 + 0.3 + 1.0 + 0.3 + 0.2)
 
-    def test_missing_body_is_error(self):
-        with self.assertRaises(ValueError):
-            parts.placement(None, (.1, .1, .2, .2), 1.8)
-
-    def test_empty_image_is_explicitly_absent(self):
-        self.assertIsNone(parts.silhouette_bbox([1.] * (8 * 8 * 4), 8, 8))
+    def test_empty_cell_has_no_content_but_label_is_ignored(self):
+        w = h = 20
+        blank = [1.0] * (w * h * 4)
+        self.assertFalse(parts.has_content(blank, w, h))
+        labeled = list(blank)
+        for y in range(18, 20):            # 상단 라벨 행(좌하단 원점이라 마지막 행들)
+            for x in range(5, 15):
+                labeled[(y * w + x) * 4:(y * w + x) * 4 + 3] = [0.0, 0.0, 0.0]
+        self.assertFalse(parts.has_content(labeled, w, h))
+        drawn = list(blank)
+        for y in range(5, 12):
+            for x in range(6, 14):
+                drawn[(y * w + x) * 4:(y * w + x) * 4 + 3] = [0.3, 0.2, 0.1]
+        self.assertTrue(parts.has_content(drawn, w, h))
 
     def test_sequence_stops_after_failure_or_cancel(self):
         sequence = parts.PartSequence()

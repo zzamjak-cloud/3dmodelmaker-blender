@@ -497,7 +497,9 @@ class GenerationSession:
         # 서버가 리메시·언랩·텍스처까지 끝내 준다 — 목표 면수를 그대로 넘긴다
         self._submit_ai(lambda: shapegen.generate(
             views, self.shape_path, max(self.prefs.timeout, 1500), self._on_shape,
-            job_key=self.uid, face_count=int(getattr(self.prefs, "shapegen_faces", 12000)),
+            job_key=self.uid,
+            # 안쪽 겹이 임포트에서 지워지므로 목표의 두 배를 요청한다 (CRUST_FACE_FACTOR 주석 참고)
+            face_count=int(getattr(self.prefs, "shapegen_faces", 12000)) * shapegen.CRUST_FACE_FACTOR,
             multiview=multiview_shape, texture=True,
             texture_size=int(getattr(self.prefs, "shapegen_texture_size", 2048))))
 

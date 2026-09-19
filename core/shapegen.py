@@ -260,6 +260,11 @@ def _b64(path: str) -> str:
         return base64.b64encode(f.read()).decode("ascii")
 
 
+CRUST_FACE_FACTOR = 2   # 서버가 쓰는 공식 내보내기(듀얼 컨투어링 리메시)는 바깥·안쪽 두 겹을 만든다.
+                        # 임포트에서 안쪽 겹을 지우면 절반 가까이 사라지므로(실측 59,053 → 26,493면),
+                        # 사용자가 지정한 목표 면수를 맞추려면 서버에는 두 배로 요청해야 한다.
+
+
 def build_body(views: dict, octree: int = 1024, steps: int = 12, guidance: float = 7.5,
                face_count: int = 0, seed: int = 7, multiview: bool = False,
                texture: bool = False, texture_size: int = 2048) -> dict:

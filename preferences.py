@@ -137,6 +137,26 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=12000, min=2000, max=100000,
         update=_persist_cb,
     )
+    shapegen_pbr: BoolProperty(
+        name="PBR 텍스처까지 서버에서 생성",
+        description="TRELLIS.2 공식 경로로 셰이프와 PBR 텍스처(베이스컬러·메탈릭·러프니스)를 한 번에 만든다. "
+                    "리메시·데시메이트·UV 언랩·텍스처 굽기까지 서버가 처리하므로 애드온의 리토폴로지·6면도 매핑을 거치지 않는다",
+        default=True,
+        update=_persist_cb,
+    )
+    shapegen_texture_size: IntProperty(
+        name="PBR 텍스처 크기",
+        description="서버가 굽는 텍스처 한 변(px)",
+        default=2048, min=512, max=4096, step=512,
+        update=_persist_cb,
+    )
+    shapegen_multiview: BoolProperty(
+        name="여러 뷰로 셰이프 생성 (실험)",
+        description="정면 외에 뒷면·좌우 뷰까지 셰이프 서버에 함께 넣는다. TRELLIS.2 는 공식적으로 이미지 1장만 받으므로 "
+                    "여러 뷰를 넣으면 서로 뭉개진 형상이 나오기 쉽다 — 기본은 끔(정면 1장)",
+        default=False,
+        update=_persist_cb,
+    )
     shapegen_symmetry: BoolProperty(
         name="좌우 대칭 와이어",
         description="QuadriFlow 를 X축 대칭으로 돌려 좌우 와이어 흐름을 맞춘다. 캐릭터에 권장 — "
@@ -238,8 +258,11 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         if self.use_shapegen:
             char_box.prop(self, "shapegen_url")
             char_box.prop(self, "shapegen_token")
+            char_box.prop(self, "shapegen_pbr")
+            char_box.prop(self, "shapegen_texture_size")
             char_box.prop(self, "shapegen_faces")
             char_box.prop(self, "shapegen_method")
+            char_box.prop(self, "shapegen_multiview")
             char_box.prop(self, "shapegen_symmetry")
             char_box.prop(self, "character_height")
         char_box.prop(self, "character_compare_turns")
@@ -288,7 +311,10 @@ class _Defaults:
     shapegen_url = "http://127.0.0.1:8081"
     shapegen_token = ""
     shapegen_faces = 12000
+    shapegen_pbr = True
+    shapegen_texture_size = 2048
     shapegen_method = 'QUADRIFLOW'
+    shapegen_multiview = False
     shapegen_symmetry = True
     character_height = 1.8
     scene_tri_budget = 0

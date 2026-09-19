@@ -142,13 +142,17 @@ class ParamAndFrameTests(unittest.TestCase):
         self.assertTrue(sc.map_params({"octree_resolution": 1024})["cascade"])
         self.assertEqual(sc.map_params({"num_inference_steps": 999})["steps"], 50)
         self.assertTrue(sc.map_params({"preserve_parts": True})["preserve_parts"])
+        self.assertFalse(sc.map_params({})["texture"])
+        self.assertTrue(sc.map_params({"texture": True})["texture"])
+        self.assertEqual(sc.map_params({"texture_size": 4096})["texture_size"], 4096)
 
     def test_to_gltf_frame_swaps_z_up_to_y_up(self):
         v = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
         np.testing.assert_allclose(sc.to_gltf_frame(v), [[1.0, 3.0, -2.0]])
 
-    def test_status_payload_advertises_preserve_parts(self):
+    def test_status_payload_advertises_capabilities(self):
         self.assertTrue(sc.status_payload()["capabilities"]["preserve_parts"])
+        self.assertTrue(sc.status_payload()["capabilities"]["pbr_texture"])
         self.assertTrue(sc.status_payload()["ok"])
 
 

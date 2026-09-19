@@ -142,6 +142,8 @@ def map_params(params: dict) -> dict:
         "cascade": octree >= 1024,
         "face_count": int(params.get("face_count", 0) or 0),
         "preserve_parts": bool(params.get("preserve_parts", False)),
+        "texture": bool(params.get("texture", False)),
+        "texture_size": int(params.get("texture_size", 0) or 0),
     }
 
 
@@ -247,4 +249,4 @@ def export_glb(mesh) -> bytes:
 
 def status_payload(loaded: bool = True) -> dict:
     return {"ok": True, "loaded": loaded, "backend": "trellis2", "multiview": True,
-            "capabilities": {"preserve_parts": True}}
+            "capabilities": {"preserve_parts": True, "pbr_texture": True}}

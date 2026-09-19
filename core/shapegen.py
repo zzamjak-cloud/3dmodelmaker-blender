@@ -261,18 +261,26 @@ def _b64(path: str) -> str:
 
 
 def build_body(views: dict, octree: int = 1024, steps: int = 12, guidance: float = 7.5,
-               face_count: int = 0, seed: int = 7) -> dict:
+               face_count: int = 0, seed: int = 7, multiview: bool = False,
+               texture: bool = False, texture_size: int = 2048) -> dict:
     """셰이프 요청 본문. 기본값은 TRELLIS.2 표준(12스텝·guidance 7.5·1024 캐스케이드) —
-    이전 Hunyuan 기본(30스텝·5.0·256)은 TRELLIS 에서 시간·비용만 2.5배 들고 품질 이득이 없다."""
+    이전 Hunyuan 기본(30스텝·5.0·256)은 TRELLIS 에서 시간·비용만 2.5배 들고 품질 이득이 없다.
+
+    multiview=True 는 실험용이다: TRELLIS.2 는 공식적으로 이미지 1장만 받으며, 여러 뷰의 토큰을 이어붙이면
+    모델이 학습한 적 없는 입력이 되어 형상이 뭉개진다(같은 시트 비교: 4뷰 → 셸 4개·무기 분리, 정면 1장 → 셸 1개)."""
     body = {"octree_resolution": int(octree), "num_inference_steps": int(steps),
             "guidance_scale": float(guidance), "face_count": int(face_count), "seed": int(seed),
-            "texture": False, "type": "glb"}
-    for name in SEND_VIEWS:
+            "texture": bool(texture), "texture_size": int(texture_size), "type": "glb"}
+    # 기본은 정면 1장 — TRELLIS.2 는 단일 이미지 전용이라 여러 뷰를 함께 넣으면 서로 뭉개진다(실측 2026-09-19)
+    names = SEND_VIEWS if multiview else ("front",)
+    for name in names:
         path = views.get(name)
         if path and os.path.isfile(path):
             body[name] = _b64(path)
     if "front" not in body:
         raise ValueError("정면(front) 뷰가 없다")
+    if multiview:
+        body["multiview"] = True
     return body
 
 

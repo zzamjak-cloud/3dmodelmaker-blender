@@ -777,6 +777,36 @@ def stash_source(hi, collection, name: str):
     return hi
 
 
+def import_textured(path: str, name: str, collection, height: float = 1.8) -> dict:
+    """서버가 PBR 텍스처까지 구워 준 GLB 를 그대로 가져온다 — 재질을 지우지 않고 키·위치만 맞춘다.
+
+    TRELLIS.2 공식 경로(o_voxel.postprocess.to_glb)가 이미 리메시·데시메이트·UV 언랩·PBR 굽기를 마쳤으므로
+    애드온에서 리토폴로지·매핑을 다시 하지 않는다."""
+    meshes = import_glb(path)
+    if not meshes:
+        raise RuntimeError("GLB에 메시가 없다")
+    obj = meshes[0]
+    if len(meshes) > 1:
+        with bpy.context.temp_override(object=obj, active_object=obj,
+                                       selected_objects=meshes, selected_editable_objects=meshes):
+            bpy.ops.object.join()
+    for c in list(obj.users_collection):
+        c.objects.unlink(obj)
+    collection.objects.link(obj)
+    obj.name = safe_id_name(name)
+    obj.data.name = obj.name
+    slabs = remove_ground_slabs(obj)
+    normalize(obj, height)
+    for polygon in obj.data.polygons:
+        polygon.use_smooth = True
+    obj.data.calc_loop_triangles()
+    images = {n.image.name for m in obj.data.materials if m and m.use_nodes
+              for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image}
+    return {"obj": obj, "faces": len(obj.data.polygons), "tris": len(obj.data.loop_triangles),
+            "materials": len([m for m in obj.data.materials if m]), "images": sorted(images),
+            "ground_slabs": slabs}
+
+
 def import_shape(path: str, name: str, collection):
     """셰이프 GLB 를 한 오브젝트로 가져와 collection 에 넣는다 (리토폴로지 전 원본)."""
     meshes = import_glb(path)

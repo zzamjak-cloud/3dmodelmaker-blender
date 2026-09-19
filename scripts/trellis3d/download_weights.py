@@ -2,7 +2,7 @@
 #
 # 사용:  modal run scripts/trellis3d/download_weights.py
 # 전제:  modal secret create huggingface-secret HF_TOKEN=<자기 HF 토큰>  (DINOv3는 게이트 모델 — HF에서 접근 승인 필요)
-# 텍스처 전용 체크포인트(imgshape2tex, tex_dec)는 받지 않는다 — 텍스처는 애드온의 6면도 베이크가 맡는다.
+# 텍스처 체크포인트(imgshape2tex, tex_dec)도 받는다 — PBR 매핑을 TRELLIS.2 공식 경로로 굽는다.
 import modal
 
 VOLUME_NAME = "trellis2-weights"
@@ -21,6 +21,9 @@ DOWNLOADS = (
         "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.*",
         "ckpts/shape_dec_next_dc_f16c32_fp16.*",
         "ckpts/shape_enc_next_dc_f16c32_fp16.*",
+        # PBR 텍스처: 1024 캐스케이드가 쓰는 텍스처 흐름 모델 + 디코더
+        "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.*",
+        "ckpts/tex_dec_next_dc_f16c32_fp16.*",
     ]),
     ("microsoft/TRELLIS-image-large", ["*.json", "ckpts/ss_dec_conv3d_16l8_fp16.*"]),
     ("facebook/dinov3-vitl16-pretrain-lvd1689m", None),   # 전체(1.1GB)

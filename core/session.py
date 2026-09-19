@@ -561,25 +561,25 @@ class GenerationSession:
             mismatch = shapegen.pose_mismatch(views)
         except Exception:
             _log.exception("턴어라운드 자세 검사 실패")   # 검사 실패로 생성을 막지는 않는다
-        if mismatch and not getattr(self, '_pose_retry_done', False):
-            # 칸마다 자세가 다른 시트는 4방향을 합칠 때 다리가 늘어나고 무기가 공중에 뜬다 — 시트를 한 번 다시 만든다
-            self._pose_retry_done = True
-            self._set_status("턴어라운드 자세 불일치 — 시트 재생성",
-                             f"측면 실루엣 폭이 정면의 {mismatch:.0%} (기준 {shapegen.SIDE_WIDTH_LIMIT:.0%} 이하) — "
-                             "칸마다 자세가 다른 시트로 판단해 다시 생성합니다", phase='GEN')
-            self._submit_ai(self._run_multiview)
-            return
         self.shape_path = os.path.join(self.workdir, "shape.glb")
         if mismatch:
-            self._set_status("턴어라운드 자세 불일치 — 그대로 진행",
-                             f"측면 실루엣 폭이 정면의 {mismatch:.0%} — 재생성 후에도 자세가 어긋납니다. "
-                             "셰이프에 다리·무기가 겹쳐 나올 수 있습니다", phase='GEN')
+            # 셰이프는 정면 1장으로 만들므로 형상에는 영향이 없다 — 매핑의 색 참조 품질에만 걸린다
+            self._set_status("턴어라운드 자세 불일치",
+                             f"측면 실루엣 폭이 정면의 {mismatch:.0%} — 칸마다 자세가 다른 시트입니다. "
+                             "셰이프는 정면만 쓰므로 형상은 괜찮지만, 매핑 단계의 색 참조가 어긋날 수 있습니다",
+                             phase='GEN')
+        sent = "정면 1장" if not bool(getattr(self.prefs, "shapegen_multiview", False)) else "4뷰(실험)"
         self._set_status("이미지→3D 셰이프 생성중 (셰이프 서버)...",
-                         f"셰이프 생성 시작: 뷰 {', '.join(sorted(views))} → {shapegen.server_url()}",
-                         phase='GEN')
+                         f"셰이프 생성 시작: {sent} → {shapegen.server_url()}", phase='GEN')
+        multiview_shape = bool(getattr(self.prefs, "shapegen_multiview", False))
+        self.pbr_shape = bool(getattr(self.prefs, "shapegen_pbr", True))
+        # PBR 경로는 서버가 리메시·언랩·텍스처까지 끝내 준다 — 목표 면수를 그대로 넘긴다
+        target = int(getattr(self.prefs, "shapegen_faces", 12000)) if self.pbr_shape else 0
         self._submit_ai(lambda: shapegen.generate(
-            views, self.shape_path, max(self.prefs.timeout, 600), self._on_shape,
-            job_key=self.uid, face_count=0))
+            views, self.shape_path, max(self.prefs.timeout, 1500), self._on_shape,
+            job_key=self.uid, face_count=target, multiview=multiview_shape,
+            texture=self.pbr_shape,
+            texture_size=int(getattr(self.prefs, "shapegen_texture_size", 2048))))
 
     def _on_shape(self, path, error=None):
         if self._stale():
@@ -591,12 +591,40 @@ class GenerationSession:
                              f"셰이프 생성 실패: {error}")
             self._start_generation()
             return
+        if getattr(self, 'pbr_shape', False):
+            self._set_status("PBR 셰이프 수신 — 배치 대기중...", "셰이프+PBR 텍스처 GLB 수신", phase='EXEC')
+            self._submit_blender(self._blender_import_pbr)
+            return
         if self.stage_mode == 'SHAPE':
             self._set_status("셰이프 수신 — 원본 확인 대기중...", "셰이프 GLB 수신", phase='EXEC')
             self._submit_blender(self._blender_shape_only)
             return
         self._set_status("셰이프 수신 — 리토폴로지 대기중...", "셰이프 GLB 수신", phase='EXEC')
         self._submit_blender(self._blender_retopo)
+
+    def _blender_import_pbr(self):
+        """서버가 PBR 텍스처까지 구운 결과를 그대로 씬에 올린다 — 리토폴로지·6면도 매핑을 거치지 않는다."""
+        from ..lowpoly import retopo, set_session
+        set_session(self.collection_name)
+        try:
+            coll = bpy.data.collections.get(self.collection_name)
+            if coll is None:
+                coll = bpy.data.collections.new(self.collection_name)
+                bpy.context.scene.collection.children.link(coll)
+            name = multiview._slug(self.request, 24) or "Character"
+            info = retopo.import_textured(self.shape_path, name, coll,
+                                          height=float(getattr(self.prefs, "character_height", 1.8)))
+        except Exception as e:
+            _log.exception("PBR 셰이프 임포트 실패")
+            self._set_status("PBR 셰이프 임포트 실패 — 코드 모델링으로 진행", f"임포트 실패: {e}")
+            self._start_generation()
+            return
+        self.last_code = ""
+        self.compare_turns_left = 0
+        self._final_note = f"{info['tris']} tris, PBR 텍스처 {len(info['images'])}장"
+        self._apply_lane()
+        self._finish(f"완료 — {info['obj'].name} ({info['faces']:,}면, PBR 재질 {info['materials']}개)", ok=True)
+        self._autosave()
 
     def _blender_shape_only(self):
         """셰이프 단계에서 멈춘다 — 원본을 씬에 올려 두고 사용자가 확인·마킹한 뒤 [리토폴로지 시작]을 누른다."""

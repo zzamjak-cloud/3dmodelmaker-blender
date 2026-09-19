@@ -46,19 +46,28 @@ class TestBuildBody(unittest.TestCase):
         self.views = {n: _png(os.path.join(self.dir, n + ".png"))
                       for n in ("front", "back", "left", "top", "quarter")}
 
-    def test_body_has_views_and_params(self):
+    def test_body_sends_only_front_by_default(self):
+        # TRELLIS.2 는 이미지 1장 전용 — 여러 뷰를 넣으면 서로 뭉개진다(실측 2026-09-19)
         body = shapegen.build_body(self.views, octree=192, steps=20, face_count=30000, seed=3)
+        self.assertIn("front", body)
+        for k in ("back", "left", "right", "top", "quarter"):
+            self.assertNotIn(k, body)
+        self.assertNotIn("multiview", body)
+        self.assertEqual(body["octree_resolution"], 192)
+        self.assertEqual(body["num_inference_steps"], 20)
+        self.assertEqual(body["face_count"], 30000)
+        self.assertEqual(body["seed"], 3)
+        self.assertFalse(body["texture"])
+        json.dumps(body)
+
+    def test_multiview_option_sends_available_side_views(self):
+        body = shapegen.build_body(self.views, multiview=True)
         for k in ("front", "back", "left"):
             self.assertIn(k, body)
         self.assertNotIn("top", body)
         self.assertNotIn("quarter", body)
         self.assertNotIn("right", body)  # 없는 뷰는 보내지 않는다
-        self.assertEqual(body["octree_resolution"], 192)
-        self.assertEqual(body["num_inference_steps"], 20)
-        self.assertEqual(body["face_count"], 30000)
-        self.assertEqual(body["seed"], 3)
-        self.assertFalse(body["texture"])  # 텍스처는 애드온이 담당
-        json.dumps(body)
+        self.assertTrue(body["multiview"])
 
     def test_front_is_required(self):
         with self.assertRaises(ValueError):

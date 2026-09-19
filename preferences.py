@@ -111,9 +111,9 @@ class LP3DPreferences(bpy.types.AddonPreferences):
     )
     use_shapegen: BoolProperty(
         name="캐릭터 이미지→3D 셰이프 생성",
-        description=("캐릭터를 코드로 조립하는 대신, 턴어라운드 시트의 정면·뒷면·측면을 로컬 "
-                     "셰이프 서버(로컬 또는 자기 Modal 계정)에 넣어 하이폴리 셰이프를 받고 리토폴로지한다. 서버가 없으면 "
-                     "자동으로 코드 모델링 경로로 폴백"),
+        description=("캐릭터를 코드로 조립하는 대신, 턴어라운드 시트의 정면을 "
+                     "셰이프 서버(로컬 또는 자기 Modal 계정)에 넣어 셰이프와 PBR 텍스처를 한 번에 받는다. "
+                     "서버가 없으면 자동으로 코드 모델링 경로로 폴백"),
         default=True,
         update=_persist_cb,
     )
@@ -132,21 +132,14 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         update=_persist_cb,
     )
     shapegen_faces: IntProperty(
-        name="리토폴로지 목표 면수",
-        description="이미지→3D 셰이프를 게임용으로 줄일 때의 목표 폴리곤(쿼드) 수. 트라이는 약 2배",
+        name="셰이프 목표 면수",
+        description="셰이프 서버가 리메시·데시메이트로 맞출 목표 폴리곤(쿼드) 수. 트라이는 약 2배",
         default=12000, min=2000, max=100000,
-        update=_persist_cb,
-    )
-    shapegen_pbr: BoolProperty(
-        name="PBR 텍스처까지 서버에서 생성",
-        description="TRELLIS.2 공식 경로로 셰이프와 PBR 텍스처(베이스컬러·메탈릭·러프니스)를 한 번에 만든다. "
-                    "리메시·데시메이트·UV 언랩·텍스처 굽기까지 서버가 처리하므로 애드온의 리토폴로지·6면도 매핑을 거치지 않는다",
-        default=True,
         update=_persist_cb,
     )
     shapegen_texture_size: IntProperty(
         name="PBR 텍스처 크기",
-        description="서버가 굽는 텍스처 한 변(px)",
+        description="서버가 굽는 PBR 텍스처(베이스컬러·메탈릭·러프니스) 한 변(px)",
         default=2048, min=512, max=4096, step=512,
         update=_persist_cb,
     )
@@ -155,24 +148,6 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         description="정면 외에 뒷면·좌우 뷰까지 셰이프 서버에 함께 넣는다. TRELLIS.2 는 공식적으로 이미지 1장만 받으므로 "
                     "여러 뷰를 넣으면 서로 뭉개진 형상이 나오기 쉽다 — 기본은 끔(정면 1장)",
         default=False,
-        update=_persist_cb,
-    )
-    shapegen_symmetry: BoolProperty(
-        name="좌우 대칭 와이어",
-        description="QuadriFlow 를 X축 대칭으로 돌려 좌우 와이어 흐름을 맞춘다. 캐릭터에 권장 — "
-                    "비대칭 소품이나 한쪽에만 장비가 붙은 모델에서는 끄는 편이 낫다",
-        default=True,
-        update=_persist_cb,
-    )
-    shapegen_method: EnumProperty(
-        name="리토폴로지 방식",
-        description="이미지→3D 셰이프를 게임용 메시로 줄이는 방법",
-        items=[
-            ('TEMPLATE', "베이스 메시 템플릿", "몸체에 얼굴·관절 루프를 가진 템플릿을 적합. 극단적인 비율은 수동 보정 필요"),
-            ('QUADRIFLOW', "QuadriFlow 쿼드", "복셀 리메시 → QuadriFlow → 하이폴리 슈링크랩 — 균일 쿼드 메시"),
-            ('DECIMATE', "데시메이트 (트라이)", "조각 제거 후 데시메이트 — 빠르지만 삼각형 그대로라 수정이 어렵다"),
-        ],
-        default='QUADRIFLOW',
         update=_persist_cb,
     )
     character_height: FloatProperty(
@@ -258,12 +233,9 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         if self.use_shapegen:
             char_box.prop(self, "shapegen_url")
             char_box.prop(self, "shapegen_token")
-            char_box.prop(self, "shapegen_pbr")
             char_box.prop(self, "shapegen_texture_size")
             char_box.prop(self, "shapegen_faces")
-            char_box.prop(self, "shapegen_method")
             char_box.prop(self, "shapegen_multiview")
-            char_box.prop(self, "shapegen_symmetry")
             char_box.prop(self, "character_height")
         char_box.prop(self, "character_compare_turns")
         img_box = self.layout.box()
@@ -311,11 +283,8 @@ class _Defaults:
     shapegen_url = "http://127.0.0.1:8081"
     shapegen_token = ""
     shapegen_faces = 12000
-    shapegen_pbr = True
     shapegen_texture_size = 2048
-    shapegen_method = 'QUADRIFLOW'
     shapegen_multiview = False
-    shapegen_symmetry = True
     character_height = 1.8
     scene_tri_budget = 0
     scene_max_assets = 0

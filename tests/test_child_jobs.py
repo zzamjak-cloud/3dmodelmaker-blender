@@ -101,14 +101,15 @@ def _prompts(props):
 
 
 class TestCharacterDuplicate(unittest.TestCase):
-    def test_duplicate_preserves_character_template_and_parts(self):
-        """복제/변형 작업에서 사용자 템플릿과 분리 선택을 잃지 않는다."""
+    def test_duplicate_preserves_character_type(self):
+        """복제 작업에서 캐릭터 유형 선택을 잃지 않는다."""
         props = _props()
         source = jobs.add_job(props, "늑대 전사")
         source.creation_mode = 'CHARACTER'
-        source.character_template = 'user_wolf'
+        source.character_type = 'ANIMAL'
         result = jobs.duplicate_job(props, 0)
-        self.assertEqual(getattr(result, 'character_template', None), 'user_wolf')
+        self.assertEqual(getattr(result, 'creation_mode', None), 'CHARACTER')
+        self.assertEqual(getattr(result, 'character_type', None), 'ANIMAL')
 
 
 class ChildJobTestCase(unittest.TestCase):

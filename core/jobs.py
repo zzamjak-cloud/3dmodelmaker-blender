@@ -163,7 +163,6 @@ def duplicate_job(props, index: int):
         "scene_size": src.scene_size,
         "style": src.style,
         "character_type": getattr(src, "character_type", 'AUTO'),
-        "character_template": getattr(src, "character_template", 'AUTO'),
     }
     job = add_job(props, src.prompt)
     for key, value in values.items():
@@ -316,7 +315,7 @@ def apply_lane_offset(collection_name: str, lane: int, spacing: float = None):
     if not coll:
         return
     gap = lanes.LANE_SPACING if spacing is None else spacing
-    # all_objects: 하이폴리 원본을 담은 자식 컬렉션까지 같이 민다 — 결과와 겹쳐 있어야 다시 리토폴로지할 수 있다
+    # all_objects: 자식 컬렉션에 담긴 오브젝트까지 같이 민다 — 결과와 같은 자리에 있어야 한다
     for obj in coll.all_objects:
         if obj.parent is not None:  # 자식은 부모를 따라 움직인다
             continue

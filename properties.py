@@ -30,8 +30,6 @@ STATE_ICONS = {
     'PENDING': 'DOT',
     'RUNNING': 'PLAY',
     'DONE': 'CHECKMARK',
-    'SHAPED': 'MOD_REMESH',
-    'MODELED': 'MESH_DATA',
     'FAILED': 'ERROR',
     'CANCELLED': 'X',
 }
@@ -73,14 +71,12 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         description="비율·골격 규칙을 정한다 — 자동이면 요청문·원화에서 판단",
         items=[
             ('AUTO', "자동", "요청문과 원화에서 유형을 판단"),
-            ('HUMANOID', "인간형", "두신 비율, A-포즈 (팔을 45도 아래로 — 베이스 메시 템플릿과 같은 자세)"),
+            ('HUMANOID', "인간형", "두신 비율, A-포즈 (팔을 45도 아래로 — 리깅하기 좋은 중립 자세)"),
             ('ANIMAL', "동물형", "실제 동물 골격 비율과 관절 방향, 네 발 중립 자세"),
             ('CREATURE', "크리처형", "동물 부위 조합이되 하나의 골격 논리"),
         ],
         default='AUTO',
     )
-    # 사용자 템플릿은 UUID 문자열로 저장해 목록 순서가 바뀌어도 선택이 유지된다.
-    character_template: StringProperty(name="베이스 메시", default='AUTO')
     scene_size: EnumProperty(
         name="씬 규모",
         description="무엇을 만드는지 — 공간 크기와 함께 에셋 종류·배치 총량·실내 여부가 정해진다",
@@ -108,27 +104,12 @@ class LP3DJobItem(bpy.types.PropertyGroup):
         ],
         default='PALETTE',
     )
-    # 셰이프 → 리토폴로지 → 매핑을 나눠 사용자가 각 단계를 확인하고 손볼 수 있게 한다
-    stage_mode: EnumProperty(
-        name="단계 진행",
-        description="어느 단계에서 멈추고 사용자 확인을 기다릴지",
-        items=[
-            ('SHAPE', "셰이프에서 정지", "원본 셰이프만 만들고 멈춘다. 원본을 확인하고 [샤프 표시]로 와이어 기준선을 "
-                                   "그은 뒤 [리토폴로지 시작]"),
-            ('RETOPO', "리토폴로지에서 정지", "리토폴로지까지 하고 멈춘다. 메시를 수정한 뒤 [매핑 시작]"),
-            ('AUTO', "자동", "셰이프 → 리토폴로지 → 매핑까지 멈추지 않고 진행"),
-        ],
-        default='RETOPO',
-    )
-
     # --- 실행 상태 ---
     state: EnumProperty(
         items=[
             ('PENDING', "대기", "아직 실행되지 않음"),
             ('RUNNING', "실행 중", "AI 호출 또는 Blender 작업 진행 중"),
             ('DONE', "완료", "생성 성공"),
-            ('SHAPED', "셰이프 완료", "원본 셰이프까지 끝남 — 확인·마킹 후 [리토폴로지 시작]"),
-            ('MODELED', "모델링 완료", "리토폴로지까지 끝남 — 메시를 수정한 뒤 [매핑 시작]"),
             ('FAILED', "실패", "생성 실패 — 원인은 상태·로그 참고"),
             ('CANCELLED', "취소됨", "사용자가 중단함"),
         ],

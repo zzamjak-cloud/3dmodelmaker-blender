@@ -70,8 +70,6 @@ class LP3D_UL_jobs(bpy.types.UIList):
             row.label(text="실패")
         elif item.state == 'DONE':
             row.label(text="완료")
-        elif item.state == 'MODELED':
-            row.label(text="모델링 완료 · 매핑 대기")
 
 
 class LP3D_PT_main(bpy.types.Panel):
@@ -149,22 +147,7 @@ class LP3D_PT_main(bpy.types.Panel):
             layout.label(text="머티리얼: 컬러 스와치 (고정)")
         elif job.creation_mode == 'CHARACTER':
             layout.prop(job, "character_type", text="캐릭터 유형")
-            from .. import preferences
-            from . import template_operators
-            prefs = preferences.get_prefs()
-            layout.prop(prefs, "shapegen_method", text="리토폴로지")
-            if prefs.shapegen_method == 'TEMPLATE':
-                box = layout.box()
-                box.operator_menu_enum('lp3d.template_choose', 'template_id',
-                                       text=template_operators.selected_label(job), icon='MESH_DATA')
-                box.operator('lp3d.template_load', icon='IMPORT')
-                row = box.row(align=True)
-                row.operator('lp3d.template_register', text='선택 메시 등록')
-                row.operator('lp3d.template_import', text='.blend 등록')
-                box.label(text='기준: 정면 -Y, 위쪽 +Z, 중립 자세', icon='INFO')
             layout.prop(job, "modeling_type", text="모델링 타입")
-            if job.modeling_type == 'TEXTURE':
-                layout.prop(job, "stage_mode", text="단계 진행")
             hint = layout.column(align=True)
             hint.scale_y = 0.85
             if job.ref_image_path.strip():
@@ -175,8 +158,6 @@ class LP3D_PT_main(bpy.types.Panel):
                 hint.label(text="얼굴·의상 디테일은 '개별 매핑'이 유리합니다", icon='INFO')
         else:
             layout.prop(job, "modeling_type", text="모델링 타입")
-            if job.modeling_type == 'TEXTURE':
-                layout.prop(job, "stage_mode", text="단계 진행")
 
     def _draw_multiview(self, layout, props, job):
         """AI가 만든 멀티뷰(3면도) 시트 — 패널에서 바로 확인하고 참조로 재사용할 수 있게 한다.
@@ -244,13 +225,6 @@ class LP3D_PT_main(bpy.types.Panel):
             box.label(text="자세한 원인은 [로그] 패널 참고", icon='TEXT')
         if job.state in ('FAILED', 'CANCELLED'):
             box.operator("lp3d.job_retry", icon='FILE_REFRESH')
-        if job.state == 'SHAPED':
-            box.label(text="원본 셰이프를 확인하고 리토폴로지를 시작하세요", icon='INFO')
-            box.label(text="Edit Mode에서 엣지를 Mark Sharp 하면 그 선을 따라 와이어가 흐릅니다", icon='EDGESEL')
-            box.operator("lp3d.job_retopo", icon='MOD_REMESH')
-        if job.state == 'MODELED':
-            box.label(text="메시를 수정한 뒤 매핑을 시작하세요", icon='INFO')
-            box.operator("lp3d.job_texture", icon='TEXTURE')
         if not session.is_active(job.uid):
             return
         box.operator("lp3d.job_cancel", icon='CANCEL')

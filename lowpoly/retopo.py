@@ -128,18 +128,23 @@ def weld_seams(obj, dist: float = 1e-5) -> int:
     return before - len(obj.data.vertices)
 
 
-INTERIOR_RAYS = 32       # 면마다 쏘는 탈출 광선 수 — 적으면 좁은 틈의 보이는 면까지 지워 반대편 뒷면이 드러난다
+INTERIOR_RAYS = 32       # 면마다 쏘는 탈출 광선 수
 INTERIOR_EPS = 1e-4      # 자기 면에 다시 맞지 않도록 띄우는 거리
+RESTORE_PASSES = 4       # 좁은 틈에서 잘못 지운 면을 되살리는 반복 횟수
+RESTORE_DOT = 0.5        # 이웃과 노멀이 이만큼 맞아야 같은 껍질로 보고 되살린다
 
 
 def remove_interior_faces(obj, rays: int = INTERIOR_RAYS) -> int:
-    """바깥에서 어느 방향으로도 보이지 않는 면을 지운다. 지운 면 수를 돌려준다.
+    """바깥 껍질만 남기고 안쪽 껍질을 지운다. 지운 면 수를 돌려준다.
 
     셰이프 서버의 듀얼 컨투어링 리메시(공식 설정)는 표면 둘레 ±1복셀 띠를 만들어 **바깥 껍질과 안쪽
-    껍질이 함께** 나온다. 안쪽 껍질은 절대 보이지 않으면서 면수를 두 배로 먹고 편집을 방해한다.
-    면 중심에서 노멀 반구 방향으로 광선을 쏴 하나라도 밖으로 빠져나가면 보이는 면으로 본다 —
-    입 안·눈구멍처럼 트인 곳은 그 틈으로 광선이 빠져나가므로 남는다. 앞으로는 못 나가고 뒤로만
-    나가는 면은 안쪽 껍질이 틈 사이로 드러난 경우라, 지우는 대신 뒤집어 앞면이 보이게 한다."""
+    껍질이 함께** 나온다. 안쪽 껍질은 보이지 않으면서 면수를 두 배로 먹고 편집을 방해한다.
+
+    1차로 면마다 노멀 반구에 광선을 쏴 하나라도 밖으로 나가면 남긴다. 다만 다리 사이·옷과 몸 경계처럼
+    좁은 틈에서는 탈출 각도를 못 찾아 보이는 면까지 지워 구멍이 뚫린다(실측 2026-09-20: 광선 128개로도
+    열린 엣지 1,302개). 그래서 2차로, 지운 면 중 **이웃 대부분이 살아남았고 노멀 방향도 같은** 면을
+    되살린다 — 안쪽 껍질은 접히는 가장자리에서만 바깥 껍질과 만나고 거기서는 노멀이 반대라 되살아나지
+    않는다."""
     import math
     import random
     import mathutils
@@ -149,36 +154,45 @@ def remove_interior_faces(obj, rays: int = INTERIOR_RAYS) -> int:
     span = max(max(v.co[i] for v in mesh.vertices) - min(v.co[i] for v in mesh.vertices) for i in range(3))
     reach = span * 2.0
     rng = random.Random(7)
-    # 반구 표본 — 노멀을 축으로 한 고정 각도 집합(재현 가능하게 시드 고정)
-    samples = [Vector((math.cos(a) * math.sin(t), math.sin(a) * math.sin(t), math.cos(t)))
-               for a, t in ((rng.uniform(0, 2 * math.pi), rng.uniform(0, math.pi / 2.2))
-                            for _ in range(max(rays - 1, 1)))]
-    def escapes(center, axis):
-        for direction in [axis] + [_hemisphere(axis, s) for s in samples]:
-            if tree.ray_cast(center + axis * INTERIOR_EPS, direction, reach)[0] is None:
-                return True
-        return False
+    samples = [Vector((math.cos(a) * math.sin(p), math.sin(a) * math.sin(p), math.cos(p)))
+               for a, p in ((rng.uniform(0, 2 * math.pi), rng.uniform(0, math.pi / 2.2))
+                            for _ in range(max(rays - 1, 0)))]
 
-    hidden, backwards = [], []
-    for face in mesh.polygons:
-        normal = face.normal
-        if normal.length_squared < 1e-12:
-            continue
-        if escapes(face.center, normal):
-            continue                       # 앞면이 바깥에서 보인다 — 그대로 둔다
-        if escapes(face.center, -normal):
-            backwards.append(face.index)   # 뒤에서만 보인다 — 안쪽 껍질이 틈으로 드러난 면
-        else:
-            hidden.append(face.index)      # 어느 쪽으로도 못 나간다 — 완전히 파묻힌 면
-    if not hidden and not backwards:
-        return 0
     bm = bmesh.new()
     bm.from_mesh(mesh)
     bm.faces.ensure_lookup_table()
-    if backwards:
-        bmesh.ops.reverse_faces(bm, faces=[bm.faces[i] for i in backwards])
-    if hidden:
-        bmesh.ops.delete(bm, geom=[bm.faces[i] for i in hidden], context='FACES')
+    visible = [False] * len(bm.faces)
+    for face in bm.faces:
+        normal = face.normal
+        if normal.length_squared < 1e-12:
+            visible[face.index] = True
+            continue
+        origin = face.calc_center_median() + normal * INTERIOR_EPS
+        for direction in [normal] + [_hemisphere(normal, s) for s in samples]:
+            if tree.ray_cast(origin, direction, reach)[0] is None:
+                visible[face.index] = True
+                break
+    for _ in range(RESTORE_PASSES):
+        revived = []
+        for face in bm.faces:
+            if visible[face.index]:
+                continue
+            neighbours = [o for e in face.edges for o in e.link_faces if o is not face]
+            if not neighbours:
+                continue
+            agree = sum(1 for o in neighbours
+                        if visible[o.index] and face.normal.dot(o.normal) > RESTORE_DOT)
+            if agree * 2 >= len(neighbours):
+                revived.append(face.index)
+        if not revived:
+            break
+        for index in revived:
+            visible[index] = True
+    hidden = [f for f in bm.faces if not visible[f.index]]
+    if not hidden:
+        bm.free()
+        return 0
+    bmesh.ops.delete(bm, geom=hidden, context='FACES')
     bm.to_mesh(mesh)
     bm.free()
     mesh.update()

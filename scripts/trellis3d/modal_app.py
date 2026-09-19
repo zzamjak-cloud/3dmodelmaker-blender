@@ -206,12 +206,24 @@ class ShapeWorker:
         )
         print("내보내기 결과:", self._mesh_stats(glb.vertices, glb.faces), flush=True)
         if cfg.get("variants"):
-            for label, kw in (("B remesh+project0.9", dict(remesh=True, remesh_band=1, remesh_project=0.9)),
-                              ("C remesh band2 project0.9", dict(remesh=True, remesh_band=2, remesh_project=0.9)),
-                              ("D remesh project0(현행 공식)", dict(remesh=True, remesh_band=1, remesh_project=0))):
+            import cumesh
+            filled = {}
+            for limit in (0.15, 10.0):
+                clean = cumesh.CuMesh()
+                clean.init(mesh.vertices, mesh.faces)
+                clean.fill_holes(max_hole_perimeter=limit)
+                clean.repair_non_manifold_edges()
+                clean.fill_holes(max_hole_perimeter=limit)
+                filled[limit] = clean.read()
+                print(f"입력 구멍 메우기 {limit}:",
+                      self._mesh_stats(filled[limit][0].cpu().numpy(), filled[limit][1].cpu().numpy()),
+                      flush=True)
+            for label, kw, src in (("E 메우기10 + 리메시", dict(remesh=True, remesh_band=1, remesh_project=0), filled[10.0]),
+                                   ("F 메우기0.15 + 리메시", dict(remesh=True, remesh_band=1, remesh_project=0), filled[0.15]),
+                                   ("G 메우기10 + 리메시 project0.9", dict(remesh=True, remesh_band=1, remesh_project=0.9), filled[10.0])):
                 try:
                     other = o_voxel.postprocess.to_glb(
-                        vertices=vertices, faces=faces, attr_volume=mesh.attrs,
+                        vertices=src[0], faces=src[1], attr_volume=mesh.attrs,
                         coords=mesh.coords, attr_layout=mesh.layout, voxel_size=mesh.voxel_size,
                         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
                         decimation_target=int(target),

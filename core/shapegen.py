@@ -169,6 +169,54 @@ def is_available(timeout: float = None) -> bool:
         return False
 
 
+SIDE_WIDTH_LIMIT = 0.85   # 측면 실루엣 폭 / 정면 실루엣 폭. 실측(2026-09-19): 정상 시트 0.28~0.62,
+                          # 칸마다 자세가 다른 시트 0.98~0.99. 옆에서 본 몸은 정면보다 뚜렷이 얇다.
+
+
+def silhouette_extent(pixels, width: int, height: int) -> tuple:
+    """배경(흰색)이 아닌 픽셀의 가로·세로 범위를 0~1 비율로. 내용이 없으면 (0, 0).
+
+    bpy 픽셀(RGBA float, 좌하단 원점)을 그대로 받는다."""
+    m = CELL_MARGIN if width > 4 * CELL_MARGIN and height > 4 * CELL_MARGIN else 0
+    min_x, max_x, min_y, max_y = width, -1, height, -1
+    for y in range(m, height - m):
+        base = y * width
+        for x in range(m, width - m):
+            i = (base + x) * 4
+            if pixels[i + 3] > .1 and min(pixels[i], pixels[i + 1], pixels[i + 2]) < DARK:
+                if x < min_x: min_x = x
+                if x > max_x: max_x = x
+                if y < min_y: min_y = y
+                if y > max_y: max_y = y
+    if max_x < 0:
+        return 0.0, 0.0
+    return (max_x - min_x + 1) / width, (max_y - min_y + 1) / height
+
+
+def pose_mismatch(views: dict) -> float:
+    """측면 실루엣이 정면만큼 넓으면(자세가 다르거나 무기를 앞으로 내밀었으면) 그 비율을 돌려준다. 정상이면 0.
+
+    칸마다 자세가 다른 턴어라운드는 4방향을 합칠 때 다리가 늘어나고 무기가 공중에 뜬 별도 덩어리가 된다 —
+    셰이프 비용을 쓰기 전에 걸러낸다."""
+    import bpy
+    widths = {}
+    for name in ('front', 'left', 'right'):
+        path = views.get(name)
+        if not path:
+            continue
+        image = bpy.data.images.load(path, check_existing=False)
+        try:
+            widths[name] = silhouette_extent(list(image.pixels), *image.size)[0]
+        finally:
+            bpy.data.images.remove(image)
+    front = widths.get('front', 0.0)
+    if front <= 0.0:
+        return 0.0
+    sides = [w for k, w in widths.items() if k != 'front']
+    worst = max((w / front for w in sides), default=0.0)
+    return worst if worst > SIDE_WIDTH_LIMIT else 0.0
+
+
 def split_turnaround(sheet_path: str, out_dir: str) -> dict:
     """턴어라운드 시트를 칸별 PNG로 잘라 {view: path}를 돌려준다 (bpy 이미지 API, PIL 불필요).
 

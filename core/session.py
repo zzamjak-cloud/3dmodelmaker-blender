@@ -556,7 +556,24 @@ class GenerationSession:
             self._set_status("시트 분할 실패 — 코드 모델링으로 진행", f"턴어라운드 분할 실패: {e}")
             self._start_generation()
             return
+        mismatch = 0.0
+        try:
+            mismatch = shapegen.pose_mismatch(views)
+        except Exception:
+            _log.exception("턴어라운드 자세 검사 실패")   # 검사 실패로 생성을 막지는 않는다
+        if mismatch and not getattr(self, '_pose_retry_done', False):
+            # 칸마다 자세가 다른 시트는 4방향을 합칠 때 다리가 늘어나고 무기가 공중에 뜬다 — 시트를 한 번 다시 만든다
+            self._pose_retry_done = True
+            self._set_status("턴어라운드 자세 불일치 — 시트 재생성",
+                             f"측면 실루엣 폭이 정면의 {mismatch:.0%} (기준 {shapegen.SIDE_WIDTH_LIMIT:.0%} 이하) — "
+                             "칸마다 자세가 다른 시트로 판단해 다시 생성합니다", phase='GEN')
+            self._submit_ai(self._run_multiview)
+            return
         self.shape_path = os.path.join(self.workdir, "shape.glb")
+        if mismatch:
+            self._set_status("턴어라운드 자세 불일치 — 그대로 진행",
+                             f"측면 실루엣 폭이 정면의 {mismatch:.0%} — 재생성 후에도 자세가 어긋납니다. "
+                             "셰이프에 다리·무기가 겹쳐 나올 수 있습니다", phase='GEN')
         self._set_status("이미지→3D 셰이프 생성중 (셰이프 서버)...",
                          f"셰이프 생성 시작: 뷰 {', '.join(sorted(views))} → {shapegen.server_url()}",
                          phase='GEN')

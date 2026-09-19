@@ -84,5 +84,34 @@ class ThinLineTests(unittest.TestCase):
         self.assertEqual(sg.grid_cuts(cols, 3), [100, 205])
 
 
+class SilhouetteExtentTests(unittest.TestCase):
+    """칸마다 자세가 다른 턴어라운드를 셰이프 생성 전에 걸러내는 지표."""
+
+    @staticmethod
+    def _cell(width, height, box):
+        px = [1.0] * (width * height * 4)
+        x0, y0, x1, y1 = box
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                i = (y * width + x) * 4
+                px[i:i + 3] = [0.2, 0.3, 0.2]
+        return px
+
+    def test_extent_is_measured_inside_the_grid_margin(self):
+        w = h = 100
+        px = self._cell(w, h, (30, 20, 70, 80))
+        ew, eh = sg.silhouette_extent(px, w, h)
+        self.assertAlmostEqual(ew, 0.40, places=2)
+        self.assertAlmostEqual(eh, 0.60, places=2)
+
+    def test_empty_cell_has_no_extent(self):
+        self.assertEqual(sg.silhouette_extent([1.0] * (20 * 20 * 4), 20, 20), (0.0, 0.0))
+
+    def test_limit_matches_measured_sheets(self):
+        # 실측: 정상 시트의 측면/정면 폭비 0.28~0.62, 자세가 다른 시트 0.98~0.99
+        self.assertGreater(sg.SIDE_WIDTH_LIMIT, 0.62)
+        self.assertLess(sg.SIDE_WIDTH_LIMIT, 0.98)
+
+
 if __name__ == "__main__":
     unittest.main()

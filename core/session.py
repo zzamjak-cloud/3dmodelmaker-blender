@@ -177,7 +177,8 @@ class GenerationSession:
             dest = os.path.join(self.workdir, "reference" + os.path.splitext(ref_image)[1].lower())
             shutil.copy(ref_image, dest)
             self.ref_image = dest
-        self.multiview = None  # codex image_gen으로 생성한 멀티뷰 참조 시트 경로
+        self.multiview = None  # 생성한 참조 이미지 경로 (정면 원화 또는 멀티뷰 시트)
+        self._shape_server = None   # 셰이프 서버 확인 결과 캐시
         self.last_images = []  # 마지막 캡처 (라이브러리 썸네일용)
         self.backend = CodexBackend(exe, self.workdir)
         self.prefs = preferences.get_prefs()
@@ -395,16 +396,30 @@ class GenerationSession:
             job = self._job()
             if job:
                 job.image_backend = backend  # 패널에서 "무엇으로 만들었는지" 보여준다
-            self._set_status(f"멀티뷰 참조 생성중 — {backend}",
-                             f"멀티뷰 참조 시트 생성 시작 [{backend}]", phase='GEN')
+            label = "정면 원화" if self._sheet_kind() == 'FRONT' else "멀티뷰 참조"
+            self._set_status(f"{label} 생성중 — {backend}",
+                             f"{label} 생성 시작 [{backend}]", phase='GEN')
             # 멀티뷰도 CLI 호출이므로 AI 슬롯을 점유한다
             self._submit_ai(self._run_multiview)
             return
         self._start_generation()
 
+    def _shape_ready(self) -> bool:
+        """셰이프 서버 사용 가능 여부 (세션당 한 번만 확인 — /status 왕복을 아낀다)."""
+        if self._shape_server is None:
+            self._shape_server = bool(shapegen.is_available())
+        return self._shape_server
+
     def _sheet_kind(self) -> str:
-        """참조 시트 종류 — 캐릭터는 3x2 턴어라운드, 그 외는 2x2 멀티뷰."""
-        return 'TURNAROUND' if self.system_mode == 'CHARACTER' else 'MULTIVIEW'
+        """참조 이미지 종류 — 캐릭터는 정면 1장, 서버가 없거나 4뷰 실험이면 3x2 턴어라운드, 그 외는 2x2 멀티뷰.
+
+        TRELLIS.2 는 이미지 1장만 받으므로 시트를 만들어 정면 칸만 잘라 쓰는 것은 해상도 낭비다.
+        코드 모델링 대체 경로와 4뷰 실험(shapegen_multiview)은 여러 각도가 필요해 시트를 그대로 쓴다."""
+        if self.system_mode != 'CHARACTER':
+            return 'MULTIVIEW'
+        if bool(getattr(self.prefs, "shapegen_multiview", False)) or not self._shape_ready():
+            return 'TURNAROUND'
+        return 'FRONT'
 
     def _run_multiview(self):
         multiview.generate(self.request, self.workdir, self.prefs.timeout,
@@ -423,25 +438,25 @@ class GenerationSession:
             job = self._job()
             if job:
                 job.multiview_path = saved or path
+            label = "정면 원화" if self._sheet_kind() == 'FRONT' else "멀티뷰 참조"
             if saved:
-                self._set_status("멀티뷰 참조 생성 완료",
-                                 f"멀티뷰 시트 저장: {saved}")
+                self._set_status(f"{label} 생성 완료", f"{label} 저장: {saved}")
             else:
-                self._set_status("멀티뷰 참조 생성 완료",
-                                 "멀티뷰 시트 생성 완료 (파일 보관 실패 — 세션 중에만 사용)")
+                self._set_status(f"{label} 생성 완료",
+                                 f"{label} 생성 완료 (파일 보관 실패 — 세션 중에만 사용)")
         else:
             # 시트가 없어도 모델링은 계속한다. 다만 로그인 만료처럼 조치 가능한
             # 원인은 상태줄에 그대로 드러내야 사용자가 고칠 수 있다.
             reason = errors.describe(error, 'codex') if error else "원인 불명"
             # 곧바로 코드 생성 단계가 상태줄을 덮어쓰므로, 조치까지 로그에 남긴다
-            lines = ["멀티뷰 생성 실패 — 참조 시트 없이 계속 진행합니다"]
+            lines = [f"{'정면 원화' if self._sheet_kind() == 'FRONT' else '멀티뷰'} 생성 실패 — 참조 이미지 없이 계속 진행합니다"]
             todo = errors.action(error, 'codex') if error else ""
             if todo:
                 lines.append(f"  → {todo}")
             lines += [f"  · {l}" for l in errors.detail_lines(error)]
             # 상태줄에 "— 참조 없이 진행"까지 붙이면 가운데가 잘려 정작 원인이 사라진다
             self._set_status(f"멀티뷰 실패: {reason}", "\n".join(lines))
-        if self.multiview and self.system_mode == 'CHARACTER' and shapegen.is_available():
+        if self.multiview and self.system_mode == 'CHARACTER' and self._shape_ready():
             self._start_shapegen()
             return
         self._start_generation()
@@ -452,16 +467,20 @@ class GenerationSession:
     # 이미지→3D 모델에 넣어 셰이프와 PBR 텍스처를 한 번에 받는다 — 리메시·데시메이트·
     # UV 언랩·텍스처 굽기까지 셰이프 서버가 처리하므로 Astra 모델링 턴은 건너뛴다.
     def _start_shapegen(self):
-        try:
-            views = shapegen.split_turnaround(self.multiview, os.path.join(self.workdir, "views"))
-        except Exception as e:
-            _log.exception("턴어라운드 분할 실패")
-            self._set_status("시트 분할 실패 — 코드 모델링으로 진행", f"턴어라운드 분할 실패: {e}")
-            self._start_generation()
-            return
+        front_only = self._sheet_kind() == 'FRONT'
+        if front_only:
+            views = {"front": self.multiview}   # 정면 한 컷을 그대로 보낸다 — 자를 시트가 없다
+        else:
+            try:
+                views = shapegen.split_turnaround(self.multiview, os.path.join(self.workdir, "views"))
+            except Exception as e:
+                _log.exception("턴어라운드 분할 실패")
+                self._set_status("시트 분할 실패 — 코드 모델링으로 진행", f"턴어라운드 분할 실패: {e}")
+                self._start_generation()
+                return
         mismatch = 0.0
         try:
-            mismatch = shapegen.pose_mismatch(views)
+            mismatch = 0.0 if front_only else shapegen.pose_mismatch(views)
         except Exception:
             _log.exception("턴어라운드 자세 검사 실패")   # 검사 실패로 생성을 막지는 않는다
         self.shape_path = os.path.join(self.workdir, "shape.glb")
@@ -589,8 +608,9 @@ class GenerationSession:
             return
         from . import autosave
         job = self._job()
+        sheet_label = '정면원화' if self._sheet_kind() == 'FRONT' else '턴어라운드'
         files = {'원화': self.ref_image,
-                 '턴어라운드': self.multiview or (getattr(job, 'multiview_path', "") if job else ""),
+                 sheet_label: self.multiview or (getattr(job, 'multiview_path', "") if job else ""),
                  '셰이프': getattr(self, 'shape_path', ""),
                  '텍스처': self.texture_path}
         path = autosave.save_result(self.collection_name, self.system_mode, files)

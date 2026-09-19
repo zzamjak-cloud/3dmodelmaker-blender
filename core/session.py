@@ -390,6 +390,17 @@ class GenerationSession:
                              f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')
             self._dispatch(first)
             return
+        # 원화를 그대로 셰이프 입력으로 쓰는 설정 — 이미지 생성을 건너뛰어 비율·디자인이 그대로 간다
+        if (self.system_mode == 'CHARACTER' and self.ref_image
+                and bool(getattr(self.prefs, "shapegen_use_ref", False)) and self._shape_ready()):
+            self.multiview = self.ref_image
+            job = self._job()
+            if job:
+                job.multiview_path = self.ref_image
+            self._set_status("원화를 그대로 사용 — 정면 원화 생성 건너뜀",
+                             f"셰이프 입력: {os.path.basename(self.ref_image)}", phase='GEN')
+            self._start_shapegen()
+            return
         # 신규 생성: 멀티뷰 참조 시트를 먼저 생성 (codex image_gen — 없으면 스킵)
         if self._use_multiview() and multiview.is_available():
             backend = multiview.backend_label()

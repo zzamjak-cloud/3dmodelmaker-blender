@@ -144,6 +144,14 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=2048, min=512, max=4096, step=512,
         update=_persist_cb,
     )
+    shapegen_use_ref: BoolProperty(
+        name="원화를 정면 이미지로 그대로 사용",
+        description="정면 원화를 새로 생성하지 않고 첨부한 원화를 셰이프 서버에 그대로 넣는다. "
+                    "원화가 이미 정면 전신이면 비율·디자인이 100% 보존된다 — 3/4 시점이거나 "
+                    "무기·배경이 함께 있으면 형상이 망가지므로 끄는 편이 낫다",
+        default=False,
+        update=_persist_cb,
+    )
     shapegen_multiview: BoolProperty(
         name="여러 뷰로 셰이프 생성 (실험)",
         description="정면 외에 뒷면·좌우 뷰까지 셰이프 서버에 함께 넣는다. TRELLIS.2 는 공식적으로 이미지 1장만 받으므로 "
@@ -236,6 +244,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
             char_box.prop(self, "shapegen_token")
             char_box.prop(self, "shapegen_texture_size")
             char_box.prop(self, "shapegen_faces")
+            char_box.prop(self, "shapegen_use_ref")
             char_box.prop(self, "shapegen_multiview")
             char_box.prop(self, "character_height")
         char_box.prop(self, "character_compare_turns")

@@ -112,6 +112,108 @@ def apply_world(obj, matrix) -> None:
     obj.data.update()
 
 
+def weld_seams(obj, dist: float = 1e-5) -> int:
+    """같은 자리에 겹쳐 있는 정점을 합친다. 합쳐서 줄어든 정점 수를 돌려준다.
+
+    서버의 UV 언랩(xatlas)은 UV 섬 경계마다 정점을 쪼개고 GLB 는 정점당 UV 하나만 담으므로,
+    가져온 메시는 심을 따라 조각조각 끊겨 있다(실측: 27,530 → 용접 후 14,441, 48%가 중복).
+    UV 는 루프(면 코너)마다 저장되니 용접해도 텍스처는 그대로고, 편집·웨이트·법선만 이어진다."""
+    before = len(obj.data.vertices)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=dist)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return before - len(obj.data.vertices)
+
+
+def remove_inner_shells(obj) -> int:
+    """다른 셸 안에 완전히 갇힌 조각을 지운다. 지운 조각 수를 돌려준다.
+
+    등위면 추출은 몸 안쪽에 보이지 않는 작은 껍질을 남길 때가 있다(실측: 5,896면 중 250면).
+    입 안·눈구멍처럼 의미 있는 안쪽 면은 바깥 셸과 이어져 있어 같은 조각이므로 지워지지 않는다."""
+    import mathutils
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    islands = _face_islands(bm)
+    if len(islands) < 2:
+        bm.free()
+        return 0
+    islands.sort(key=len, reverse=True)
+    host = islands[0]
+    verts, faces, index = [], [], {}
+    for fi in host:
+        face = bm.faces[fi]
+        row = []
+        for v in face.verts:
+            if v.index not in index:
+                index[v.index] = len(verts)
+                verts.append(v.co.copy())
+            row.append(index[v.index])
+        faces.append(row)
+    tree = mathutils.bvhtree.BVHTree.FromPolygons(verts, faces)
+    lo = Vector([min(v[i] for v in verts) for i in range(3)])
+    hi = Vector([max(v[i] for v in verts) for i in range(3)])
+    doomed = []
+    for comp in islands[1:]:
+        pts = [v.co for fi in comp for v in bm.faces[fi].verts]
+        clo = Vector([min(p[i] for p in pts) for i in range(3)])
+        chi = Vector([max(p[i] for p in pts) for i in range(3)])
+        if any(clo[i] < lo[i] or chi[i] > hi[i] for i in range(3)):
+            continue
+        if _inside(tree, (clo + chi) / 2):
+            doomed.append(comp)
+    if not doomed:
+        bm.free()
+        return 0
+    bmesh.ops.delete(bm, geom=[bm.faces[fi] for comp in doomed for fi in comp], context='FACES')
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return len(doomed)
+
+
+def _inside(tree, point) -> bool:
+    """광선 교차 횟수가 홀수면 안쪽 — 축과 나란하지 않은 방향으로 쏴 모서리 통과를 피한다."""
+    direction = Vector((0.5773, 0.5774, 0.5775))
+    cur = Vector(point)
+    hits = 0
+    for _ in range(64):
+        location = tree.ray_cast(cur, direction)[0]
+        if location is None:
+            break
+        hits += 1
+        cur = location + direction * 1e-5
+    return hits % 2 == 1
+
+
+def flip_inverted_shells(obj) -> int:
+    """부호 있는 부피가 음수인 조각(면이 안쪽을 보는 셸)을 뒤집는다. 뒤집은 조각 수를 돌려준다.
+
+    서버의 unify_face_orientations 는 한 조각 안의 방향을 맞출 뿐 바깥쪽인지까지는 보장하지 않는다
+    (실측: 62조각 중 21개가 안쪽을 봄)."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    flipped = []
+    for comp in _face_islands(bm):
+        volume = 0.0
+        for fi in comp:
+            verts = bm.faces[fi].verts
+            for k in range(1, len(verts) - 1):
+                volume += verts[0].co.dot(verts[k].co.cross(verts[k + 1].co)) / 6.0
+        if volume < 0:
+            flipped.append(comp)
+    if not flipped:
+        bm.free()
+        return 0
+    bmesh.ops.reverse_faces(bm, faces=[bm.faces[fi] for comp in flipped for fi in comp])
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return len(flipped)
+
+
 def import_textured(path: str, name: str, collection, height: float = 1.8) -> dict:
     """서버가 PBR 텍스처까지 구워 준 GLB 를 그대로 가져온다 — 재질을 지우지 않고 키·위치만 맞춘다.
 
@@ -130,6 +232,9 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
     collection.objects.link(obj)
     obj.name = safe_id_name(name)
     obj.data.name = obj.name
+    welded = weld_seams(obj)
+    inner = remove_inner_shells(obj)
+    flipped = flip_inverted_shells(obj)
     slabs = remove_ground_slabs(obj)
     normalize(obj, height)
     for polygon in obj.data.polygons:
@@ -139,4 +244,5 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
               for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image}
     return {"obj": obj, "faces": len(obj.data.polygons), "tris": len(obj.data.loop_triangles),
             "materials": len([m for m in obj.data.materials if m]), "images": sorted(images),
-            "ground_slabs": slabs}
+            "ground_slabs": slabs, "welded": welded, "inner_shells": inner,
+            "flipped_shells": flipped}

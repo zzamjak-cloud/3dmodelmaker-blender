@@ -175,13 +175,14 @@ class ShapeWorker:
             aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
             decimation_target=int(target),
             texture_size=int(cfg.get("texture_size") or DEFAULT_TEXTURE_SIZE),
-            remesh=True, remesh_band=1, remesh_project=0,
+            # remesh=True(공식 데모 기본)는 듀얼 컨투어링을 표면 둘레 ±1복셀 띠로 돌려 바깥면과 안쪽면이
+            # 함께 있는 '껍데기'를 만든다(실측 2026-09-19: 부피/바운딩박스 0.006, 면의 98%가 0.01 안쪽에
+            # 반대면 보유). 렌더에는 문제없지만 편집·게임 메시로는 못 쓴다. remesh=False 경로는 원본
+            # 등위면을 정리·단순화하고 면 방향까지 통일해(unify_face_orientations) 단일 닫힌 표면을 준다.
+            remesh=False,
             verbose=True,
         )
-        # glTF 규약(+Z 정면)에 맞춰 축을 돌린다 — 셰이프 전용 경로의 to_gltf_frame 과 같은 변환
-        import numpy as np
-        for geom in getattr(glb, "geometry", {}).values():
-            geom.vertices = np.stack([geom.vertices[:, 0], geom.vertices[:, 2], -geom.vertices[:, 1]], axis=1)
+        # to_glb 는 trimesh.Trimesh 를 돌려주고 glTF 축 변환과 UV V 뒤집기까지 이미 끝내 둔다
         return glb.export(file_type="glb")
 
     @modal.method()

@@ -514,7 +514,10 @@ class GenerationSession:
             return
         self.last_code = ""
         self.compare_turns_left = 0
-        self._final_note = f"{info['tris']} tris, PBR 텍스처 {len(info['images'])}장"
+        weld = f", 심 중복 정점 {info['welded']:,}개 용접" if info.get('welded') else ""
+        weld += f", 내부 껍질 {info['inner_shells']}개 제거" if info.get('inner_shells') else ""
+        weld += f", 뒤집힌 셸 {info['flipped_shells']}개 정렬" if info.get('flipped_shells') else ""
+        self._final_note = f"{info['tris']} tris, PBR 텍스처 {len(info['images'])}장{weld}"
         self._apply_lane()
         self._finish(f"완료 — {info['obj'].name} ({info['faces']:,}면, PBR 재질 {info['materials']}개)", ok=True)
         self._autosave()

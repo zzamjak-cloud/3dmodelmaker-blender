@@ -144,6 +144,8 @@ def map_params(params: dict) -> dict:
         "preserve_parts": bool(params.get("preserve_parts", False)),
         "texture": bool(params.get("texture", False)),
         "texture_size": int(params.get("texture_size", 0) or 0),
+        "variants": bool(params.get("variants", False)),   # 진단용 — 내보내기 설정별 통계를 로그로 남긴다
+        "hole_perimeter": float(params.get("hole_perimeter", 10.0) or 0.0),
     }
 
 

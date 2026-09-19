@@ -128,11 +128,16 @@ def weld_seams(obj, dist: float = 1e-5) -> int:
     return before - len(obj.data.vertices)
 
 
-def remove_inner_shells(obj) -> int:
-    """다른 셸 안에 완전히 갇힌 조각을 지운다. 지운 조각 수를 돌려준다.
+INNER_SHELL_MAX_RATIO = 0.01   # 본체 면수 대비 이 비율을 넘으면 '부스러기'가 아니라 부품이다
 
-    등위면 추출은 몸 안쪽에 보이지 않는 작은 껍질을 남길 때가 있다(실측: 5,896면 중 250면).
-    입 안·눈구멍처럼 의미 있는 안쪽 면은 바깥 셸과 이어져 있어 같은 조각이므로 지워지지 않는다."""
+
+def remove_inner_shells(obj) -> int:
+    """다른 셸 안에 완전히 갇힌 **닫힌** 조각을 지운다. 지운 조각 수를 돌려준다.
+
+    등위면 추출은 몸 안쪽에 보이지 않는 작은 껍질을 남길 때가 있다. 지우는 조건은 셋 다 만족할 때뿐이다:
+    ① 경계가 없는 닫힌 조각 — 천·망토처럼 열린 시트는 몸 안쪽을 지나도 보이는 부품이다(실측 2026-09-19:
+    허리에서 내려온 천 조각이 중심점만으로 판정해 삭제돼 구멍이 났다), ② 본체의 1% 미만 크기,
+    ③ 여러 지점이 모두 본체 안쪽. 입 안·눈구멍처럼 의미 있는 안쪽 면은 본체와 이어져 있어 같은 조각이다."""
     import mathutils
     bm = bmesh.new()
     bm.from_mesh(obj.data)
@@ -155,14 +160,21 @@ def remove_inner_shells(obj) -> int:
     tree = mathutils.bvhtree.BVHTree.FromPolygons(verts, faces)
     lo = Vector([min(v[i] for v in verts) for i in range(3)])
     hi = Vector([max(v[i] for v in verts) for i in range(3)])
+    limit = max(len(host) * INNER_SHELL_MAX_RATIO, 1)
     doomed = []
     for comp in islands[1:]:
-        pts = [v.co for fi in comp for v in bm.faces[fi].verts]
+        if len(comp) > limit:
+            continue
+        faces = [bm.faces[fi] for fi in comp]
+        if any(len(e.link_faces) == 1 for f in faces for e in f.edges):
+            continue                      # 열린 시트 — 부피도 안팎도 정의되지 않는다
+        pts = [v.co for f in faces for v in f.verts]
         clo = Vector([min(p[i] for p in pts) for i in range(3)])
         chi = Vector([max(p[i] for p in pts) for i in range(3)])
         if any(clo[i] < lo[i] or chi[i] > hi[i] for i in range(3)):
             continue
-        if _inside(tree, (clo + chi) / 2):
+        probes = [(clo + chi) / 2, clo * 0.75 + chi * 0.25, clo * 0.25 + chi * 0.75]
+        if all(_inside(tree, p) for p in probes):
             doomed.append(comp)
     if not doomed:
         bm.free()
@@ -189,17 +201,21 @@ def _inside(tree, point) -> bool:
 
 
 def flip_inverted_shells(obj) -> int:
-    """부호 있는 부피가 음수인 조각(면이 안쪽을 보는 셸)을 뒤집는다. 뒤집은 조각 수를 돌려준다.
+    """부호 있는 부피가 음수인 **닫힌** 조각을 뒤집는다. 뒤집은 조각 수를 돌려준다.
 
-    서버의 unify_face_orientations 는 한 조각 안의 방향을 맞출 뿐 바깥쪽인지까지는 보장하지 않는다
-    (실측: 62조각 중 21개가 안쪽을 봄)."""
+    서버의 unify_face_orientations 는 한 조각 안의 방향을 맞출 뿐 바깥쪽인지까지는 보장하지 않는다.
+    다만 부호 있는 부피는 닫힌 표면에서만 뜻이 있다 — 열린 시트(천·망토)에 적용하면 멀쩡한 면을
+    뒤집는다(실측 2026-09-19: 하체 천이 뒤집혀 나왔다)."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     flipped = []
     for comp in _face_islands(bm):
+        faces = [bm.faces[fi] for fi in comp]
+        if any(len(e.link_faces) == 1 for f in faces for e in f.edges):
+            continue
         volume = 0.0
-        for fi in comp:
-            verts = bm.faces[fi].verts
+        for f in faces:
+            verts = f.verts
             for k in range(1, len(verts) - 1):
                 volume += verts[0].co.dot(verts[k].co.cross(verts[k + 1].co)) / 6.0
         if volume < 0:

@@ -158,16 +158,61 @@ class ShapeWorker:
         cond = feats.reshape(1, -1, feats.shape[-1])
         return {"cond": cond, "neg_cond": torch.zeros_like(cond)}
 
+    @staticmethod
+    def _mesh_stats(vertices, faces) -> str:
+        """면수·(용접 후) 열린 엣지·부피비 — 껍데기는 부피비 0 근처, 찢김은 열린 엣지로 드러난다.
+
+        UV 언랩이 섬마다 정점을 쪼개 두므로 같은 좌표를 먼저 합쳐야 경계 수가 실제와 맞는다."""
+        import numpy as np
+        v = np.asarray(vertices, dtype=np.float64)
+        f = np.asarray(faces, dtype=np.int64)
+        tri = v[f]
+        volume = float(np.einsum('ij,ij->i', tri[:, 0], np.cross(tri[:, 1], tri[:, 2])).sum() / 6.0)
+        box = float(np.prod(v.max(axis=0) - v.min(axis=0)))
+        _uniq, inverse = np.unique(np.round(v, 6), axis=0, return_inverse=True)
+        welded = inverse[f]
+        edges = np.sort(np.concatenate([welded[:, [0, 1]], welded[:, [1, 2]], welded[:, [2, 0]]]), axis=1)
+        _u, counts = np.unique(edges, axis=0, return_counts=True)
+        return (f"면 {len(f):,} 정점 {len(_uniq):,} 열린엣지 {int((counts == 1).sum()):,} "
+                f"부피비 {volume / box:+.4f}")
+
     def _textured_glb(self, mesh, cfg: dict) -> bytes:
         """공식 o_voxel.postprocess.to_glb 로 PBR 텍스처까지 구운 GLB 바이트.
 
         to_glb 는 정리·듀얼컨투어 리메시·데시메이트·UV 언랩·PBR 굽기를 한 번에 한다(cumesh·flex_gemm, MIT).
         내부에서 UV 래스터화에만 nvdiffrast 를 쓰는데, 이미지에 우리 토치 구현(uv_raster)을 그 이름으로 얹어 뒀다."""
+        import cumesh
         import o_voxel
         target = cfg["face_count"] if cfg["face_count"] > 0 else DEFAULT_DECIMATION
+        vertices, faces = mesh.vertices, mesh.faces
+        if cfg.get("variants"):   # 700만 면 통계는 몇 초 걸린다 — 진단 요청에서만 낸다
+            print("원본 등위면:", self._mesh_stats(vertices.cpu().numpy(), faces.cpu().numpy()), flush=True)
+        # 정리 순서를 우리가 잡는다. to_glb 의 remesh=False 분기는 단순화 뒤에 비매니폴드 복구로 면을 지우고,
+        # 그 다음 구멍 메우기는 둘레 3e-2 까지만 처리한다 — 그래서 큰 찢김이 결과에 남는다(실측 2026-09-19:
+        # 열린 엣지 4,851개, 둘레가 모델 6배인 찢김 2개). 같은 정리를 먼저 끝내고 **마지막에 크게 메워서**
+        # 넘기면, to_glb 안의 단순화·복구는 할 일이 없어 찢김이 생기지 않는다.
+        perimeter = float(cfg.get("hole_perimeter") or 0.0)
+        if perimeter > 0:
+            clean = cumesh.CuMesh()
+            clean.init(vertices, faces)
+            clean.fill_holes(max_hole_perimeter=3e-2)
+            clean.simplify(int(target) * 3)
+            clean.remove_duplicate_faces()
+            clean.repair_non_manifold_edges()
+            clean.remove_small_connected_components(1e-5)
+            clean.simplify(int(target))
+            clean.remove_duplicate_faces()
+            clean.repair_non_manifold_edges()
+            clean.fill_holes(max_hole_perimeter=perimeter)
+            clean.repair_non_manifold_edges()
+            clean.fill_holes(max_hole_perimeter=perimeter)   # 복구가 새로 낸 구멍까지 한 번 더
+            clean.unify_face_orientations()
+            vertices, faces = clean.read()
+            print(f"사전 정리(구멍 둘레 {perimeter}):",
+                  self._mesh_stats(vertices.cpu().numpy(), faces.cpu().numpy()), flush=True)
         glb = o_voxel.postprocess.to_glb(
-            vertices=mesh.vertices,
-            faces=mesh.faces,
+            vertices=vertices,
+            faces=faces,
             attr_volume=mesh.attrs,
             coords=mesh.coords,
             attr_layout=mesh.layout,
@@ -180,8 +225,24 @@ class ShapeWorker:
             # 반대면 보유). 렌더에는 문제없지만 편집·게임 메시로는 못 쓴다. remesh=False 경로는 원본
             # 등위면을 정리·단순화하고 면 방향까지 통일해(unify_face_orientations) 단일 닫힌 표면을 준다.
             remesh=False,
-            verbose=True,
+            verbose=False,   # xatlas 진행 막대가 로그를 덮어 진단 출력이 묻힌다
         )
+        print("내보내기 결과:", self._mesh_stats(glb.vertices, glb.faces), flush=True)
+        if cfg.get("variants"):
+            for label, kw in (("B remesh+project0.9", dict(remesh=True, remesh_band=1, remesh_project=0.9)),
+                              ("C remesh band2 project0.9", dict(remesh=True, remesh_band=2, remesh_project=0.9)),
+                              ("D remesh project0(현행 공식)", dict(remesh=True, remesh_band=1, remesh_project=0))):
+                try:
+                    other = o_voxel.postprocess.to_glb(
+                        vertices=vertices, faces=faces, attr_volume=mesh.attrs,
+                        coords=mesh.coords, attr_layout=mesh.layout, voxel_size=mesh.voxel_size,
+                        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+                        decimation_target=int(target),
+                        texture_size=int(cfg.get("texture_size") or DEFAULT_TEXTURE_SIZE),
+                        **kw)
+                    print(f"변형 {label}:", self._mesh_stats(other.vertices, other.faces), flush=True)
+                except Exception as e:
+                    print(f"변형 {label} 실패: {type(e).__name__} {e}", flush=True)
         # to_glb 는 trimesh.Trimesh 를 돌려주고 glTF 축 변환과 UV V 뒤집기까지 이미 끝내 둔다
         return glb.export(file_type="glb")
 

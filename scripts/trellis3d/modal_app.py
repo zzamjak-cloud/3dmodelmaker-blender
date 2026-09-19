@@ -187,29 +187,6 @@ class ShapeWorker:
         vertices, faces = mesh.vertices, mesh.faces
         if cfg.get("variants"):   # 700만 면 통계는 몇 초 걸린다 — 진단 요청에서만 낸다
             print("원본 등위면:", self._mesh_stats(vertices.cpu().numpy(), faces.cpu().numpy()), flush=True)
-        # 정리 순서를 우리가 잡는다. to_glb 의 remesh=False 분기는 단순화 뒤에 비매니폴드 복구로 면을 지우고,
-        # 그 다음 구멍 메우기는 둘레 3e-2 까지만 처리한다 — 그래서 큰 찢김이 결과에 남는다(실측 2026-09-19:
-        # 열린 엣지 4,851개, 둘레가 모델 6배인 찢김 2개). 같은 정리를 먼저 끝내고 **마지막에 크게 메워서**
-        # 넘기면, to_glb 안의 단순화·복구는 할 일이 없어 찢김이 생기지 않는다.
-        perimeter = float(cfg.get("hole_perimeter") or 0.0)
-        if perimeter > 0:
-            clean = cumesh.CuMesh()
-            clean.init(vertices, faces)
-            clean.fill_holes(max_hole_perimeter=3e-2)
-            clean.simplify(int(target) * 3)
-            clean.remove_duplicate_faces()
-            clean.repair_non_manifold_edges()
-            clean.remove_small_connected_components(1e-5)
-            clean.simplify(int(target))
-            clean.remove_duplicate_faces()
-            clean.repair_non_manifold_edges()
-            clean.fill_holes(max_hole_perimeter=perimeter)
-            clean.repair_non_manifold_edges()
-            clean.fill_holes(max_hole_perimeter=perimeter)   # 복구가 새로 낸 구멍까지 한 번 더
-            clean.unify_face_orientations()
-            vertices, faces = clean.read()
-            print(f"사전 정리(구멍 둘레 {perimeter}):",
-                  self._mesh_stats(vertices.cpu().numpy(), faces.cpu().numpy()), flush=True)
         glb = o_voxel.postprocess.to_glb(
             vertices=vertices,
             faces=faces,
@@ -220,11 +197,11 @@ class ShapeWorker:
             aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
             decimation_target=int(target),
             texture_size=int(cfg.get("texture_size") or DEFAULT_TEXTURE_SIZE),
-            # remesh=True(공식 데모 기본)는 듀얼 컨투어링을 표면 둘레 ±1복셀 띠로 돌려 바깥면과 안쪽면이
-            # 함께 있는 '껍데기'를 만든다(실측 2026-09-19: 부피/바운딩박스 0.006, 면의 98%가 0.01 안쪽에
-            # 반대면 보유). 렌더에는 문제없지만 편집·게임 메시로는 못 쓴다. remesh=False 경로는 원본
-            # 등위면을 정리·단순화하고 면 방향까지 통일해(unify_face_orientations) 단일 닫힌 표면을 준다.
-            remesh=False,
+            # 공식 데모와 같은 설정으로 되돌렸다(2026-09-19). remesh=False 는 속이 찬 단일 표면을 주지만
+            # 원본 등위면의 찢김(7.47M면에 열린 엣지 46,046)이 그대로 드러나고, 그걸 메우면 입·눈처럼
+            # 뚫려 있어야 할 곳까지 막히고 메운 면의 방향이 어긋난다(사용자 실측 보고). 듀얼 컨투어링
+            # 리메시는 그 찢김을 감싸 워터타이트하고 방향이 일관된 표면을 준다 — 대신 안쪽 면이 함께 남는다.
+            remesh=True, remesh_band=1, remesh_project=0,
             verbose=False,   # xatlas 진행 막대가 로그를 덮어 진단 출력이 묻힌다
         )
         print("내보내기 결과:", self._mesh_stats(glb.vertices, glb.faces), flush=True)

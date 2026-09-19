@@ -128,106 +128,70 @@ def weld_seams(obj, dist: float = 1e-5) -> int:
     return before - len(obj.data.vertices)
 
 
-INNER_SHELL_MAX_RATIO = 0.01   # 본체 면수 대비 이 비율을 넘으면 '부스러기'가 아니라 부품이다
+INTERIOR_RAYS = 32       # 면마다 쏘는 탈출 광선 수 — 적으면 좁은 틈의 보이는 면까지 지워 반대편 뒷면이 드러난다
+INTERIOR_EPS = 1e-4      # 자기 면에 다시 맞지 않도록 띄우는 거리
 
 
-def remove_inner_shells(obj) -> int:
-    """다른 셸 안에 완전히 갇힌 **닫힌** 조각을 지운다. 지운 조각 수를 돌려준다.
+def remove_interior_faces(obj, rays: int = INTERIOR_RAYS) -> int:
+    """바깥에서 어느 방향으로도 보이지 않는 면을 지운다. 지운 면 수를 돌려준다.
 
-    등위면 추출은 몸 안쪽에 보이지 않는 작은 껍질을 남길 때가 있다. 지우는 조건은 셋 다 만족할 때뿐이다:
-    ① 경계가 없는 닫힌 조각 — 천·망토처럼 열린 시트는 몸 안쪽을 지나도 보이는 부품이다(실측 2026-09-19:
-    허리에서 내려온 천 조각이 중심점만으로 판정해 삭제돼 구멍이 났다), ② 본체의 1% 미만 크기,
-    ③ 여러 지점이 모두 본체 안쪽. 입 안·눈구멍처럼 의미 있는 안쪽 면은 본체와 이어져 있어 같은 조각이다."""
+    셰이프 서버의 듀얼 컨투어링 리메시(공식 설정)는 표면 둘레 ±1복셀 띠를 만들어 **바깥 껍질과 안쪽
+    껍질이 함께** 나온다. 안쪽 껍질은 절대 보이지 않으면서 면수를 두 배로 먹고 편집을 방해한다.
+    면 중심에서 노멀 반구 방향으로 광선을 쏴 하나라도 밖으로 빠져나가면 보이는 면으로 본다 —
+    입 안·눈구멍처럼 트인 곳은 그 틈으로 광선이 빠져나가므로 남는다. 앞으로는 못 나가고 뒤로만
+    나가는 면은 안쪽 껍질이 틈 사이로 드러난 경우라, 지우는 대신 뒤집어 앞면이 보이게 한다."""
+    import math
+    import random
     import mathutils
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    tree = mathutils.bvhtree.BVHTree.FromObject(obj, depsgraph)
+    mesh = obj.data
+    span = max(max(v.co[i] for v in mesh.vertices) - min(v.co[i] for v in mesh.vertices) for i in range(3))
+    reach = span * 2.0
+    rng = random.Random(7)
+    # 반구 표본 — 노멀을 축으로 한 고정 각도 집합(재현 가능하게 시드 고정)
+    samples = [Vector((math.cos(a) * math.sin(t), math.sin(a) * math.sin(t), math.cos(t)))
+               for a, t in ((rng.uniform(0, 2 * math.pi), rng.uniform(0, math.pi / 2.2))
+                            for _ in range(max(rays - 1, 1)))]
+    def escapes(center, axis):
+        for direction in [axis] + [_hemisphere(axis, s) for s in samples]:
+            if tree.ray_cast(center + axis * INTERIOR_EPS, direction, reach)[0] is None:
+                return True
+        return False
+
+    hidden, backwards = [], []
+    for face in mesh.polygons:
+        normal = face.normal
+        if normal.length_squared < 1e-12:
+            continue
+        if escapes(face.center, normal):
+            continue                       # 앞면이 바깥에서 보인다 — 그대로 둔다
+        if escapes(face.center, -normal):
+            backwards.append(face.index)   # 뒤에서만 보인다 — 안쪽 껍질이 틈으로 드러난 면
+        else:
+            hidden.append(face.index)      # 어느 쪽으로도 못 나간다 — 완전히 파묻힌 면
+    if not hidden and not backwards:
+        return 0
     bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    islands = _face_islands(bm)
-    if len(islands) < 2:
-        bm.free()
-        return 0
-    islands.sort(key=len, reverse=True)
-    host = islands[0]
-    verts, faces, index = [], [], {}
-    for fi in host:
-        face = bm.faces[fi]
-        row = []
-        for v in face.verts:
-            if v.index not in index:
-                index[v.index] = len(verts)
-                verts.append(v.co.copy())
-            row.append(index[v.index])
-        faces.append(row)
-    tree = mathutils.bvhtree.BVHTree.FromPolygons(verts, faces)
-    lo = Vector([min(v[i] for v in verts) for i in range(3)])
-    hi = Vector([max(v[i] for v in verts) for i in range(3)])
-    limit = max(len(host) * INNER_SHELL_MAX_RATIO, 1)
-    doomed = []
-    for comp in islands[1:]:
-        if len(comp) > limit:
-            continue
-        faces = [bm.faces[fi] for fi in comp]
-        if any(len(e.link_faces) == 1 for f in faces for e in f.edges):
-            continue                      # 열린 시트 — 부피도 안팎도 정의되지 않는다
-        pts = [v.co for f in faces for v in f.verts]
-        clo = Vector([min(p[i] for p in pts) for i in range(3)])
-        chi = Vector([max(p[i] for p in pts) for i in range(3)])
-        if any(clo[i] < lo[i] or chi[i] > hi[i] for i in range(3)):
-            continue
-        probes = [(clo + chi) / 2, clo * 0.75 + chi * 0.25, clo * 0.25 + chi * 0.75]
-        if all(_inside(tree, p) for p in probes):
-            doomed.append(comp)
-    if not doomed:
-        bm.free()
-        return 0
-    bmesh.ops.delete(bm, geom=[bm.faces[fi] for comp in doomed for fi in comp], context='FACES')
-    bm.to_mesh(obj.data)
+    bm.from_mesh(mesh)
+    bm.faces.ensure_lookup_table()
+    if backwards:
+        bmesh.ops.reverse_faces(bm, faces=[bm.faces[i] for i in backwards])
+    if hidden:
+        bmesh.ops.delete(bm, geom=[bm.faces[i] for i in hidden], context='FACES')
+    bm.to_mesh(mesh)
     bm.free()
-    obj.data.update()
-    return len(doomed)
+    mesh.update()
+    return len(hidden)
 
 
-def _inside(tree, point) -> bool:
-    """광선 교차 횟수가 홀수면 안쪽 — 축과 나란하지 않은 방향으로 쏴 모서리 통과를 피한다."""
-    direction = Vector((0.5773, 0.5774, 0.5775))
-    cur = Vector(point)
-    hits = 0
-    for _ in range(64):
-        location = tree.ray_cast(cur, direction)[0]
-        if location is None:
-            break
-        hits += 1
-        cur = location + direction * 1e-5
-    return hits % 2 == 1
-
-
-def flip_inverted_shells(obj) -> int:
-    """부호 있는 부피가 음수인 **닫힌** 조각을 뒤집는다. 뒤집은 조각 수를 돌려준다.
-
-    서버의 unify_face_orientations 는 한 조각 안의 방향을 맞출 뿐 바깥쪽인지까지는 보장하지 않는다.
-    다만 부호 있는 부피는 닫힌 표면에서만 뜻이 있다 — 열린 시트(천·망토)에 적용하면 멀쩡한 면을
-    뒤집는다(실측 2026-09-19: 하체 천이 뒤집혀 나왔다)."""
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    flipped = []
-    for comp in _face_islands(bm):
-        faces = [bm.faces[fi] for fi in comp]
-        if any(len(e.link_faces) == 1 for f in faces for e in f.edges):
-            continue
-        volume = 0.0
-        for f in faces:
-            verts = f.verts
-            for k in range(1, len(verts) - 1):
-                volume += verts[0].co.dot(verts[k].co.cross(verts[k + 1].co)) / 6.0
-        if volume < 0:
-            flipped.append(comp)
-    if not flipped:
-        bm.free()
-        return 0
-    bmesh.ops.reverse_faces(bm, faces=[bm.faces[fi] for comp in flipped for fi in comp])
-    bm.to_mesh(obj.data)
-    bm.free()
-    obj.data.update()
-    return len(flipped)
+def _hemisphere(normal, sample):
+    """표본 벡터를 노멀이 +Z 인 좌표계로 돌린다."""
+    axis = Vector((0.0, 0.0, 1.0))
+    if abs(normal.z) > 0.999:
+        return sample if normal.z > 0 else Vector((sample.x, sample.y, -sample.z))
+    rotation = axis.rotation_difference(normal)
+    return rotation @ sample
 
 
 def import_textured(path: str, name: str, collection, height: float = 1.8) -> dict:
@@ -249,8 +213,7 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
     obj.name = safe_id_name(name)
     obj.data.name = obj.name
     welded = weld_seams(obj)
-    inner = remove_inner_shells(obj)
-    flipped = flip_inverted_shells(obj)
+    inner = remove_interior_faces(obj)
     slabs = remove_ground_slabs(obj)
     normalize(obj, height)
     for polygon in obj.data.polygons:
@@ -260,5 +223,4 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
               for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image}
     return {"obj": obj, "faces": len(obj.data.polygons), "tris": len(obj.data.loop_triangles),
             "materials": len([m for m in obj.data.materials if m]), "images": sorted(images),
-            "ground_slabs": slabs, "welded": welded, "inner_shells": inner,
-            "flipped_shells": flipped}
+            "ground_slabs": slabs, "welded": welded, "interior_faces": inner}

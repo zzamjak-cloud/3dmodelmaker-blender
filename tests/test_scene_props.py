@@ -169,6 +169,16 @@ class TestCreationModeFields(unittest.TestCase):
         order = list(self.annotations)
         self.assertLess(order.index("creation_mode"), order.index("modeling_type"))
 
+    def test_front_image_defaults_to_generate(self):
+        field = self.annotations["front_image"]
+        self.assertEqual(field["default"], 'GENERATE')
+        self.assertEqual([item[0] for item in field["items"]], ['GENERATE', 'USE_REF'])
+
+    def test_write_only_turn_counters_are_gone(self):
+        # 쓰기만 하고 읽는 곳이 없던 필드 — 되살아나면 감사에서 다시 잡힌다
+        self.assertNotIn("iteration", self.annotations)
+        self.assertNotIn("total_turns", self.annotations)
+
     def test_existing_defaults_unchanged(self):
         self.assertEqual(self.annotations["modeling_type"]["default"], 'PALETTE')
         self.assertEqual(self.annotations["phase"]["default"], "")

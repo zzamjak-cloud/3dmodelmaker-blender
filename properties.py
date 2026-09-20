@@ -19,6 +19,12 @@ def _style_items(self, context):
     return _STYLE_ITEMS
 
 
+def _mode_changed_cb(self, context):
+    # 모드를 바꾸면 그 모드에 맞는 기본값으로 나머지 옵션을 맞춘다 — 매번 전부 고르지 않게
+    from .core import jobs
+    jobs.apply_mode_defaults(self)
+
+
 def _persist_cb(self, context):
     # 익스포트 폴더는 파일이 바뀌어도 유지되도록 JSON에 저장
     from .core import persist
@@ -56,15 +62,28 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     )
     creation_mode: EnumProperty(
         name="제작 모드",
-        description="이 항목으로 무엇을 만들지 — 단일 오브젝트인지, 여러 에셋으로 구성된 배경 공간인지",
+        description="이 항목으로 무엇을 만들지 — 바꾸면 나머지 옵션이 그 모드의 기본값으로 맞춰진다",
         items=[
             ('OBJECT', "오브젝트", "단일 오브젝트 생성 (멀티뷰 3면도 기반)"),
-            ('SCENE', "배경 공간", "여러 에셋으로 구성된 배경 공간 생성 (플랜 → 에셋 키트 → 배치)"),
+            ('SCENE', "배경 공간",
+             "여러 에셋으로 구성된 배경 공간 생성 (플랜 → 에셋 키트 → 배치) — 머티리얼은 컬러 스와치 고정"),
             ('CHARACTER', "캐릭터",
-             "게임 캐릭터 생성 — 원화(참조 이미지)로 6면도 턴어라운드 시트를 만들고 리깅 자세로 "
-             "모델링한 뒤 모델링 타입에 따라 매핑까지 진행"),
+             "게임 캐릭터 생성 — 정면 원화를 셰이프 서버에 넣어 셰이프와 PBR 텍스처를 한 번에 받는다"),
         ],
         default='OBJECT',
+        update=_mode_changed_cb,
+    )
+    front_image: EnumProperty(
+        name="정면 이미지",
+        description="셰이프 서버에 넣을 정면 전신 이미지를 어떻게 마련할지",
+        items=[
+            ('GENERATE', "정면 원화 생성",
+             "첨부한 원화(또는 프롬프트)로 정면 전신 한 컷을 새로 그려 넣는다 — 3/4 시점·배경·무기가 섞인 원화도 안전"),
+            ('USE_REF', "원화 그대로 사용",
+             "첨부한 원화를 그대로 넣는다 — 이미 정면 전신이면 비율·디자인이 100% 보존되지만, "
+             "3/4 시점이거나 배경·무기가 함께 있으면 형상이 망가진다"),
+        ],
+        default='GENERATE',
     )
     character_type: EnumProperty(
         name="캐릭터 유형",
@@ -122,8 +141,6 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     # 오브젝트 모드: GEN/EXEC/FINAL/TEX, 배경 모드: VIEW/PLAN/KIT/PLACE/FINAL
     phase: StringProperty(default="")
     started_at: FloatProperty(default=0.0)   # 경과 시간 표시용
-    iteration: IntProperty(default=0)
-    total_turns: IntProperty(default=0)
     log: StringProperty(default="")
 
     # --- 결과 ---
@@ -145,7 +162,7 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
     job_index: IntProperty(default=0)
     next_uid: IntProperty(default=1)  # 다음 항목에 발급할 uid
 
-    # --- 새 항목의 기본값이 되는 씬 설정 (설정 JSON으로 영속화) ---
+    # --- 씬 설정 (익스포트 폴더는 설정 JSON으로 영속화) ---
     export_dir: StringProperty(
         name="익스포트 폴더",
         subtype='DIR_PATH',

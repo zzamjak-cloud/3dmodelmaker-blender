@@ -38,7 +38,18 @@ def _retopo_source(context):
 class LP3D_OT_job_add(bpy.types.Operator):
     bl_idname = "lp3d.job_add"
     bl_label = "항목 추가"
-    bl_description = "생성 큐에 새 프롬프트 항목을 추가한다 (OS 네이티브 입력 창)"
+    bl_description = ("생성 큐에 새 항목을 추가한다 — 무엇을 만들지(오브젝트/캐릭터/배경)를 먼저 고르면 "
+                      "나머지 옵션은 그 모드의 기본값으로 맞춰지고, OS 네이티브 입력 창이 열린다")
+
+    mode: EnumProperty(
+        name="제작 모드",
+        items=[
+            ('OBJECT', "오브젝트", "단일 오브젝트"),
+            ('CHARACTER', "캐릭터", "정면 원화 → 셰이프 서버"),
+            ('SCENE', "배경 공간", "플랜 → 에셋 키트 → 배치"),
+        ],
+        default='OBJECT',
+    )
 
     @classmethod
     def poll(cls, context):
@@ -46,13 +57,14 @@ class LP3D_OT_job_add(bpy.types.Operator):
 
     def execute(self, context):
         scene_name = context.scene.name
+        mode = self.mode
 
         def on_done(text):
             if text is None:
                 return  # 취소 — 항목을 만들지 않는다
             scene = bpy.data.scenes.get(scene_name)
             if scene and getattr(scene, "lp3d", None):
-                jobs.add_job(scene.lp3d, native_input.to_single_line(text))
+                jobs.add_job(scene.lp3d, native_input.to_single_line(text), mode=mode)
 
         error = native_input.open_dialog("프롬프트 입력", "", on_done)
         if error:

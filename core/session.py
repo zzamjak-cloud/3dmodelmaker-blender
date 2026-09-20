@@ -205,6 +205,9 @@ class GenerationSession:
             self.system_mode = 'CHARACTER'
         self.character_type = (str(getattr(job, "character_type", 'AUTO') or 'AUTO')
                                if job else 'AUTO')
+        # 정면 이미지 마련 방식(정면 원화 생성 / 원화 그대로)도 시작 시점에 고정한다
+        self.front_image = (str(getattr(job, "front_image", 'GENERATE') or 'GENERATE')
+                            if job else 'GENERATE')
         self._cancel_requested = False
         # 캐릭터는 실행 후 시트와 같은 6시점으로 렌더해 시트와 대조하는 턴을 돈다.
         # 첫 생성은 시트를 '보고' 만들지만 결과가 얼마나 다른지는 모른다 — 나란히
@@ -259,8 +262,6 @@ class GenerationSession:
         if job:
             job.status = status
             job.status_hint = hint
-            job.iteration = self.iteration
-            job.total_turns = self.max_iterations
             if phase is not None:
                 job.phase = phase
             if log:
@@ -390,9 +391,9 @@ class GenerationSession:
                              f"세션 시작: {self.request} ({self.backend.name})", phase='GEN')
             self._dispatch(first)
             return
-        # 원화를 그대로 셰이프 입력으로 쓰는 설정 — 이미지 생성을 건너뛰어 비율·디자인이 그대로 간다
+        # 원화를 그대로 셰이프 입력으로 쓰는 잡 옵션 — 이미지 생성을 건너뛰어 비율·디자인이 그대로 간다
         if (self.system_mode == 'CHARACTER' and self.ref_image
-                and bool(getattr(self.prefs, "shapegen_use_ref", False)) and self._shape_ready()):
+                and self.front_image == 'USE_REF' and self._shape_ready()):
             self.multiview = self.ref_image
             job = self._job()
             if job:
@@ -401,8 +402,10 @@ class GenerationSession:
                              f"셰이프 입력: {os.path.basename(self.ref_image)}", phase='GEN')
             self._start_shapegen()
             return
-        # 신규 생성: 멀티뷰 참조 시트를 먼저 생성 (codex image_gen — 없으면 스킵)
-        if self._use_multiview() and multiview.is_available():
+        # 신규 생성: 멀티뷰 참조 시트를 먼저 생성 (codex image_gen — 없으면 스킵).
+        # 캐릭터의 셰이프 서버 경로는 정면 이미지가 곧 입력이라 '참조 시트 생성' 설정과 무관하게 만든다
+        needs_front = self.system_mode == 'CHARACTER' and self._shape_ready()
+        if (self._use_multiview() or needs_front) and multiview.is_available():
             backend = multiview.backend_label()
             job = self._job()
             if job:
@@ -422,13 +425,13 @@ class GenerationSession:
         return self._shape_server
 
     def _sheet_kind(self) -> str:
-        """참조 이미지 종류 — 캐릭터는 정면 1장, 서버가 없거나 4뷰 실험이면 3x2 턴어라운드, 그 외는 2x2 멀티뷰.
+        """참조 이미지 종류 — 캐릭터는 정면 1장, 서버가 없으면 3x2 턴어라운드, 그 외는 2x2 멀티뷰.
 
         TRELLIS.2 는 이미지 1장만 받으므로 시트를 만들어 정면 칸만 잘라 쓰는 것은 해상도 낭비다.
-        코드 모델링 대체 경로와 4뷰 실험(shapegen_multiview)은 여러 각도가 필요해 시트를 그대로 쓴다."""
+        코드 모델링 대체 경로는 여러 각도가 필요해 시트를 그대로 쓴다."""
         if self.system_mode != 'CHARACTER':
             return 'MULTIVIEW'
-        if bool(getattr(self.prefs, "shapegen_multiview", False)) or not self._shape_ready():
+        if not self._shape_ready():
             return 'TURNAROUND'
         return 'FRONT'
 
@@ -501,17 +504,15 @@ class GenerationSession:
                              f"측면 실루엣 폭이 정면의 {mismatch:.0%} — 칸마다 자세가 다른 시트입니다. "
                              "셰이프는 정면만 쓰므로 형상은 괜찮지만, 매핑 단계의 색 참조가 어긋날 수 있습니다",
                              phase='GEN')
-        sent = "정면 1장" if not bool(getattr(self.prefs, "shapegen_multiview", False)) else "4뷰(실험)"
         self._set_status("이미지→3D 셰이프 생성중 (셰이프 서버)...",
-                         f"셰이프 생성 시작: {sent} → {shapegen.server_url()}", phase='GEN')
-        multiview_shape = bool(getattr(self.prefs, "shapegen_multiview", False))
+                         f"셰이프 생성 시작: 정면 1장 → {shapegen.server_url()}", phase='GEN')
         # 서버가 리메시·언랩·텍스처까지 끝내 준다 — 목표 면수를 그대로 넘긴다
         self._submit_ai(lambda: shapegen.generate(
             views, self.shape_path, max(self.prefs.timeout, 1500), self._on_shape,
             job_key=self.uid,
             # 안쪽 겹이 임포트에서 지워지므로 목표의 두 배를 요청한다 (CRUST_FACE_FACTOR 주석 참고)
             face_count=int(getattr(self.prefs, "shapegen_faces", 12000)) * shapegen.CRUST_FACE_FACTOR,
-            multiview=multiview_shape, texture=True,
+            multiview=False, texture=True,
             texture_size=int(getattr(self.prefs, "shapegen_texture_size", 2048))))
 
     def _on_shape(self, path, error=None):
@@ -867,9 +868,6 @@ class GenerationSession:
         turn = self.compare_turns_total - self.compare_turns_left + 1
         self.compare_turns_left -= 1
         self.iteration += 1
-        job = self._job()
-        if job:
-            job.iteration = self.iteration
         self._set_status(f"6면도 대조 {turn}/{self.compare_turns_total} — {self._model_label()} 호출중...",
                          f"6면도 대조 턴 {turn}/{self.compare_turns_total}: 시트 vs 렌더 비교 요청",
                          phase='GEN')

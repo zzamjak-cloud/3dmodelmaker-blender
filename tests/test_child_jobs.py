@@ -61,12 +61,12 @@ class _Job:
         self.modeling_type = 'PALETTE'
         self.style = 'LOWPOLY'
         self.character_type = 'AUTO'
+        self.front_image = 'GENERATE'
         self.state = 'PENDING'
         self.status = "대기 중"
         self.status_hint = ""
         self.phase = ""
         self.log = ""
-        self.iteration = 0
         self.lane = 0
         self.requested_model = ""
         self.effective_model = ""
@@ -101,6 +101,37 @@ def _prompts(props):
 
 
 class TestCharacterDuplicate(unittest.TestCase):
+    def test_add_job_applies_mode_defaults(self):
+        props = _props()
+        job = jobs.add_job(props, "오크 전사", mode='CHARACTER')
+        self.assertEqual(job.creation_mode, 'CHARACTER')
+        self.assertEqual(job.front_image, 'GENERATE')
+        self.assertEqual(job.character_type, 'AUTO')
+        scene = jobs.add_job(props, "폐허 마을", mode='SCENE')
+        self.assertEqual((scene.creation_mode, scene.scene_size, scene.modeling_type), ('SCENE', 'M', 'PALETTE'))
+        plain = jobs.add_job(props, "나무 상자")
+        self.assertEqual(plain.creation_mode, 'OBJECT')
+
+    def test_apply_mode_defaults_resets_only_mode_keys(self):
+        props = _props()
+        job = jobs.add_job(props, "오크 전사", mode='CHARACTER')
+        job.front_image = 'USE_REF'
+        job.style = 'STYLISH'
+        job.creation_mode = 'SCENE'
+        jobs.apply_mode_defaults(job)
+        self.assertEqual(job.scene_size, 'M')
+        self.assertEqual(job.style, 'STYLISH')       # 스타일은 모드 기본값이 아니다 — 건드리지 않는다
+        job.creation_mode = 'CHARACTER'
+        jobs.apply_mode_defaults(job)
+        self.assertEqual(job.front_image, 'GENERATE')
+
+    def test_duplicate_preserves_front_image(self):
+        props = _props()
+        source = jobs.add_job(props, "오크 전사", mode='CHARACTER')
+        source.front_image = 'USE_REF'
+        copy = jobs.duplicate_job(props, 0)
+        self.assertEqual((copy.creation_mode, copy.front_image), ('CHARACTER', 'USE_REF'))
+
     def test_duplicate_preserves_character_type(self):
         """복제 작업에서 캐릭터 유형 선택을 잃지 않는다."""
         props = _props()

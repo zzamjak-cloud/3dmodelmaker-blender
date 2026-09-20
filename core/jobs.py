@@ -22,13 +22,33 @@ def _clear_model_tracking(job):
     job.model_fallback = False
 
 
-def add_job(props, prompt: str = ""):
-    """새 잡 항목을 만들어 리스트 끝에 붙이고 선택 상태로 만든다."""
+# 제작 모드별 기본 옵션 — 모드를 먼저 고르면 나머지는 이 값으로 맞춰진다.
+# 배경은 팔레트 머티리얼이 고정이고, 캐릭터는 셰이프 서버 경로라 모델링 타입이 결과에 영향을 주지 않는다.
+MODE_DEFAULTS = {
+    'OBJECT': {"modeling_type": 'PALETTE'},
+    'SCENE': {"modeling_type": 'PALETTE', "scene_size": 'M'},
+    'CHARACTER': {"modeling_type": 'PALETTE', "character_type": 'AUTO', "front_image": 'GENERATE'},
+}
+
+
+def apply_mode_defaults(job) -> None:
+    """잡의 제작 모드에 맞는 기본 옵션을 대입한다. 모드에 없는 키는 건너뛴다."""
+    mode = str(getattr(job, "creation_mode", 'OBJECT') or 'OBJECT')
+    for key, value in MODE_DEFAULTS.get(mode, {}).items():
+        if getattr(job, key, None) != value:
+            setattr(job, key, value)
+
+
+def add_job(props, prompt: str = "", mode: str = 'OBJECT'):
+    """새 잡 항목을 만들어 리스트 끝에 붙이고 선택 상태로 만든다. mode 는 제작 모드(OBJECT/SCENE/CHARACTER)."""
     job = props.jobs.add()
     job.uid = props.next_uid
     props.next_uid += 1
     job.prompt = prompt
     job.lane = next_lane(props)
+    if mode and mode in MODE_DEFAULTS:
+        job.creation_mode = mode
+    apply_mode_defaults(job)
     props.job_index = len(props.jobs) - 1
     return job
 
@@ -163,8 +183,9 @@ def duplicate_job(props, index: int):
         "scene_size": src.scene_size,
         "style": src.style,
         "character_type": getattr(src, "character_type", 'AUTO'),
+        "front_image": getattr(src, "front_image", 'GENERATE'),
     }
-    job = add_job(props, src.prompt)
+    job = add_job(props, src.prompt, mode=src.creation_mode)
     for key, value in values.items():
         setattr(job, key, value)
     return job
@@ -258,7 +279,6 @@ def retry_job(context, index: int) -> str:
     job.status = "대기 중"
     job.status_hint = ""
     job.log = ""
-    job.iteration = 0
     _clear_model_tracking(job)
     error = start_one(context, job)
     if error:

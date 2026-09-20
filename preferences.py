@@ -61,8 +61,9 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         update=_persist_cb,
     )
     use_multiview: BoolProperty(
-        name="멀티뷰 참조 생성",
-        description="생성 시작 시 정면/측면/상면/쿼터뷰 참조 시트를 먼저 만들어 모델링 기준으로 사용 (생성 백엔드는 아래 '참조 이미지 생성'에서 고른다)",
+        name="참조 시트 먼저 생성",
+        description=("오브젝트·배경 생성 전에 멀티뷰(정면/측면/상면/쿼터뷰) 참조 시트를 만들어 모델링 기준으로 쓴다. "
+                     "캐릭터의 정면 원화는 셰이프 서버 입력이라 이 설정과 무관하게 항상 만든다"),
         default=True,
         update=_persist_cb,
     )
@@ -110,7 +111,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         update=_persist_cb,
     )
     use_shapegen: BoolProperty(
-        name="캐릭터 이미지→3D 셰이프 생성",
+        name="셰이프 서버 사용",
         description=("캐릭터를 코드로 조립하는 대신, 턴어라운드 시트의 정면을 "
                      "셰이프 서버(로컬 또는 자기 Modal 계정)에 넣어 셰이프와 PBR 텍스처를 한 번에 받는다. "
                      "서버가 없으면 자동으로 코드 모델링 경로로 폴백"),
@@ -144,21 +145,6 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=2048, min=512, max=4096, step=512,
         update=_persist_cb,
     )
-    shapegen_use_ref: BoolProperty(
-        name="원화를 정면 이미지로 그대로 사용",
-        description="정면 원화를 새로 생성하지 않고 첨부한 원화를 셰이프 서버에 그대로 넣는다. "
-                    "원화가 이미 정면 전신이면 비율·디자인이 100% 보존된다 — 3/4 시점이거나 "
-                    "무기·배경이 함께 있으면 형상이 망가지므로 끄는 편이 낫다",
-        default=False,
-        update=_persist_cb,
-    )
-    shapegen_multiview: BoolProperty(
-        name="여러 뷰로 셰이프 생성 (실험)",
-        description="정면 외에 뒷면·좌우 뷰까지 셰이프 서버에 함께 넣는다. TRELLIS.2 는 공식적으로 이미지 1장만 받으므로 "
-                    "여러 뷰를 넣으면 서로 뭉개진 형상이 나오기 쉽다 — 기본은 끔(정면 1장)",
-        default=False,
-        update=_persist_cb,
-    )
     character_height: FloatProperty(
         name="캐릭터 기본 키(m)",
         description="이미지→3D 셰이프의 크기 기준. 발바닥 z=0에서 머리끝까지",
@@ -179,9 +165,9 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         update=_persist_cb,
     )
     character_compare_turns: IntProperty(
-        name="캐릭터 6면도 대조 횟수",
-        description=("캐릭터 모델을 실행한 뒤 시트와 같은 6시점으로 렌더해 턴어라운드 시트와 "
-                     "대조하고 차이를 고치는 추가 턴 수. 0이면 대조 없이 한 번에 마무리. "
+        name="6면도 대조 횟수 (코드 모델링 폴백)",
+        description=("셰이프 서버가 없어 캐릭터를 코드로 모델링할 때만 쓰인다 — 실행 결과를 시트와 같은 "
+                     "6시점으로 렌더해 대조하고 고치는 추가 턴 수. 0이면 대조 없이 마무리. "
                      "1회당 Astra 호출 1번이 늘어난다"),
         default=1, min=0, max=3,
         update=_persist_cb,
@@ -240,53 +226,85 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         update=_persist_cb,
     )
 
+    show_advanced: BoolProperty(
+        name="고급 설정",
+        description="배경 공간 상한·타임아웃 배수·코드 모델링 폴백처럼 평소에는 건드리지 않는 값",
+        default=False,
+    )
+
     def draw(self, context):
-        col = self.layout.column()
-        col.prop(self, "codex_path")
-        col.prop(self, "timeout")
-        col.prop(self, "ai_concurrency")
-        col.prop(self, "use_multiview")
-        col.prop(self, "use_library")
-        col.prop(self, "texture_resolution")
-        col.prop(self, "texture_per_view")
-        char_box = self.layout.box()
-        char_box.label(text="캐릭터", icon='ARMATURE_DATA')
-        char_box.prop(self, "use_shapegen")
-        if self.use_shapegen:
-            char_box.prop(self, "shapegen_url")
-            char_box.prop(self, "shapegen_token")
-            char_box.prop(self, "shapegen_texture_size")
-            char_box.prop(self, "shapegen_faces")
-            char_box.prop(self, "shapegen_use_ref")
-            char_box.prop(self, "shapegen_multiview")
-            char_box.prop(self, "character_height")
-        char_box.prop(self, "retopo_faces")
-        char_box.prop(self, "retopo_symmetry")
-        char_box.prop(self, "character_compare_turns")
-        img_box = self.layout.box()
-        img_box.label(text="참조 이미지 생성", icon='IMAGE_DATA')
-        img_box.prop(self, "image_backend")
+        layout = self.layout
+
+        box = layout.box()
+        box.label(text="AI 실행", icon='CONSOLE')
+        box.prop(self, "codex_path")
+        row = box.row(align=True)
+        row.prop(self, "timeout")
+        row.prop(self, "ai_concurrency")
+        box.prop(self, "use_library")
+
+        box = layout.box()
+        box.label(text="참조 이미지 생성", icon='IMAGE_DATA')
+        box.prop(self, "use_multiview")
+        box.prop(self, "image_backend")
         if self.image_backend == 'OPENROUTER':
-            img_box.prop(self, "openrouter_api_key")
-            img_box.prop(self, "image_model")
+            box.prop(self, "openrouter_api_key")
+            row = box.row(align=True)
+            row.prop(self, "image_model")
             if imagegen.model_def(self.image_model)["qualities"]:
-                img_box.prop(self, "image_quality")
+                row.prop(self, "image_quality", text="")
             if not imagegen.api_key():
-                warn = img_box.column()
+                warn = box.column()
                 warn.alert = True
                 warn.label(text="키가 없어 Codex CLI로 폴백합니다", icon='ERROR')
-        scene_box = self.layout.box()
-        scene_box.label(text="배경 공간", icon='WORLD')
-        scene_box.prop(self, "scene_tri_budget")
-        scene_box.prop(self, "scene_max_assets")
-        scene_box.prop(self, "scene_timeout_scale")
+
+        box = layout.box()
+        box.label(text="캐릭터 — 셰이프 서버", icon='ARMATURE_DATA')
+        box.prop(self, "use_shapegen")
+        if self.use_shapegen:
+            box.prop(self, "shapegen_url")
+            box.prop(self, "shapegen_token")
+            row = box.row(align=True)
+            row.prop(self, "shapegen_faces")
+            row.prop(self, "shapegen_texture_size")
+            box.prop(self, "character_height")
+        else:
+            box.label(text="서버 없이 코드 모델링으로 만듭니다 (품질 낮음)", icon='INFO')
+
+        box = layout.box()
+        box.label(text="리토폴로지 — [리토폴로지 시작] 버튼", icon='MOD_REMESH')
+        row = box.row(align=True)
+        row.prop(self, "retopo_faces")
+        row.prop(self, "retopo_symmetry")
+
+        box = layout.box()
+        box.label(text="개별 매핑 텍스처 (오브젝트)", icon='TEXTURE')
+        row = box.row(align=True)
+        row.prop(self, "texture_resolution")
+        row.prop(self, "texture_per_view")
+
+        box = layout.box()
+        box.label(text="에셋 라이브러리", icon='ASSET_MANAGER')
+        box.prop(self, "asset_library_path")
         from .core import library
         try:
             info = library.stats()
-            col.label(text=f"라이브러리: {info['count']}개 축적 ({info['rated']}개 평가됨)", icon='ASSET_MANAGER')
+            box.label(text=f"생성 라이브러리: {info['count']}개 축적 ({info['rated']}개 평가됨)")
         except Exception:
             pass
-        col.prop(self, "asset_library_path")
+
+        box = layout.box()
+        box.prop(self, "show_advanced", icon='DISCLOSURE_TRI_DOWN' if self.show_advanced
+                 else 'DISCLOSURE_TRI_RIGHT', emboss=False)
+        if self.show_advanced:
+            col = box.column()
+            col.label(text="배경 공간", icon='WORLD')
+            col.prop(self, "scene_tri_budget")
+            col.prop(self, "scene_max_assets")
+            col.prop(self, "scene_timeout_scale")
+            col.separator()
+            col.label(text="캐릭터 코드 모델링 폴백", icon='ARMATURE_DATA')
+            col.prop(self, "character_compare_turns")
 
 
 class _Defaults:
@@ -304,14 +322,13 @@ class _Defaults:
     image_model = imagegen.DEFAULT_MODEL
     image_quality = 'high'
     character_compare_turns = 1
-    retopo_faces = 8000
+    retopo_faces = 12000
     retopo_symmetry = True
     use_shapegen = True
     shapegen_url = "http://127.0.0.1:8081"
     shapegen_token = ""
     shapegen_faces = 12000
     shapegen_texture_size = 2048
-    shapegen_multiview = False
     character_height = 1.8
     scene_tri_budget = 0
     scene_max_assets = 0

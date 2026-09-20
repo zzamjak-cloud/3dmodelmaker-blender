@@ -4,7 +4,7 @@ import time
 
 import bpy
 
-from ..core import models, scheduler, session, styles
+from ..core import models, scheduler, session
 from . import previews
 
 # 진행 단계 정의 (session.py의 phase 식별자와 일치)
@@ -72,6 +72,10 @@ class LP3D_UL_jobs(bpy.types.UIList):
             row.label(text="완료")
 
 
+_MODE_ICONS = {'OBJECT': 'MESH_CUBE', 'CHARACTER': 'ARMATURE_DATA', 'SCENE': 'WORLD'}
+_MODE_LABELS = {'OBJECT': "오브젝트", 'CHARACTER': "캐릭터", 'SCENE': "배경 공간"}
+
+
 class LP3D_PT_main(bpy.types.Panel):
     bl_label = "AI 모델 생성"
     bl_space_type = 'VIEW_3D'
@@ -82,14 +86,17 @@ class LP3D_PT_main(bpy.types.Panel):
         layout = self.layout
         props = context.scene.lp3d
 
+        # --- 새 항목: 무엇을 만들지 먼저 고른다 — 나머지 옵션은 모드 기본값으로 맞춰진다 ---
+        add = layout.row(align=True)
+        add.scale_y = 1.3
+        for mode in ('OBJECT', 'CHARACTER', 'SCENE'):
+            add.operator("lp3d.job_add", text=_MODE_LABELS[mode], icon=_MODE_ICONS[mode]).mode = mode
+
         # --- 생성 큐 리스트 ---
-        layout.label(text="생성 큐:")
         row = layout.row()
-        row.template_list("LP3D_UL_jobs", "", props, "jobs", props, "job_index", rows=4)
+        row.template_list("LP3D_UL_jobs", "", props, "jobs", props, "job_index", rows=3)
         side = row.column(align=True)
-        side.operator("lp3d.job_add", text="", icon='ADD')
         side.operator("lp3d.job_remove", text="", icon='REMOVE')
-        side.separator()
         side.operator("lp3d.job_duplicate", text="", icon='DUPLICATE')
         side.separator()
         side.operator("lp3d.job_move", text="", icon='TRIA_UP').delta = -1
@@ -101,91 +108,85 @@ class LP3D_PT_main(bpy.types.Panel):
         run_row.operator("lp3d.queue_start", icon='PLAY')
         if session.is_active():
             run_row.operator("lp3d.queue_stop", text="", icon='CANCEL')
-
-        counts = scheduler.counts()
-        layout.label(
-            text=(f"대기 {counts['ai_waiting']} · AI 실행 {counts['ai_running']} · "
-                  f"Blender 대기 {counts['blender_waiting']}"),
-            icon='SORTTIME')
+            counts = scheduler.counts()
+            layout.label(
+                text=(f"대기 {counts['ai_waiting']} · AI 실행 {counts['ai_running']} · "
+                      f"Blender 대기 {counts['blender_waiting']}"),
+                icon='SORTTIME')
 
         job = props.active_job()
         if job is None:
-            layout.label(text="[＋]로 프롬프트 항목을 추가하세요", icon='INFO')
+            layout.label(text="위 버튼으로 만들 것을 고르고 프롬프트를 입력하세요", icon='INFO')
             return
 
         # --- 선택 항목 상세 ---
         box = layout.box()
-        box.label(text=f"항목 {props.job_index + 1} / {len(props.jobs)}", icon='TEXT')
+        self._draw_header(box, props, job)
         box.prop(job, "prompt", text="")
         # 주의: 입력 필드에 scale을 주면 macOS IME(한글 조합)가 더 불안정해짐.
         # 한글은 필드 직접 입력 대신 [프롬프트 입력] 버튼의 OS 네이티브 팝업을 쓴다.
         box.operator("lp3d.edit_prompt", text="프롬프트 입력", icon='TEXT')
-        self._draw_mode(box, props, job)
-        box.prop(job, "ref_image_path", text="참조 이미지")
         ref_row = box.row(align=True)
-        ref_row.operator("lp3d.paste_ref_image", text="클립보드에서 붙여넣기", icon='PASTEDOWN')
+        ref_row.prop(job, "ref_image_path", text="")
+        ref_row.operator("lp3d.paste_ref_image", text="", icon='PASTEDOWN')
         if job.ref_image_path:
             ref_row.operator("lp3d.clear_ref_image", text="", icon='X')
+        self._draw_options(box, props, job)
 
-        self._draw_multiview(box, props, job)
+        self._draw_multiview(layout, props, job)
         self._draw_status(layout, job)
 
-    def _draw_mode(self, layout, props, job):
-        """제작 모드 선택 — 배경 공간은 머티리얼이 팔레트로 고정되고 씬 규모를 대신 고른다."""
+    def _draw_header(self, layout, props, job):
+        """항목 번호와 제작 모드 — 모드는 여기서 바꿀 수 있고, 바꾸면 옵션이 그 모드 기본값으로 돌아간다."""
+        row = layout.row(align=True)
+        row.label(text=f"항목 {props.job_index + 1}/{len(props.jobs)}")
         parent = _parent_job(props, job)
         if getattr(job, "parent_uid", ""):
             # 에셋 잡의 모드·스타일은 부모 플랜이 정한다 — 사용자가 바꿀 값이 아니다
-            owner = (parent.prompt[:20] if parent else "")
-            layout.label(text=f"배경 '{owner}'의 에셋", icon='LINKED')
-            if parent is not None:
-                layout.label(text=f"스타일: {styles.style_def(parent.style)['label']} (부모 승계)")
+            owner = parent.prompt[:16] if parent else ""
+            row.label(text=f"배경 '{owner}'의 에셋", icon='LINKED')
             return
-        layout.prop(job, "style", text="스타일")
-        layout.prop(job, "creation_mode", text="제작 모드")
+        row.prop(job, "creation_mode", text="")
+
+    def _draw_options(self, layout, props, job):
+        """모드에 따라 결과에 실제로 영향을 주는 옵션만 보인다."""
+        if getattr(job, "parent_uid", ""):
+            return
+        col = layout.column(align=True)
+        col.prop(job, "style", text="스타일")
         if job.creation_mode == 'SCENE':
-            layout.prop(job, "scene_size", text="씬 규모")
-            layout.label(text="머티리얼: 컬러 스와치 (고정)")
+            col.prop(job, "scene_size", text="규모")
         elif job.creation_mode == 'CHARACTER':
-            layout.prop(job, "character_type", text="캐릭터 유형")
-            layout.prop(job, "modeling_type", text="모델링 타입")
-            hint = layout.column(align=True)
-            hint.scale_y = 0.85
+            # 셰이프 서버 경로는 정면 이미지 한 장이 전부다 — 모델링 타입은 결과에 영향을 주지 않는다
             if job.ref_image_path.strip():
-                hint.label(text="원화 → 6면도 턴어라운드 → 리깅 자세 모델링", icon='ARMATURE_DATA')
+                col.prop(job, "front_image", text="정면")
             else:
-                hint.label(text="원화(참조 이미지)를 넣으면 그 캐릭터로 6면도를 만듭니다", icon='INFO')
-            if job.modeling_type != 'TEXTURE':
-                hint.label(text="얼굴·의상 디테일은 '개별 매핑'이 유리합니다", icon='INFO')
+                col.label(text="원화를 넣으면 그 캐릭터의 정면 원화를 만듭니다", icon='INFO')
         else:
-            layout.prop(job, "modeling_type", text="모델링 타입")
+            col.prop(job, "modeling_type", text="재질")
 
     def _draw_multiview(self, layout, props, job):
-        """AI가 만든 멀티뷰(3면도) 시트 — 패널에서 바로 확인하고 참조로 재사용할 수 있게 한다.
+        """AI가 만든 참조 이미지(정면 원화·멀티뷰 시트) — 패널에서 바로 확인하고 참조로 재사용한다.
 
         경로가 비어 있어도 상자를 그린다: 지난 세션 시트를 파일에서 되찾는 버튼이 필요하다."""
         mv = layout.box()
-        # 지금 설정으로 어느 백엔드가 쓰이는지 항상 보여준다 — 잡이 이미 돌았으면
-        # 그때 실제로 쓴 값을, 아니면 현재 설정에서 계산한 값을 표시한다
-        from .. import preferences
-        from ..core import multiview
-        enabled = bool(getattr(preferences.get_prefs(), "use_multiview", True))
-        used = getattr(job, "image_backend", "")
-        label = used if (used and job.state != 'PENDING') else multiview.backend_label(enabled)
-        active = label.startswith("OpenRouter")
-        row = mv.row()
-        row.alert = label.startswith("미사용") or "폴백" in label
-        row.label(text=f"참조 이미지: {label}",
-                  icon='URL' if active else ('CONSOLE' if label.startswith("Codex") else 'CANCEL'))
         mv_path = job.multiview_path
         if not mv_path:
-            mv.operator("lp3d.load_last_multiview",
-                        text="저장된 멀티뷰 미리보기", icon='IMAGE_DATA')
+            row = mv.row(align=True)
+            row.label(text="참조 이미지", icon='IMAGE_DATA')
+            row.operator("lp3d.load_last_multiview", text="저장된 시트 불러오기", icon='FILE_FOLDER')
             return
         header = mv.row(align=True)
         header.prop(props, "multiview_preview_open", text="", emboss=False,
                     icon='DISCLOSURE_TRI_DOWN' if props.multiview_preview_open
                     else 'DISCLOSURE_TRI_RIGHT')
-        header.label(text=f"멀티뷰: {os.path.basename(mv_path)}", icon='IMAGE_DATA')
+        # 잡이 이미 돌았으면 그때 실제로 쓴 백엔드를, 아니면 현재 설정에서 계산한 값을 보여준다
+        from .. import preferences
+        from ..core import multiview
+        enabled = bool(getattr(preferences.get_prefs(), "use_multiview", True))
+        used = getattr(job, "image_backend", "")
+        backend = used if (used and job.state != 'PENDING') else multiview.backend_label(enabled)
+        header.label(text=f"참조 이미지 · {backend}", icon='IMAGE_DATA')
         if props.multiview_preview_open:
             icon = previews.icon_id(mv_path)
             if icon:
@@ -200,40 +201,35 @@ class LP3D_PT_main(bpy.types.Panel):
         row.operator("lp3d.open_multiview_folder", text="", icon='FILEBROWSER')
 
     def _draw_status(self, layout, job):
-        """선택 항목의 진행 상태: 현재 작업 + 경과 시간 + 단계 목록."""
+        """선택 항목의 진행 상태: 현재 작업 + 경과 시간 + 단계 목록. 대기 중인 항목은 그리지 않는다."""
+        running = session.is_active(job.uid)
+        failed = job.state == 'FAILED' or "실패" in job.status
+        if job.state == 'PENDING' and not running and not failed:
+            return
         box = layout.box()
         # 실패는 눈에 띄어야 한다 — 조용히 지나가면 원인을 놓친다 (로그인 만료 사고)
-        failed = job.state == 'FAILED' or "실패" in job.status
         head = box.row()
         head.alert = failed
-        head.label(text=f"상태: {job.status}", icon='ERROR' if failed else 'INFO')
+        head.label(text=job.status, icon='ERROR' if failed else 'INFO')
         generation_model = _model_label(job)
-        tracked = any((
-            getattr(job, "requested_model", ""),
-            getattr(job, "effective_model", ""),
-        ))
-        if generation_model == models.NO_MODEL_RECORD_LABEL:
-            box.label(text=models.NO_MODEL_RECORD_LABEL, icon='SETTINGS')
-        else:
-            requested_model = getattr(job, "requested_model", "") or generation_model
-            effective_model = generation_model if tracked else ""
-            box.label(text=models.job_model_label(
-                requested_model, effective_model, job.model_fallback), icon='SETTINGS')
         if failed:
             if job.status_hint:
                 box.label(text=job.status_hint, icon='CONSOLE')
             box.label(text="자세한 원인은 [로그] 패널 참고", icon='TEXT')
         if job.state in ('FAILED', 'CANCELLED'):
             box.operator("lp3d.job_retry", icon='FILE_REFRESH')
-        if not session.is_active(job.uid):
+        if not running:
             return
-        box.operator("lp3d.job_cancel", icon='CANCEL')
+        row = box.row(align=True)
+        row.operator("lp3d.job_cancel", icon='CANCEL')
         elapsed = int(time.time() - job.started_at) if job.started_at else 0
-        box.label(text=f"경과 {elapsed // 60}:{elapsed % 60:02d}",
-                  icon='TIME')
+        row.label(text=f"{elapsed // 60}:{elapsed % 60:02d}", icon='TIME')
         if getattr(job, "creation_mode", 'OBJECT') == 'SCENE':
             steps = list(_SCENE_STEPS)
             phases = _SCENE_PHASES
+        elif getattr(job, "creation_mode", 'OBJECT') == 'CHARACTER':
+            steps = [('GEN', "정면 원화 → 셰이프 서버"), ('EXEC', "Blender 실행"), ('FINAL', "마무리 정리")]
+            phases = _PHASES
         else:
             steps = [
                 ('GEN', f"코드 생성 — {generation_model}"),
@@ -264,9 +260,14 @@ class LP3D_PT_log(bpy.types.Panel):
         col.scale_y = 0.7
         if job is None:
             col.label(text="선택된 항목이 없습니다")
-            return
+        else:
+            self._draw_lines(col, job)
+
+    def _draw_lines(self, col, job):
         for line in job.log.splitlines()[-15:]:
             col.label(text=line)
+        self.layout.separator()
+        self.layout.operator("lp3d.dev_reload", icon='FILE_REFRESH')
 
 
 class LP3D_PT_output(bpy.types.Panel):
@@ -286,8 +287,6 @@ class LP3D_PT_output(bpy.types.Panel):
                 col.label(text="부모 배경 키트에 병합됨", icon='LINKED')
             else:
                 col.label(text="완료된 항목을 선택하세요", icon='INFO')
-            col.separator()
-            col.operator("lp3d.dev_reload", icon='FILE_REFRESH')
             return
 
         col.label(text=f"결과: {job.collection_name}", icon='OUTLINER_COLLECTION')
@@ -306,10 +305,9 @@ class LP3D_PT_output(bpy.types.Panel):
         row = col.row(align=True)
         row.operator("lp3d.export", text="FBX").format = 'FBX'
         row.operator("lp3d.export", text="glTF").format = 'GLTF'
-        col.operator("lp3d.mark_asset", icon='ASSET_MANAGER')
-        col.operator("lp3d.variation", icon='DUPLICATE')
-        col.separator()
-        col.operator("lp3d.dev_reload", icon='FILE_REFRESH')
+        row = col.row(align=True)
+        row.operator("lp3d.mark_asset", icon='ASSET_MANAGER')
+        row.operator("lp3d.variation", icon='DUPLICATE')
 
     def _draw_retopo(self, layout, job):
         """쿼드 리토폴로지 — 생성이 끝난 뒤 사용자가 직접 누르는 후처리 단계."""

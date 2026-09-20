@@ -165,6 +165,19 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=1.8, min=0.2, max=10.0,
         update=_persist_cb,
     )
+    retopo_faces: IntProperty(
+        name="리토폴로지 목표 면수",
+        description=("[리토폴로지] 버튼이 만들 쿼드 메시의 목표 면수. "
+                     "QuadriFlow 가 이 수에 맞춰 와이어를 깔고, 실패하면 데시메이트로 맞춘다"),
+        default=12000, min=500, max=60000,
+        update=_persist_cb,
+    )
+    retopo_symmetry: BoolProperty(
+        name="좌우 대칭 와이어",
+        description="리토폴로지 와이어를 좌우 대칭으로 깐다 — 캐릭터는 켜는 편이 낫다",
+        default=True,
+        update=_persist_cb,
+    )
     character_compare_turns: IntProperty(
         name="캐릭터 6면도 대조 횟수",
         description=("캐릭터 모델을 실행한 뒤 시트와 같은 6시점으로 렌더해 턴어라운드 시트와 "
@@ -247,6 +260,8 @@ class LP3DPreferences(bpy.types.AddonPreferences):
             char_box.prop(self, "shapegen_use_ref")
             char_box.prop(self, "shapegen_multiview")
             char_box.prop(self, "character_height")
+        char_box.prop(self, "retopo_faces")
+        char_box.prop(self, "retopo_symmetry")
         char_box.prop(self, "character_compare_turns")
         img_box = self.layout.box()
         img_box.label(text="참조 이미지 생성", icon='IMAGE_DATA')
@@ -289,6 +304,8 @@ class _Defaults:
     image_model = imagegen.DEFAULT_MODEL
     image_quality = 'high'
     character_compare_turns = 1
+    retopo_faces = 8000
+    retopo_symmetry = True
     use_shapegen = True
     shapegen_url = "http://127.0.0.1:8081"
     shapegen_token = ""

@@ -26,6 +26,15 @@ def _standalone_job(context):
     return None if _is_child_job(job) else job
 
 
+def _retopo_source(context):
+    """선택 항목의 결과 컬렉션에서 리토폴로지할 메시. 조건이 안 맞으면 None."""
+    from ..lowpoly import quadretopo
+    job = _standalone_job(context)
+    if job is None or job.state != 'DONE' or not job.collection_name:
+        return None
+    return quadretopo.find_retopo_target(bpy.data.collections.get(job.collection_name))
+
+
 class LP3D_OT_job_add(bpy.types.Operator):
     bl_idname = "lp3d.job_add"
     bl_label = "항목 추가"
@@ -460,6 +469,74 @@ class LP3D_OT_mark_asset(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LP3D_OT_job_retopo(bpy.types.Operator):
+    bl_idname = "lp3d.job_retopo"
+    bl_label = "리토폴로지 시작"
+    bl_description = ("완성된 캐릭터 메시에 쿼드 와이어를 다시 깔고, 원본 텍스처를 "
+                      "새 UV 로 구워 옮긴다. 원본은 '_원본' 이름으로 숨겨 남는다")
+
+    @classmethod
+    def poll(cls, context):
+        return _retopo_source(context) is not None
+
+    def execute(self, context):
+        from .. import preferences
+        from ..core import runner, scheduler
+        from ..lowpoly import quadretopo
+
+        job = context.scene.lp3d.active_job()
+        source = _retopo_source(context)
+        if source is None:
+            self.report({'ERROR'}, "리토폴로지할 메시를 찾을 수 없습니다")
+            return {'CANCELLED'}
+        prefs = preferences.get_prefs()
+        scene_name, uid = context.scene.name, job.uid
+        collection_name, source_name = job.collection_name, source.name
+        key = f"{uid}:retopo"
+
+        def _job():
+            # 다이얼로그·리스트가 바뀌었을 수 있으므로 uid로 다시 찾는다
+            scene = bpy.data.scenes.get(scene_name)
+            props = getattr(scene, "lp3d", None) if scene else None
+            return props.job_by_uid(uid) if props else None
+
+        def _say(text):
+            target = _job()
+            if target:
+                target.status = f"리토폴로지: {text}"
+
+        def _run():
+            collection = bpy.data.collections.get(collection_name)
+            obj = bpy.data.objects.get(source_name)
+            try:
+                if collection is None or obj is None:
+                    raise RuntimeError("결과 컬렉션이나 메시가 사라졌습니다")
+                result = quadretopo.retopologize(
+                    obj, collection,
+                    target_faces=int(prefs.retopo_faces),
+                    symmetry=bool(prefs.retopo_symmetry),
+                    texture_size=int(prefs.shapegen_texture_size),
+                    normal_map=True, progress=_say)
+                line = (f"리토폴로지 완료: {result['method']} · 면 {result['faces']} "
+                        f"(쿼드 {result['quads']}) · 텍스처 {len(result['images'])}장 · "
+                        f"{result['seconds']}s")
+            except Exception as e:
+                _log.exception("LP3D 리토폴로지 실패")
+                line = f"리토폴로지 실패: {e}"
+            target = _job()
+            if target:
+                target.status = line
+                target.log = "\n".join((target.log + "\n" + line).strip().splitlines()[-30:])
+            runner.remove_keepalive(key)
+
+        # 펌프가 꺼져 있으면 제출한 작업이 영영 실행되지 않는다 — keepalive가 펌프를 깨운다
+        runner.add_keepalive(key)
+        scheduler.submit_blender(key, _run)
+        _say("대기 중")
+        self.report({'INFO'}, "리토폴로지를 시작했습니다")
+        return {'FINISHED'}
+
+
 class LP3D_OT_dev_reload(bpy.types.Operator):
     bl_idname = "lp3d.dev_reload"
     bl_label = "Dev Reload"
@@ -506,7 +583,7 @@ _CLASSES = (
     LP3D_OT_job_retry, LP3D_OT_job_cancel,
     LP3D_OT_queue_start, LP3D_OT_queue_stop,
     LP3D_OT_variation,
-    LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_dev_reload,
+    LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_job_retopo, LP3D_OT_dev_reload,
 )
 
 

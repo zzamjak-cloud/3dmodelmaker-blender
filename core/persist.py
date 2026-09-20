@@ -16,6 +16,7 @@ _PREF_KEYS = ("codex_path", "timeout", "ai_concurrency",
               "character_compare_turns", "use_shapegen", "shapegen_url", "shapegen_token",
               "shapegen_faces",
               "character_height", "shapegen_multiview", "shapegen_use_ref", "shapegen_texture_size",
+              "retopo_faces", "retopo_symmetry",
               "scene_tri_budget", "scene_max_assets", "scene_timeout_scale")
 # 제거된 모델·턴 설정은 복원하지 않아 구버전 파일도 현재 생성 정책을 따른다.
 _SCENE_KEYS = ("export_dir",)

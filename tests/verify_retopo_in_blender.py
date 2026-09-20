@@ -88,6 +88,62 @@ def render_views(objs, prefix: str, resolution: int = 800) -> list:
     return paths
 
 
+def mirror_ratio(obj, tolerance: float = 0.004) -> float:
+    """정점마다 x 를 뒤집은 자리에서 tolerance x 모델 크기 안에 정점이 있는 비율."""
+    from mathutils import Vector
+    from mathutils.kdtree import KDTree
+
+    verts = obj.data.vertices
+    tree = KDTree(len(verts))
+    for index, vert in enumerate(verts):
+        tree.insert(vert.co, index)
+    tree.balance()
+    limit = max(obj.dimensions) * tolerance
+    hits = sum(1 for v in verts if tree.find(Vector((-v.co.x, v.co.y, v.co.z)))[2] < limit)
+    return hits / max(len(verts), 1)
+
+
+def gap_match(source, result) -> float:
+    """몸통 옆 겨드랑이 높이(키의 50~60%)에서 x 축 광선의 표면 교차 수가 원본과 같은 표본 비율.
+
+    복셀 리메시가 팔과 몸통 사이 틈을 메우면 교차 수가 줄고, 슈링크랩이 면을 접으면 늘어난다."""
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+
+    saved = [(obj, obj.hide_viewport, obj.hide_get()) for obj in (source, result)]
+    for obj, _viewport, _hidden in saved:
+        obj.hide_viewport = False
+        obj.hide_set(False)
+    bpy.context.view_layer.update()
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    trees = [BVHTree.FromObject(obj, depsgraph) for obj in (source, result)]
+    for obj, viewport, hidden in saved:
+        obj.hide_viewport = viewport
+        obj.hide_set(hidden)
+    height = max(source.dimensions)
+    depth = source.dimensions.y
+
+    def hits(tree, y, z, sign):
+        count, start, direction = 0, Vector((0.0, y, z)), Vector((sign, 0.0, 0.0))
+        for _ in range(12):
+            hit = tree.ray_cast(start, direction, height * 2)
+            if hit[0] is None:
+                break
+            count += 1
+            start = hit[0] + direction * 1e-4
+        return count
+
+    matched = total = 0
+    for i in range(9):
+        z = height * (0.5 + 0.0125 * i)
+        for j in range(9):
+            y = depth * (-0.15 + 0.0375 * j)
+            for sign in (1, -1):
+                total += 1
+                matched += hits(trees[0], y, z, sign) == hits(trees[1], y, z, sign)
+    return matched / max(total, 1)
+
+
 def check_operator():
     """[리토폴로지] 버튼 경로 — 스케줄러에 제출되고, 진행 상황이 job.status 에 실리는지.
 
@@ -140,7 +196,11 @@ def main():
     imported = retopo.import_textured(GLB, "캐릭터", coll)
     source = imported["obj"]
     print(f"INFO 임포트: 면 {imported['faces']} · 트라이 {imported['tris']} · "
-          f"이미지 {imported['images']} · {time.perf_counter() - started:.1f}s")
+          f"이미지 {imported['images']} · 구멍 메움 {imported['filled_holes']} · "
+          f"열린 테두리 {imported['open_loops']} · {time.perf_counter() - started:.1f}s")
+    # ⓪ 컬링이 남긴 작은 구멍은 임포트에서 메워지고, 옷의 진짜 테두리(소매·밑단·깃)만 열려 있다
+    check("컬링 구멍 메움", imported["filled_holes"], 1, "ge")
+    check("메운 루프가 남긴 테두리보다 많음", imported["filled_holes"], imported["open_loops"], "ge")
     before = render_views([source], "01_원본")
 
     def say(text):
@@ -162,6 +222,17 @@ def main():
         check("쿼드 비율 80% 이상", round(ratio, 3), 0.8, "ge")
     # ③ UV 레이어
     check("UV 레이어 존재", len(obj.data.uv_layers), 1, "ge")
+    # ③' 좌우 대칭 — x 를 뒤집은 자리에 정점이 있는 비율. 슈링크랩이 비대칭 원본에 붙이므로 1.0 은 못 되지만
+    # 원본(0.6~0.7)보다 뚜렷이 높아야 대칭 와이어가 걸린 것이다(실측: 0.86~0.99)
+    stash = bpy.data.objects.get(result["source_name"])
+    if result["method"] == "QUADRIFLOW":
+        source_mirror = mirror_ratio(stash)
+        print(f"INFO 대칭 정점 비율: 원본 {source_mirror:.3f} → 결과 {mirror_ratio(obj):.3f}")
+        # 원본이 이미 대칭(0.9+)이면 더 높아질 여지가 없으므로 0.9 를 상한으로 둔다
+        check("좌우 대칭 정점 비율 (min(0.9, 원본+0.1) 이상)", round(mirror_ratio(obj), 3),
+              round(min(0.9, source_mirror + 0.1), 3), "ge")
+    # ③'' 좁은 틈(겨드랑이 높이) 보존 — 원본과 결과의 x 축 광선 교차 수 일치 비율. 모델마다 자세가 달라 참고값
+    print(f"INFO 좁은 틈 보존(광선 교차 일치): {gap_match(stash, obj):.3f}")
     # ④ 베이크 이미지가 새 머티리얼에 연결 (NORMAL_MAP 노드 포함)
     material = obj.data.materials[0] if obj.data.materials else None
     tree = material.node_tree if material and material.use_nodes else None
@@ -175,7 +246,6 @@ def main():
     check("베이크 결과가 비어 있지 않음", len(non_black), 1, "ge")
     print(f"INFO 이미지: {result['images']} · 내용 있는 이미지 {non_black}")
     # ⑤ 원본이 숨겨진 채 남아 있음
-    stash = bpy.data.objects.get(result["source_name"])
     check("원본 보존본 존재", stash is not None and stash.name.endswith(quadretopo.SOURCE_SUFFIX),
           True, "true")
     check("보존본 숨김", bool(stash and stash.hide_render and stash.hide_get()), True, "true")

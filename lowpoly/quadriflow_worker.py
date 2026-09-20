@@ -18,6 +18,11 @@ def main(argv) -> int:
     bpy.context.scene.collection.objects.link(obj)
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
+    # use_mesh_symmetry 는 메시 자체의 대칭 플래그를 읽는다 — 새 메시는 전부 꺼져 있어(use_mirror_x False)
+    # 켜 달라고 해도 조용히 무시된다(실측 2026-09-21: 결과 대칭 정점 비율 0.37, 켠 뒤 0.99)
+    obj.data.use_mirror_x = symmetry
+    obj.data.use_mirror_y = False
+    obj.data.use_mirror_z = False
     before = len(obj.data.polygons)
     bpy.ops.object.quadriflow_remesh(mode='FACES', target_faces=target,
                                      use_mesh_symmetry=symmetry, use_preserve_sharp=True,

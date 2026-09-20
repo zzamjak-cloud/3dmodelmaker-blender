@@ -1,8 +1,8 @@
 # 쿼드 리토폴로지 — 셰이프 서버가 구운 PBR 메시 위에 새 와이어를 깔고 텍스처를 베이크로 옮긴다
 #
 # 입력은 retopo.import_textured() 가 정리해 둔 단일 셸(용접·안쪽 껍질 제거·키 정규화 완료)과
-# PBR 텍스처다. 순서: 원본 보존 → 작업본 → 셸 밀봉 → 복셀 리메시 → QuadriFlow(실패 시 데시메이트)
-# → 슈링크랩 → UV 언랩 → Cycles Selected→Active 베이크 → 새 머티리얼.
+# PBR 텍스처다. 순서: 원본 보존 → 작업본 → 복셀 리메시(촘촘히) → 파편 제거 → 데시메이트 → 매니폴드 수리
+# → QuadriFlow(좌우 대칭, 실패 시 데시메이트 폴백) → 투영 슈링크랩+릴랙스 → UV 언랩 → Cycles 베이크 → 새 머티리얼.
 #
 # 텍스처를 AI 로 다시 만들지 않고 원본에서 굽는 것이 예전 리토폴로지 경로와의 결정적인 차이다.
 # 어느 단계가 실패해도 원본 오브젝트는 손대지 않는다 — 작업본과 보존본만 지우고 예외를 올린다.
@@ -24,13 +24,19 @@ SOURCE_KEY = 'lp3d_source_mesh'   # 이 표식이 있는 오브젝트는 리토�
 
 _WORKER = os.path.join(os.path.dirname(__file__), "quadriflow_worker.py")
 
-MERGE_DIST = 2e-4              # 이보다 짧은 엣지는 녹인다. Blender 의 QuadriFlow 사전 검사는 길이가
+MERGE_DIST = 2e-4              # 이보다 짧은 엣지는 이 길이까지 늘린다. Blender 의 QuadriFlow 사전 검사는 길이가
                                # 1e-4 미만인 엣지를 '길이 0'으로 보고 거절한다(실측 2026-09-20: 27개 때문에
                                # 완전 매니폴드 메시가 계속 거절당했다)
+FRAGMENT_RATIO = 0.005         # 전체 면수의 이 비율 미만인 떨어진 셸은 복셀 리메시 거품으로 보고 지운다
 REPAIR_ROUNDS = 4              # 수리 반복 상한 — 실측상 1회면 끝난다
-QF_INPUT_LADDER = (14000, 8000, 5000)   # QuadriFlow 입력 면수 사다리 — 실패하면 거칠게 낮춘다
-QF_INPUT_FACES = 14000         # QuadriFlow 에 넣을 입력 면수 목표. 실측(2026-09-20): 3.6만면은 시드를 바꿔도
-                               # 전부 실패, 1.5만면은 3회 중 2회 성공, 5천면은 항상 성공. 디테일과 성공률의 타협점
+# QuadriFlow 입력 사다리 — (복셀 리메시 면수, 데시메이트 뒤 삼각형 수). 실패하면 다음 단으로 내려간다.
+# 복셀은 촘촘히 굽고(겨드랑이·다리 사이 같은 좁은 틈이 살아남게) 데시메이트로 QuadriFlow 가 받는 크기까지
+# 낮춘다. 실측(2026-09-21, 죄수): 복셀 1.4만면(2.2cm)은 3.8cm 겨드랑이 틈을 메워 팔이 몸통에 붙었고,
+# 3.2만면(1.5cm)→1.6만 삼각형은 틈을 보존(광선 교차 일치 0.86~0.90). 5.6만면→1.6만 삼각형은 데시메이트
+# 비율이 커져 틈이 다시 메워졌다(0.14) — 복셀 밀도만 올리면 되는 게 아니라 데시메이트 비율도 2배 안쪽이어야 한다.
+# 삼각형 2.8만은 세 시드 전패, 1.1만~1.6만은 성공.
+QF_INPUT_LADDER = ((32000, 16000), (32000, 11000), (20000, 8000))
+QF_INPUT_FACES = 14000         # 복셀 한 변을 표면적에서 역산할 때의 기준 면수(_voxel_size 초기값)
 VOXEL_TARGET_RATIO = 2.5       # 복셀 리메시가 노릴 면수 = 목표 x 이 비율
 VOXEL_MAX_RATIO = 6.0          # 이 배수를 넘으면 데시메이트로 낮춘다 — 실측(2026-09-18): 입력/목표 28배에서
                                # QuadriFlow 가 메모리 폭주로 SIGKILL, 6~12배는 'Remeshing failed'
@@ -43,6 +49,9 @@ QF_REQUEST_SCALE = 1.15        # QuadriFlow 에 요청할 면수 배수 — 실�
 QF_TIMEOUT = 25                # 시도 하나의 제한 시간(초) — 성공은 8~12초라 이보다 길면 정지로 본다
 QF_ATTEMPTS = 3                # 한 밀도에서 시드를 바꿔 볼 횟수. 실측(2026-09-20): 같은 입력에서 시드 1·2 는 정지,
                                # 시드 3 은 9초 성공 — 비결정적이라 여러 시드를 차례로 본다
+SHRINK_LIMIT = 3.0             # 노멀 투영 한계 = 복셀 한 변 x 이 배수 — 이보다 먼 표면으로는 끌려가지 않는다
+RELAX_ROUNDS = 2               # 스무딩 → 재투영 반복 횟수
+RELAX_FACTOR = 0.5
 UNWRAP_ANGLE = math.radians(66)
 ISLAND_MARGIN = 0.003
 CAGE_RATIO = 0.01              # 케이지 돌출 = 모델 크기 x 이 비율
@@ -82,12 +91,15 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
         snapshot = work.data.copy()
 
         quad_ok = False
-        for attempt, density in enumerate(QF_INPUT_LADDER, start=1):
+        for attempt, (density, triangles) in enumerate(QF_INPUT_LADDER, start=1):
             if attempt > 1:
                 stale, work.data = work.data, snapshot.copy()
                 bpy.data.meshes.remove(stale)
             say(f"복셀 리메시 ({density:,}면 목표)")
             _voxel_remesh(work, target_faces, wanted=density)
+            remove_fragments(work)
+            say(f"데시메이트 ({triangles:,} 삼각형)")
+            _decimate(work, triangles)
             say("메시 정리")
             if not make_manifold(work):
                 say(f"정리 실패 {quadriflow_ready(work)}")
@@ -275,13 +287,17 @@ def quadriflow_ready(obj) -> dict:
 def make_manifold(obj, rounds: int = REPAIR_ROUNDS) -> bool:
     """QuadriFlow 가 받아들이는 상태로 만든다. 성공 여부를 돌려준다.
 
-    한 번에 하나씩 고치면 서로를 되살린다 — 미세 엣지를 녹이고, 엣지에 셋 이상 붙은 면 중 **초과분만**
+    한 번에 하나씩 고치면 서로를 되살린다 — 미세 엣지를 늘리고, 엣지에 셋 이상 붙은 면 중 **초과분만**
     지우고, 그때 생긴 구멍을 메우고, 뜬 정점을 걷어내고 노멀을 다시 맞추는 것을 한 묶음으로 돌린다.
-    (초기 구현처럼 비매니폴드 엣지 주변 면을 통째로 지우면 경계가 폭증해 되레 악화된다)."""
+    (초기 구현처럼 비매니폴드 엣지 주변 면을 통째로 지우면 경계가 폭증해 되레 악화된다).
+
+    미세 엣지는 **녹이지 않고 정점을 밀어 늘린다** — dissolve 로 정점을 합치면 나비 매듭 정점(면 부채
+    두 개가 한 점을 공유)이 생기고, 그 정점을 지우거나 떼는 어떤 수리도 새 비매니폴드를 낳아 라운드가
+    수렴하지 않았다(실측 2026-09-21). 0.2mm 이동은 형상에 무의미하고 QuadriFlow 는 짧은 엣지를 잘 다룬다."""
     for _ in range(max(rounds, 1)):
         bm = bmesh.new()
         bm.from_mesh(obj.data)
-        bmesh.ops.dissolve_degenerate(bm, dist=MERGE_DIST, edges=bm.edges[:])
+        _stretch_tiny_edges(bm)
         extra = []
         for edge in bm.edges:
             if len(edge.link_faces) > 2:
@@ -305,6 +321,62 @@ def make_manifold(obj, rounds: int = REPAIR_ROUNDS) -> bool:
         if not any(quadriflow_ready(obj).values()):
             return True
     return False
+
+
+def _stretch_tiny_edges(bm) -> int:
+    """QuadriFlow 사전 검사가 '길이 0'으로 보는 엣지(축별 차이 1e-4 미만)를 MERGE_DIST 까지 늘린다.
+
+    한쪽 정점을 엣지 방향으로 민다. 두 정점이 완전히 겹쳐 방향이 없으면 정점 노멀 방향으로 띄운다."""
+    moved = 0
+    for edge in bm.edges:
+        a, b = edge.verts
+        if not all(abs(a.co[i] - b.co[i]) < 1e-4 for i in range(3)):
+            continue
+        direction = b.co - a.co
+        if direction.length_squared < 1e-16:
+            direction = b.normal if b.normal.length_squared > 0 else Vector((0.0, 0.0, 1.0))
+        direction.normalize()
+        b.co = a.co + direction * MERGE_DIST
+        moved += 1
+    return moved
+
+
+def remove_fragments(obj, min_ratio: float = FRAGMENT_RATIO) -> int:
+    """전체 면수의 min_ratio 미만인 떨어진 셸을 지운다. 지운 셸 수를 돌려준다.
+
+    촘촘한 복셀 리메시는 좁은 틈(손가락 사이·옷 주름)에 작은 거품 셸을 수십 개 남긴다(실측 2026-09-21:
+    5.6만면에서 108개). 데시메이트가 이를 뭉개면 비매니폴드가 되고 QuadriFlow 입력에도 쓸모가 없다."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    seen = set()
+    shells = []
+    for face in bm.faces:
+        if face.index in seen:
+            continue
+        stack, shell = [face], []
+        while stack:
+            cur = stack.pop()
+            if cur.index in seen:
+                continue
+            seen.add(cur.index)
+            shell.append(cur)
+            for edge in cur.edges:
+                stack.extend(f for f in edge.link_faces if f.index not in seen)
+        shells.append(shell)
+    if len(shells) <= 1:
+        bm.free()
+        return 0
+    threshold = max(int(len(bm.faces) * min_ratio), 1)
+    small = [shell for shell in shells if len(shell) < threshold]
+    if not small or len(small) == len(shells):
+        bm.free()
+        return 0
+    bmesh.ops.delete(bm, geom=[f for shell in small for f in shell], context='FACES')
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return len(small)
 
 
 def _voxel_size(obj, target_faces: int) -> float:
@@ -421,13 +493,50 @@ def _decimate(obj, target_faces: int) -> None:
 
 
 def _shrinkwrap(obj, target) -> None:
-    """리토폴로지 결과를 원본 표면에 붙여 복셀·QuadriFlow 가 뭉갠 디테일을 되찾는다."""
-    mod = obj.modifiers.new("LP3D_Shrinkwrap", 'SHRINKWRAP')
-    mod.target = target
-    mod.wrap_method = 'NEAREST_SURFACEPOINT'
-    mod.offset = 0.0
-    with _override(obj):
-        bpy.ops.object.modifier_apply(modifier=mod.name)
+    """리토폴로지 결과를 원본 표면에 붙여 복셀·QuadriFlow 가 뭉갠 디테일을 되찾는다.
+
+    최근접점 방식(NEAREST_SURFACEPOINT)만 쓰면 접히는 공간(겨드랑이·소매 안쪽)에서 이웃 정점이 서로 다른
+    표면으로 끌려가 면이 교차하고 어둡게 찢어진다(실측 2026-09-21: 원본에서 1% 넘게 벗어난 면 39개).
+    그래서 **노멀 방향 투영**(양방향, 복셀 SHRINK_LIMIT 배 안)을 먼저 하고, 노멀 선상에 표면이 없어 빗나간
+    정점(옷단 립 등)만 최근접점으로 붙인다. 그 뒤 스무딩 → 다시 투영을 RELAX_ROUNDS 번 반복해 접힌 부분의
+    와이어를 편다(같은 실측에서 7개로 감소)."""
+    import mathutils
+    limit = _voxel_size(target, QF_INPUT_FACES) * SHRINK_LIMIT
+    tree = mathutils.bvhtree.BVHTree.FromObject(target, bpy.context.evaluated_depsgraph_get())
+    to_target = target.matrix_world.inverted() @ obj.matrix_world
+    to_local = obj.matrix_world.inverted() @ target.matrix_world
+
+    def project():
+        before = [v.co.copy() for v in obj.data.vertices]
+        mod = obj.modifiers.new("LP3D_Shrinkwrap", 'SHRINKWRAP')
+        mod.target = target
+        mod.wrap_method = 'PROJECT'
+        mod.use_negative_direction = True
+        mod.use_positive_direction = True
+        mod.project_limit = limit
+        mod.offset = 0.0
+        with _override(obj):
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+        for index, vert in enumerate(obj.data.vertices):
+            if (vert.co - before[index]).length_squared < 1e-14:
+                nearest = tree.find_nearest(to_target @ vert.co)
+                if nearest[0] is not None:
+                    vert.co = to_local @ nearest[0]
+        obj.data.update()
+
+    def relax():
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        bmesh.ops.smooth_vert(bm, verts=bm.verts[:], factor=RELAX_FACTOR,
+                              use_axis_x=True, use_axis_y=True, use_axis_z=True)
+        bm.to_mesh(obj.data)
+        bm.free()
+        obj.data.update()
+
+    project()
+    for _ in range(RELAX_ROUNDS):
+        relax()
+        project()
 
 
 def _unwrap(obj) -> None:

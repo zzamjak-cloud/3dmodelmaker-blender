@@ -548,6 +548,7 @@ class GenerationSession:
         self.compare_turns_left = 0
         weld = f", 심 중복 정점 {info['welded']:,}개 용접" if info.get('welded') else ""
         weld += f", 안쪽 면 {info['interior_faces']:,}개 제거" if info.get('interior_faces') else ""
+        weld += f", 구멍 {info['filled_holes']:,}개 메움" if info.get('filled_holes') else ""
         self._final_note = f"{info['tris']} tris, PBR 텍스처 {len(info['images'])}장{weld}"
         self._apply_lane()
         self._finish(f"완료 — {info['obj'].name} ({info['faces']:,}면, PBR 재질 {info['materials']}개)", ok=True)

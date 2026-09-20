@@ -6,6 +6,7 @@
 import bmesh
 import bpy
 from mathutils import Vector
+from mathutils.bvhtree import BVHTree
 
 from .names import safe_id_name
 
@@ -199,6 +200,94 @@ def remove_interior_faces(obj, rays: int = INTERIOR_RAYS) -> int:
     return len(hidden)
 
 
+HOLE_MAX_RATIO = 0.15     # 경계 루프의 폭이 모델 크기의 이 비율 이하면 '구멍'으로 보고 메운다
+CRACK_AREA_RATIO = 0.05   # 메운 면적이 폭² 의 이 비율 미만이면 폭 0 의 '틈' — 크기와 무관하게 메운다
+HOLE_MAX_EDGES = 400      # 이보다 긴 루프는 손대지 않는다
+HOLE_SUBDIVIDE = 2        # 메운 면을 poke 로 쪼개는 횟수 — 새 정점을 원래 표면에 붙여 굴곡을 되살린다
+
+
+def fill_small_holes(obj, guide: BVHTree, size: float) -> dict:
+    """컬링이 남긴 작은 구멍과 틈을 메우고, 새 정점을 컬링 전 표면(guide)에 붙인다.
+
+    컬링은 겨드랑이·눈구멍·귀 뒤·입속처럼 좁은 공간에서 보이는 면까지 지운다(실측 2026-09-21: 경계 루프
+    193개, 열린 엣지 2,177). 되살리기 패스로는 못 잡는다 — 통째로 지워진 패치는 '보이는 이웃 다수' 조건을
+    만족하는 면이 하나도 없기 때문이다. 그래서 루프 단위로 메운다.
+
+    소매·밑단·깃처럼 옷의 진짜 열린 테두리(폭이 모델의 15% 이상, 메운 면적도 큼)는 건드리지 않는다.
+    메운 면은 평평하므로 poke 로 쪼개고 새 정점마다 guide 의 최근접점으로 옮긴다 — guide 에는 지운 면이
+    그대로 있어 원래 굴곡이 돌아온다(안쪽 껍질에 붙어도 껍질 두께만큼만 어긋난다)."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    original = len(bm.verts)           # 새 정점은 뒤에 붙는다 — 이 인덱스 이상만 표면에 붙인다
+    stats = {"loops": 0, "holes": 0, "cracks": 0, "open": 0}
+    new_faces = []
+    for loop in _boundary_loops(bm):
+        stats["loops"] += 1
+        if len(loop) > HOLE_MAX_EDGES:
+            stats["open"] += 1
+            continue
+        points = [v.co for e in loop for v in e.verts]
+        extent = max(max(p[a] for p in points) - min(p[a] for p in points) for a in range(3))
+        faces = _fill_loop(bm, loop)
+        if not faces:
+            stats["open"] += 1
+            continue
+        area = sum(f.calc_area() for f in faces)
+        crack = area < CRACK_AREA_RATIO * extent * extent
+        if not crack and extent > HOLE_MAX_RATIO * size:
+            bmesh.ops.delete(bm, geom=faces, context='FACES_ONLY')
+            stats["open"] += 1
+            continue
+        stats["cracks" if crack else "holes"] += 1
+        new_faces += faces
+    if new_faces:
+        faces = bmesh.ops.triangulate(bm, faces=new_faces)["faces"]
+        for _ in range(HOLE_SUBDIVIDE):
+            # poke 는 면마다 중심 정점을 더해 부채로 쪼갠다 — 이웃 면과 공유하는 엣지는 건드리지 않는다
+            faces = bmesh.ops.poke(bm, faces=[f for f in faces if f.is_valid])["faces"]
+        bm.verts.index_update()
+        for vert in bm.verts:
+            if vert.index >= original:
+                nearest = guide.find_nearest(vert.co)
+                if nearest[0] is not None:
+                    vert.co = nearest[0]
+    stats["faces"] = len(bm.faces) - len(obj.data.polygons)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return stats
+
+
+def _boundary_loops(bm) -> list:
+    """경계 엣지를 연결된 루프(엣지 목록)로 묶는다."""
+    seen = set()
+    loops = []
+    for edge in bm.edges:
+        if edge in seen or not edge.is_boundary:
+            continue
+        stack, loop = [edge], []
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            loop.append(cur)
+            for v in cur.verts:
+                stack.extend(e for e in v.link_edges if e.is_boundary and e not in seen)
+        loops.append(loop)
+    return loops
+
+
+def _fill_loop(bm, loop) -> list:
+    """루프 하나를 메우고 새 면 목록을 돌려준다. 64변 이하는 n각형 하나, 그 이상은 삼각형으로."""
+    if len(loop) <= 64:
+        faces = [f for f in bmesh.ops.holes_fill(bm, edges=loop, sides=64).get("faces", []) if f.is_valid]
+        if faces:
+            return faces
+    result = bmesh.ops.triangle_fill(bm, edges=loop, use_beauty=True, use_dissolve=False)
+    return [g for g in result.get("geom", []) if isinstance(g, bmesh.types.BMFace) and g.is_valid]
+
+
 def _hemisphere(normal, sample):
     """표본 벡터를 노멀이 +Z 인 좌표계로 돌린다."""
     axis = Vector((0.0, 0.0, 1.0))
@@ -227,8 +316,11 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
     obj.name = safe_id_name(name)
     obj.data.name = obj.name
     welded = weld_seams(obj)
+    # 컬링 전 표면 — 메운 구멍의 새 정점을 여기에 붙여 원래 굴곡을 되살린다
+    guide = BVHTree.FromObject(obj, bpy.context.evaluated_depsgraph_get())
     inner = remove_interior_faces(obj)
     slabs = remove_ground_slabs(obj)
+    holes = fill_small_holes(obj, guide, max(obj.dimensions))
     normalize(obj, height)
     for polygon in obj.data.polygons:
         polygon.use_smooth = True
@@ -237,4 +329,5 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
               for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image}
     return {"obj": obj, "faces": len(obj.data.polygons), "tris": len(obj.data.loop_triangles),
             "materials": len([m for m in obj.data.materials if m]), "images": sorted(images),
-            "ground_slabs": slabs, "welded": welded, "interior_faces": inner}
+            "ground_slabs": slabs, "welded": welded, "interior_faces": inner,
+            "filled_holes": holes["holes"] + holes["cracks"], "open_loops": holes["open"]}

@@ -22,9 +22,15 @@ from .names import safe_id_name
 SOURCE_SUFFIX = '_원본'
 SOURCE_KEY = 'lp3d_source_mesh'   # 이 표식이 있는 오브젝트는 리토폴로지 대상이 아닌 보존본이다
 
-SEAL_THICKNESS_RATIO = 0.004   # 열린 셸에 안쪽으로 줄 두께 (모델 크기 대비). 실측(2026-09-20): 이 값의
-                               # 0.5~4배 범위에서 QuadriFlow 가 통과했고, 0(밀봉 없음)과 12배에서는
-                               # '매니폴드가 아니다'로 거절당해 데시메이트로 떨어졌다
+_WORKER = os.path.join(os.path.dirname(__file__), "quadriflow_worker.py")
+
+MERGE_DIST = 2e-4              # 이보다 짧은 엣지는 녹인다. Blender 의 QuadriFlow 사전 검사는 길이가
+                               # 1e-4 미만인 엣지를 '길이 0'으로 보고 거절한다(실측 2026-09-20: 27개 때문에
+                               # 완전 매니폴드 메시가 계속 거절당했다)
+REPAIR_ROUNDS = 4              # 수리 반복 상한 — 실측상 1회면 끝난다
+QF_INPUT_LADDER = (14000, 8000, 5000)   # QuadriFlow 입력 면수 사다리 — 실패하면 거칠게 낮춘다
+QF_INPUT_FACES = 14000         # QuadriFlow 에 넣을 입력 면수 목표. 실측(2026-09-20): 3.6만면은 시드를 바꿔도
+                               # 전부 실패, 1.5만면은 3회 중 2회 성공, 5천면은 항상 성공. 디테일과 성공률의 타협점
 VOXEL_TARGET_RATIO = 2.5       # 복셀 리메시가 노릴 면수 = 목표 x 이 비율
 VOXEL_MAX_RATIO = 6.0          # 이 배수를 넘으면 데시메이트로 낮춘다 — 실측(2026-09-18): 입력/목표 28배에서
                                # QuadriFlow 가 메모리 폭주로 SIGKILL, 6~12배는 'Remeshing failed'
@@ -34,8 +40,9 @@ QF_MIN_RATIO = 0.3             # QuadriFlow 결과가 목표의 이 비율 미�
 QF_MAX_RATIO = 3.0             # 초과해도 실패
 QF_REQUEST_SCALE = 1.15        # QuadriFlow 에 요청할 면수 배수 — 실측(2026-09-20, 17회): 결과가 요청의
                                # 0.67~0.96배(평균 0.81)로 늘 모자라게 나와 목표를 그대로 넣으면 하한을 깬다
-QF_TIMEOUT = 40                # 자식 프로세스 제한 시간(초) — 정상은 5~8초(Blender 기동 포함)다
-QF_ATTEMPTS = 2                # 시드를 바꿔 다시 시도할 횟수 — 멈춤이 비결정적이라 재시도가 잘 먹는다
+QF_TIMEOUT = 25                # 시도 하나의 제한 시간(초) — 성공은 8~12초라 이보다 길면 정지로 본다
+QF_ATTEMPTS = 3                # 한 밀도에서 시드를 바꿔 볼 횟수. 실측(2026-09-20): 같은 입력에서 시드 1·2 는 정지,
+                               # 시드 3 은 9초 성공 — 비결정적이라 여러 시드를 차례로 본다
 UNWRAP_ANGLE = math.radians(66)
 ISLAND_MARGIN = 0.003
 CAGE_RATIO = 0.01              # 케이지 돌출 = 모델 크기 x 이 비율
@@ -71,15 +78,27 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
         say("작업본 생성")
         work = _duplicate(source_obj, base_name + "_리토폴로지", collection)
 
-        say("셸 밀봉")
-        _seal_shell(work)
-        snapshot = work.data.copy()   # QuadriFlow 가 실패하면 여기(밀봉 직후)로 되돌린다
+        # QuadriFlow 가 실패하면 여기(리메시 이전)로 되돌려 데시메이트한다
+        snapshot = work.data.copy()
 
-        say("복셀 리메시")
-        _voxel_remesh(work, target_faces)
-
-        say("쿼드 리토폴로지")
-        if _quadriflow(work, target_faces, symmetry):
+        quad_ok = False
+        for attempt, density in enumerate(QF_INPUT_LADDER, start=1):
+            if attempt > 1:
+                stale, work.data = work.data, snapshot.copy()
+                bpy.data.meshes.remove(stale)
+            say(f"복셀 리메시 ({density:,}면 목표)")
+            _voxel_remesh(work, target_faces, wanted=density)
+            say("메시 정리")
+            if not make_manifold(work):
+                say(f"정리 실패 {quadriflow_ready(work)}")
+                continue
+            say(f"쿼드 리토폴로지 시도 {attempt}/{len(QF_INPUT_LADDER)}")
+            # 같은 형상도 입력이 거칠수록 QuadriFlow 성공률이 크게 오른다(실측 2026-09-20:
+            # 3.6만면 전패, 1.3만면 5시드 중 1승, 5천면 전승) — 실패하면 한 단계 낮춰 다시 굽는다
+            if _quadriflow(work, target_faces, symmetry):
+                quad_ok = True
+                break
+        if quad_ok:
             method = "QUADRIFLOW"
             bpy.data.meshes.remove(snapshot)
         else:
@@ -233,124 +252,159 @@ def _model_size(obj) -> float:
 
 # --- 토폴로지 --------------------------------------------------------------
 
-def _seal_shell(obj) -> float:
-    """열린 경계가 있으면 안쪽으로 두께를 준다. 준 두께(닫혀 있었으면 0).
+def quadriflow_ready(obj) -> dict:
+    """QuadriFlow 사전 검사와 같은 기준으로 메시 상태를 센다. 모두 0 이어야 통과한다.
 
-    복셀 리메시는 열린 껍질을 부호 없는 거리장으로 처리해 종이처럼 얇은 벽을 만들고 군데군데 뚫린다.
-    두께를 주면 닫힌 부피가 되어 정상 솔리드가 나온다. 안쪽으로만 밀므로 실루엣은 변하지 않는다."""
+    Blender 는 ① 면이 2개가 아닌 엣지, ② 이웃 면의 winding 불일치, ③ **길이 1e-4 미만 엣지**를 모두
+    거절 사유로 본다(source/blender/editors/object/object_remesh.cc). 셋째 조건 때문에 눈으로도
+    bmesh 로도 멀쩡한 메시가 계속 거절당했다."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)   # 두께가 안쪽으로 가려면 바깥을 향해 있어야 한다
-    thickness = 0.0
-    if any(len(e.link_faces) == 1 for e in bm.edges):
-        thickness = _model_size(obj) * SEAL_THICKNESS_RATIO
-        bmesh.ops.solidify(bm, geom=bm.faces[:], thickness=-thickness)
-    bm.to_mesh(obj.data)
+    report = {
+        "tiny": sum(1 for e in bm.edges
+                    if all(abs(e.verts[0].co[i] - e.verts[1].co[i]) < 1e-4 for i in range(3))),
+        "open": sum(1 for e in bm.edges if len(e.link_faces) == 1),
+        "edge": sum(1 for e in bm.edges if not e.is_manifold),
+        "vert": sum(1 for v in bm.verts if not v.is_manifold),
+        "wind": sum(1 for e in bm.edges if not e.is_contiguous),
+    }
     bm.free()
-    obj.data.update()
-    return thickness
+    return report
+
+
+def make_manifold(obj, rounds: int = REPAIR_ROUNDS) -> bool:
+    """QuadriFlow 가 받아들이는 상태로 만든다. 성공 여부를 돌려준다.
+
+    한 번에 하나씩 고치면 서로를 되살린다 — 미세 엣지를 녹이고, 엣지에 셋 이상 붙은 면 중 **초과분만**
+    지우고, 그때 생긴 구멍을 메우고, 뜬 정점을 걷어내고 노멀을 다시 맞추는 것을 한 묶음으로 돌린다.
+    (초기 구현처럼 비매니폴드 엣지 주변 면을 통째로 지우면 경계가 폭증해 되레 악화된다)."""
+    for _ in range(max(rounds, 1)):
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        bmesh.ops.dissolve_degenerate(bm, dist=MERGE_DIST, edges=bm.edges[:])
+        extra = []
+        for edge in bm.edges:
+            if len(edge.link_faces) > 2:
+                keep = sorted(edge.link_faces, key=lambda f: -f.calc_area())[:2]
+                extra += [f for f in edge.link_faces if f not in keep]
+        if extra:
+            bmesh.ops.delete(bm, geom=list(set(extra)), context='FACES')
+        border = [e for e in bm.edges if len(e.link_faces) == 1]
+        if border:
+            bmesh.ops.holes_fill(bm, edges=border, sides=64)
+            border = [e for e in bm.edges if len(e.link_faces) == 1]
+            if border:
+                bmesh.ops.triangle_fill(bm, edges=border, use_beauty=True, use_dissolve=False)
+        loose = [v for v in bm.verts if not v.link_faces]
+        if loose:
+            bmesh.ops.delete(bm, geom=loose, context='VERTS')
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+        bm.to_mesh(obj.data)
+        bm.free()
+        obj.data.update()
+        if not any(quadriflow_ready(obj).values()):
+            return True
+    return False
 
 
 def _voxel_size(obj, target_faces: int) -> float:
-    """결과 면수가 목표의 VOXEL_TARGET_RATIO 배가 되도록 표면적에서 역산한 복셀 한 변.
+    """복셀 리메시 결과가 QF_INPUT_FACES 근처가 되도록 표면적에서 역산한 복셀 한 변.
 
-    복셀 리메시 결과 면수는 대략 표면적 / 복셀면적이다."""
+    QuadriFlow 는 입력이 클수록 실패·정지 확률이 급격히 오른다(실측 2026-09-20: 3.6만면 3전 3패,
+    1.5만면 3전 2승, 5천면 전승). 최종 목표 면수와 무관하게 입력 밀도를 이 범위로 맞춘다."""
     area = sum(p.area for p in obj.data.polygons)
-    wanted = max(float(target_faces) * VOXEL_TARGET_RATIO, 1.0)
+    wanted = max(float(QF_INPUT_FACES), float(target_faces))
     size = _model_size(obj)
     voxel = math.sqrt(max(area, 1e-9) / wanted)
     return min(max(voxel, size / VOXEL_SIZE_MIN_DIV), size / VOXEL_SIZE_MAX_DIV)
 
 
-def _voxel_remesh(obj, target_faces: int) -> None:
-    """복셀 리메시로 겹친 셸·자기교차를 하나의 닫힌 표면으로 녹인다.
+def _voxel_remesh(obj, target_faces: int, wanted: float = 0.0) -> None:
+    """복셀 리메시로 열린 셸·겹친 면을 하나의 닫힌 표면으로 녹인다.
 
-    결과가 너무 많이 나오면 QuadriFlow 가 죽지 않게 데시메이트로 낮춘다."""
-    obj.data.remesh_voxel_size = _voxel_size(obj, target_faces)
-    obj.data.remesh_voxel_adaptivity = 0.0
-    obj.data.use_remesh_fix_poles = True
-    with _override(obj):
-        bpy.ops.object.voxel_remesh()
-    if len(obj.data.polygons) > target_faces * VOXEL_MAX_RATIO:
-        _decimate(obj, int(target_faces * VOXEL_TARGET_RATIO))
-    _clean_for_quadriflow(obj)
+    컬링된 셸은 테두리가 열려 있지만 복셀 리메시가 그대로 닫아 준다 — 예전처럼 Solidify 로 두께를
+    먼저 주면 그 얇은 벽이 복셀보다 얇아 오히려 구멍이 남았다(실측 2026-09-20).
 
-
-def _clean_for_quadriflow(obj) -> None:
-    """QuadriFlow 사전 검사를 통과하도록 다듬는다.
-
-    실측(2026-09-20): 이 단계가 없으면 복셀 리메시 직후에도 '메시는 매니폴드여야 하고 면 노멀이
-    한 방향이어야 한다'며 거절당해 매번 데시메이트로 떨어졌다. 극소 엣지를 녹이고 노멀을 다시
-    맞추면 같은 입력이 그대로 통과한다."""
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    bmesh.ops.dissolve_degenerate(bm, dist=obj.data.remesh_voxel_size * 0.01, edges=bm.edges)
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-    bm.to_mesh(obj.data)
-    bm.free()
-    obj.data.update()
-
-
-def _close_holes(obj) -> int:
-    """리토폴로지가 남긴 경계 구멍을 메운다. 남은 경계 엣지 수를 돌려준다."""
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    borders = [e for e in bm.edges if len(e.link_faces) == 1]
-    if borders:
-        bmesh.ops.holes_fill(bm, edges=borders, sides=0)
-        bm.normal_update()
-    remaining = sum(1 for e in bm.edges if len(e.link_faces) == 1)
-    bm.to_mesh(obj.data)
-    bm.free()
-    obj.data.update()
-    return remaining
-
-
-_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quadriflow_worker.py")
+    면수는 복셀 한 변으로 정확히 예측되지 않아(같은 공식으로 1.4만을 노렸는데 3.3만이 나왔다)
+    **재어 보고 복셀을 조정한다.** QuadriFlow 는 입력이 2만면을 넘으면 그대로 실패한다."""
+    wanted = wanted or max(float(QF_INPUT_FACES), float(target_faces))
+    voxel = _voxel_size(obj, target_faces)
+    size = _model_size(obj)
+    original = obj.data                      # 매번 원본에서 다시 리메시한다 — 리메시 결과를 또 리메시하면
+    obj.data = original.copy()               # 표면이 뭉개져 QuadriFlow 가 실패한다(실측 2026-09-20)
+    for _ in range(3):
+        obj.data.remesh_voxel_size = voxel
+        obj.data.remesh_voxel_adaptivity = 0.0
+        obj.data.use_remesh_fix_poles = False   # 극점 정리 단계가 비매니폴드를 남긴다
+        with _override(obj):
+            bpy.ops.object.voxel_remesh()
+        faces = len(obj.data.polygons)
+        if wanted * 0.6 <= faces <= wanted * 1.4 or faces == 0:
+            break
+        # 면수는 복셀 한 변의 제곱에 반비례한다 — 그 비율로 보정해 원본에서 다시 굽는다
+        voxel = min(max(voxel * math.sqrt(faces / wanted), size / VOXEL_SIZE_MIN_DIV),
+                    size / VOXEL_SIZE_MAX_DIV)
+        stale, obj.data = obj.data, original.copy()
+        bpy.data.meshes.remove(stale)
+    if original.users == 0:
+        bpy.data.meshes.remove(original)
 
 
 def _quadriflow(obj, target_faces: int, symmetry: bool) -> bool:
     """자식 Blender 프로세스에서 QuadriFlow 를 돌려 결과 메시를 받아온다. 성공 여부를 돌려준다.
 
     같은 프로세스에서 돌리지 않는 이유: QuadriFlow 는 내부 멀티스레딩이 비결정적이라 같은 입력·같은
-    시드에도 결과 면수가 매번 다르고, 드물게 FixValence() 안에서 영영 끝나지 않는다(실측 2026-09-20:
-    동일 입력 6회 중 1회가 120초를 넘겨 중단). bpy.ops 는 중간에 끊을 수 없어 Blender 전체가 얼어붙는다.
-    자식 프로세스면 시간 초과에 죽이고 데시메이트 폴백으로 넘어갈 수 있다."""
+    시드에도 결과가 매번 다르고, 드물게 FixValence() 안에서 영영 끝나지 않는다. bpy.ops 는 중간에
+    끊을 수 없어 Blender 전체가 얼어붙으므로, 자식 프로세스여야 시간 초과에 죽일 수 있다.
+
+    실패는 **시드를 바꿔 계속 재시도한다.** 실측(2026-09-20, 같은 입력 1.5만면): 시드 1·2 는 8초 성공,
+    시드 3 은 60초 초과. 빨리 끝나는 실패(내부 오류)도 다른 시드에서는 성공하므로 종료 코드를 보고
+    포기하면 안 된다."""
     request = max(int(target_faces * QF_REQUEST_SCALE), 4)
     with tempfile.TemporaryDirectory(prefix="lp3d_qf_") as work_dir:
         src = os.path.join(work_dir, "in.blend")
         bpy.data.libraries.write(src, {obj.data}, fake_user=True)
-        mesh = None
-        for seed in range(1, QF_ATTEMPTS + 1):
-            dst = os.path.join(work_dir, f"out{seed}.blend")
-            command = [bpy.app.binary_path, "--background", "--factory-startup",
-                       "--python", _WORKER, "--",
-                       src, dst, str(request), "1" if symmetry else "0", str(seed)]
-            try:
-                done = subprocess.run(command, capture_output=True, timeout=QF_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                continue   # 멈춘 시도는 버리고 다른 시드로 다시
-            except OSError:
-                return False
-            if done.returncode != 0 or not os.path.isfile(dst):
-                return False   # 입력 자체가 QuadriFlow 에 맞지 않는다 — 재시도해도 같다
-            with bpy.data.libraries.load(dst) as (data_from, data_to):
-                data_to.meshes = data_from.meshes[:1]
-            if data_to.meshes:
-                mesh = data_to.meshes[0]
-            break
+        mesh = _race_quadriflow(src, work_dir, request, symmetry)
         if mesh is None:
             return False
         mesh.use_fake_user = False
         faces = len(mesh.polygons)
         if not (target_faces * QF_MIN_RATIO <= faces <= target_faces * QF_MAX_RATIO):
             bpy.data.meshes.remove(mesh)
-            return False
+            return False   # 면수가 목표와 크게 어긋난 결과는 쓰지 않는다
         stale, obj.data = obj.data, mesh
         bpy.data.meshes.remove(stale)
         obj.data.name = obj.name
-    _close_holes(obj)   # QuadriFlow 는 표면 곳곳에 작은 구멍을 남긴다
+    make_manifold(obj)   # QuadriFlow 는 표면 곳곳에 작은 구멍을 남긴다
     return True
+
+
+
+def _race_quadriflow(src: str, work_dir: str, request: int, symmetry: bool):
+    """시드를 바꿔 가며 차례로 돌리고, 시간을 넘긴 시도는 죽이고 다음 시드로 넘어간다.
+
+    QuadriFlow 의 정지는 완전히 비결정적이다 — 실측(2026-09-20, 고블린 1.3만면): 시드 1·2 는 60초를
+    넘기고 시드 3 은 9초에 끝난다. 성공은 10초 안쪽이므로 짧게 끊고 다음 시드로 가는 편이 빠르다.
+    동시에 띄우면 서로 코어를 뺏어 9초짜리도 45초를 넘긴다(실측) — 그래서 순차로 돌린다."""
+    for seed in range(1, QF_ATTEMPTS + 1):
+        dst = os.path.join(work_dir, f"out{seed}.blend")
+        command = [bpy.app.binary_path, "--background", "--factory-startup",
+                   "--python", _WORKER, "--",
+                   src, dst, str(request), "1" if symmetry else "0", str(seed)]
+        try:
+            done = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=QF_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            continue      # 멈춘 시도 — 다른 시드로
+        except OSError:
+            return None
+        if done.returncode != 0 or not os.path.isfile(dst):
+            continue      # 빨리 끝난 실패도 시드를 바꾸면 성공한다
+        with bpy.data.libraries.load(dst) as (data_from, data_to):
+            data_to.meshes = data_from.meshes[:1]
+        if data_to.meshes:
+            return data_to.meshes[0]
+    return None
 
 
 def _decimate(obj, target_faces: int) -> None:

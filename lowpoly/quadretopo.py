@@ -68,24 +68,35 @@ _MAP_PLAN = (
 
 
 def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
-                 texture_size=2048, normal_map=True, progress=None) -> dict:
+                 texture_size=2048, normal_map=True, progress=None, stash=None) -> dict:
     """source_obj 를 쿼드 메시로 다시 깔고 텍스처를 베이크로 옮긴다.
 
     원본은 `<이름>_원본` 으로 같은 컬렉션에 숨겨 남기고, 결과가 원래 이름을 이어받는다.
-    progress 는 `progress("단계 설명")` 으로 불리는 선택적 콜백이다."""
+    progress 는 `progress("단계 설명")` 으로 불리는 선택적 콜백이다.
+
+    stash 를 주면 **다시 리토폴로지**다 — 이미 보존된 원본(stash)에서 새 작업본을 만들고, source_obj
+    (지난 결과)를 지우고 그 이름을 이어받는다. 보존본은 새로 만들지 않으며 실패해도 손대지 않는다."""
     started = time.perf_counter()
     say = progress or (lambda _text: None)
     base_name = source_obj.name
-    stash = work = None
+    own_stash = stash is None
+    work = None
     try:
         # 사용자가 편집 모드에 있으면 아래 오퍼레이터들이 전부 어긋난다 — 먼저 오브젝트 모드로 내린다
         if bpy.context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
-        say("원본 보존")
-        stash = _stash_source(source_obj, collection)
+        if own_stash:
+            say("원본 보존")
+            stash = _stash_source(source_obj, collection)
+        else:
+            say("보존된 원본에서 다시 시작")
 
         say("작업본 생성")
-        work = _duplicate(source_obj, base_name + "_리토폴로지", collection)
+        work = _duplicate(stash, base_name + "_리토폴로지", collection)
+        work[SOURCE_KEY] = False
+        del work[SOURCE_KEY]
+        work.hide_render = False
+        _set_hidden(work, False)
 
         # QuadriFlow 가 실패하면 여기(리메시 이전)로 되돌려 데시메이트한다
         snapshot = work.data.copy()
@@ -146,8 +157,8 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             "seconds": round(time.perf_counter() - started, 1),
         }
     except Exception:
-        # 실패해도 원본은 그대로 둔다 — 중간 산물만 걷어낸다
-        for leftover in (work, stash):
+        # 실패해도 원본은 그대로 둔다 — 중간 산물만 걷어낸다 (다시 리토폴로지면 보존본은 남긴다)
+        for leftover in (work, stash if own_stash else None):
             if leftover is not None:
                 _discard(leftover)
         raise
@@ -789,6 +800,16 @@ def find_retopo_target(collection):
         return None
     for obj in collection.objects:
         if obj.type == 'MESH' and not obj.get(SOURCE_KEY):
+            return obj
+    return None
+
+
+def find_retopo_source(collection):
+    """컬렉션에 보존된 리토폴로지 원본(`_원본`). 없으면 None — 있으면 다시 리토폴로지할 수 있다."""
+    if collection is None:
+        return None
+    for obj in collection.objects:
+        if obj.type == 'MESH' and obj.get(SOURCE_KEY):
             return obj
     return None
 

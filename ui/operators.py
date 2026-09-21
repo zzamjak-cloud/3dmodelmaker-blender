@@ -27,7 +27,9 @@ def _standalone_job(context):
 
 
 def _retopo_source(context):
-    """선택 항목의 결과 컬렉션에서 리토폴로지할 메시. 조건이 안 맞으면 None."""
+    """선택 항목의 결과 컬렉션에서 리토폴로지할 메시. 조건이 안 맞으면 None.
+
+    이미 리토폴로지한 컬렉션이면 지난 결과 메시를 돌려준다 — 보존된 원본으로 다시 깐다."""
     from ..lowpoly import quadretopo
     job = _standalone_job(context)
     if job is None or job.state != 'DONE' or not job.collection_name:
@@ -485,7 +487,8 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
     bl_idname = "lp3d.job_retopo"
     bl_label = "리토폴로지 시작"
     bl_description = ("완성된 캐릭터 메시에 쿼드 와이어를 다시 깔고, 원본 텍스처를 "
-                      "새 UV 로 구워 옮긴다. 원본은 '_원본' 이름으로 숨겨 남는다")
+                      "새 UV 로 구워 옮긴다. 원본은 '_원본' 이름으로 숨겨 남고, 나중에 목표 면수·대칭을 "
+                      "바꿔 다시 누르면 그 원본에서 새로 깐다")
 
     @classmethod
     def poll(cls, context):
@@ -502,8 +505,12 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
             self.report({'ERROR'}, "리토폴로지할 메시를 찾을 수 없습니다")
             return {'CANCELLED'}
         prefs = preferences.get_prefs()
+        props = context.scene.lp3d
+        target_faces, symmetry = int(props.retopo_faces), bool(props.retopo_symmetry)
         scene_name, uid = context.scene.name, job.uid
         collection_name, source_name = job.collection_name, source.name
+        stash = quadretopo.find_retopo_source(bpy.data.collections.get(collection_name))
+        stash_name = stash.name if stash else ""
         key = f"{uid}:retopo"
 
         def _job():
@@ -525,10 +532,10 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
                     raise RuntimeError("결과 컬렉션이나 메시가 사라졌습니다")
                 result = quadretopo.retopologize(
                     obj, collection,
-                    target_faces=int(prefs.retopo_faces),
-                    symmetry=bool(prefs.retopo_symmetry),
+                    target_faces=target_faces, symmetry=symmetry,
                     texture_size=int(prefs.shapegen_texture_size),
-                    normal_map=True, progress=_say)
+                    normal_map=True, progress=_say,
+                    stash=bpy.data.objects.get(stash_name) if stash_name else None)
                 line = (f"리토폴로지 완료: {result['method']} · 면 {result['faces']} "
                         f"(쿼드 {result['quads']}) · 텍스처 {len(result['images'])}장 · "
                         f"{result['seconds']}s")

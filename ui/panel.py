@@ -293,7 +293,7 @@ class LP3D_PT_output(bpy.types.Panel):
         if job.texture_path:
             col.label(text=f"텍스처: {os.path.basename(job.texture_path)}", icon='TEXTURE')
 
-        self._draw_retopo(layout, job)
+        self._draw_retopo(layout, props, job)
 
         if job.entry_id and not session.is_active(job.uid):
             rate = layout.row(align=True)
@@ -309,20 +309,25 @@ class LP3D_PT_output(bpy.types.Panel):
         row.operator("lp3d.mark_asset", icon='ASSET_MANAGER')
         row.operator("lp3d.variation", icon='DUPLICATE')
 
-    def _draw_retopo(self, layout, job):
-        """쿼드 리토폴로지 — 생성이 끝난 뒤 사용자가 직접 누르는 후처리 단계."""
+    def _draw_retopo(self, layout, props, job):
+        """쿼드 리토폴로지 — 생성이 끝난 뒤 사용자가 직접 누르는 후처리. 옵션을 바꿔 언제든 다시 깐다."""
         from ..lowpoly import quadretopo
         if job.state != 'DONE':
             return
         coll = bpy.data.collections.get(job.collection_name)
-        if quadretopo.has_retopo_source(coll):
-            layout.label(text="리토폴로지 완료 (원본은 숨겨져 있습니다)", icon='CHECKMARK')
-            return
         if quadretopo.find_retopo_target(coll) is None:
             return
-        row = layout.row()
-        row.scale_y = 1.2
-        row.operator("lp3d.job_retopo", icon='MOD_REMESH')
+        box = layout.box()
+        done = quadretopo.has_retopo_source(coll)
+        box.label(text="리토폴로지" + (" — 완료 (원본은 숨김)" if done else ""),
+                  icon='CHECKMARK' if done else 'MOD_REMESH')
+        row = box.row(align=True)
+        row.prop(props, "retopo_faces")
+        row.prop(props, "retopo_symmetry", toggle=True)
+        run = box.row()
+        run.scale_y = 1.2
+        run.operator("lp3d.job_retopo", text="다시 리토폴로지" if done else "리토폴로지 시작",
+                     icon='FILE_REFRESH' if done else 'MOD_REMESH')
 
 
 _CLASSES = (LP3D_UL_jobs, LP3D_PT_main, LP3D_PT_log, LP3D_PT_output)

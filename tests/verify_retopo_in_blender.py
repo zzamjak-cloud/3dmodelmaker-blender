@@ -180,6 +180,21 @@ def check_operator():
     check("연산자 완료 보고", job.status.startswith("리토폴로지 완료"), True, "true")
     check("로그 기록", "리토폴로지 완료" in job.log, True, "true")
     check("보존본 생성", quadretopo.has_retopo_source(coll), True, "true")
+    # 다시 리토폴로지 — 옵션을 바꿔 다시 누르면 보존본에서 새로 깔고, 보존본이 겹으로 늘지 않는다
+    previous_faces = props.retopo_faces   # 씬 옵션은 JSON 으로 영속화되므로 검사 뒤 되돌린다
+    props.retopo_faces = 3000
+    check("다시 리토폴로지 활성", bpy.ops.lp3d.job_retopo.poll(), True, "true")
+    bpy.ops.lp3d.job_retopo()
+    scheduler.pump()
+    print(f"INFO 다시 리토폴로지: {job.status}")
+    check("다시 리토폴로지 완료", job.status.startswith("리토폴로지 완료"), True, "true")
+    stashes = [o for o in coll.objects if o.get(quadretopo.SOURCE_KEY)]
+    results = [o for o in coll.objects if o.type == 'MESH' and not o.get(quadretopo.SOURCE_KEY)]
+    check("보존본은 하나", len(stashes), 1)
+    check("결과 메시는 하나", len(results), 1)
+    check("결과가 원래 이름 유지", results[0].name if results else "", "OpTest")
+    check("다시 깐 면수가 새 목표를 따름 (4500 이하)", len(results[0].data.polygons) if results else 99999, 4500, "le")
+    props.retopo_faces = previous_faces
 
 
 def main():

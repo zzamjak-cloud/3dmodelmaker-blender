@@ -26,7 +26,7 @@ def _mode_changed_cb(self, context):
 
 
 def _persist_cb(self, context):
-    # 익스포트 폴더는 파일이 바뀌어도 유지되도록 JSON에 저장
+    # 익스포트 폴더·리토폴로지 옵션은 파일이 바뀌어도 유지되도록 JSON에 저장
     from .core import persist
     persist.on_scene_changed(self)
 
@@ -167,6 +167,19 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
         name="익스포트 폴더",
         subtype='DIR_PATH',
         default="//exports/",
+        update=_persist_cb,
+    )
+    # 리토폴로지 옵션 — 결과물 패널의 [리토폴로지] 버튼 옆에서 고른다 (설정 JSON으로 영속화)
+    retopo_faces: IntProperty(
+        name="목표 면수",
+        description="쿼드 메시의 목표 면수 — QuadriFlow 가 이 수에 맞춰 와이어를 깔고, 실패하면 데시메이트로 맞춘다",
+        default=12000, min=500, max=60000,
+        update=_persist_cb,
+    )
+    retopo_symmetry: BoolProperty(
+        name="X 대칭",
+        description="와이어를 X 축 기준 좌우 대칭으로 깐다 — 캐릭터는 켜는 편이 낫다",
+        default=True,
         update=_persist_cb,
     )
     multiview_preview_open: BoolProperty(

@@ -197,7 +197,8 @@ def main():
     source = imported["obj"]
     print(f"INFO 임포트: 면 {imported['faces']} · 트라이 {imported['tris']} · "
           f"이미지 {imported['images']} · 구멍 메움 {imported['filled_holes']} · "
-          f"열린 테두리 {imported['open_loops']} · {time.perf_counter() - started:.1f}s")
+          f"열린 테두리 {imported['open_loops']} · 공동 {imported['cavities']} "
+          f"(되살린 면 {imported['revived_faces']}) · {time.perf_counter() - started:.1f}s")
     # ⓪ 컬링이 남긴 작은 구멍은 임포트에서 메워지고, 옷의 진짜 테두리(소매·밑단·깃)만 열려 있다
     check("컬링 구멍 메움", imported["filled_holes"], 1, "ge")
     check("메운 루프가 남긴 테두리보다 많음", imported["filled_holes"], imported["open_loops"], "ge")

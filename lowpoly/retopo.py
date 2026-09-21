@@ -204,9 +204,13 @@ HOLE_MAX_RATIO = 0.15     # 경계 루프의 폭이 모델 크기의 이 비율 
 CRACK_AREA_RATIO = 0.05   # 메운 면적이 폭² 의 이 비율 미만이면 폭 0 의 '틈' — 크기와 무관하게 메운다
 HOLE_MAX_EDGES = 400      # 이보다 긴 루프는 손대지 않는다
 HOLE_SUBDIVIDE = 2        # 메운 면을 poke 로 쪼개는 횟수 — 새 정점을 원래 표면에 붙여 굴곡을 되살린다
+CAVITY_AREA_RATIO = 0.8   # 메운 면적이 폭² 의 이 배수를 넘으면 표면의 구멍이 아니라 공동(자켓 안쪽) 입구다
+CAVITY_LIFT_RATIO = 0.2   # 캡 면 중심이 컬링 전 표면에서 폭의 이 비율보다 떠 있으면 공동 입구다
+CAVITY_REACH_RATIO = 0.75  # 공동 입구 둘레에서 이 비율 x 폭 안의 지운 면을 되살린다
+CAVITY_BACKING_RATIO = 2.5  # 뒤쪽 이 배수 x 껍질 두께 안에 표면이 있으면 안쪽 껍질로 보고 되살리지 않는다
 
 
-def fill_small_holes(obj, guide: BVHTree, size: float) -> dict:
+def fill_small_holes(obj, guide: BVHTree, size: float, pristine=None) -> dict:
     """컬링이 남긴 작은 구멍과 틈을 메우고, 새 정점을 컬링 전 표면(guide)에 붙인다.
 
     컬링은 겨드랑이·눈구멍·귀 뒤·입속처럼 좁은 공간에서 보이는 면까지 지운다(실측 2026-09-21: 경계 루프
@@ -215,12 +219,18 @@ def fill_small_holes(obj, guide: BVHTree, size: float) -> dict:
 
     소매·밑단·깃처럼 옷의 진짜 열린 테두리(폭이 모델의 15% 이상, 메운 면적도 큼)는 건드리지 않는다.
     메운 면은 평평하므로 poke 로 쪼개고 새 정점마다 guide 의 최근접점으로 옮긴다 — guide 에는 지운 면이
-    그대로 있어 원래 굴곡이 돌아온다(안쪽 껍질에 붙어도 껍질 두께만큼만 어긋난다)."""
+    그대로 있어 원래 굴곡이 돌아온다(안쪽 껍질에 붙어도 껍질 두께만큼만 어긋난다).
+
+    **공동 입구**(자켓 앞섶처럼 옷과 몸 사이 빈 공간으로 뚫린 구멍)는 캡으로 막으면 안 된다 — 캡이 옷 안쪽 벽과
+    가슴 사이를 가로지르는 거대한 면이 되고, 정점을 표면에 붙이면 어느 쪽에 붙을지 제멋대로라 찢어진다
+    (실측 2026-09-21, LP3D_Model_015). 캡 면적이 폭² 을 넘거나 캡이 표면에서 많이 떠 있으면 공동으로 보고,
+    대신 pristine(컬링 전 메시)에서 그 둘레의 지운 면 — 옷 안쪽 벽과 그 아래 피부 — 을 되살린다."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     original = len(bm.verts)           # 새 정점은 뒤에 붙는다 — 이 인덱스 이상만 표면에 붙인다
-    stats = {"loops": 0, "holes": 0, "cracks": 0, "open": 0}
+    stats = {"loops": 0, "holes": 0, "cracks": 0, "open": 0, "cavities": 0, "revived": 0}
     new_faces = []
+    cavities = []
     for loop in _boundary_loops(bm):
         stats["loops"] += 1
         if len(loop) > HOLE_MAX_EDGES:
@@ -238,8 +248,15 @@ def fill_small_holes(obj, guide: BVHTree, size: float) -> dict:
             bmesh.ops.delete(bm, geom=faces, context='FACES_ONLY')
             stats["open"] += 1
             continue
+        if not crack and _is_cavity(faces, guide, area, extent):
+            bmesh.ops.delete(bm, geom=faces, context='FACES_ONLY')
+            stats["cavities"] += 1
+            cavities.append((sum(points, Vector()) / len(points), extent))
+            continue
         stats["cracks" if crack else "holes"] += 1
         new_faces += faces
+    if cavities and pristine is not None:
+        stats["revived"] = _revive_cavity_faces(bm, pristine, guide, cavities)
     if new_faces:
         faces = bmesh.ops.triangulate(bm, faces=new_faces)["faces"]
         for _ in range(HOLE_SUBDIVIDE):
@@ -256,6 +273,92 @@ def fill_small_holes(obj, guide: BVHTree, size: float) -> dict:
     bm.free()
     obj.data.update()
     return stats
+
+
+def _is_cavity(faces, guide: BVHTree, area: float, extent: float) -> bool:
+    """메운 캡이 표면의 구멍을 덮은 게 아니라 공동 입구를 가로막았는지.
+
+    표면 구멍의 캡은 원래 표면 근처에 붙어 있고 면적도 지름 기준 원(0.79 x 폭²) 안이다. 공동 입구는
+    둘레가 3차원으로 감겨 캡 면적이 폭² 을 넘거나(실측 1.7~2.0), 캡 중심이 표면에서 폭의 20% 이상 떠 있다."""
+    if area > CAVITY_AREA_RATIO * extent * extent:
+        return True
+    lift = 0.0
+    for face in faces:
+        center = face.calc_center_median()
+        nearest = guide.find_nearest(center)
+        if nearest[0] is not None:
+            lift = max(lift, (nearest[0] - center).length)
+    return lift > CAVITY_LIFT_RATIO * extent
+
+
+def _revive_cavity_faces(bm, pristine, guide: BVHTree, cavities: list) -> int:
+    """공동 입구 둘레의 지운 면을 컬링 전 메시(pristine)에서 되살린다. 되살린 면 수를 돌려준다.
+
+    후보는 입구 중심에서 CAVITY_REACH_RATIO x 폭 안의 pristine 면 중 지금 메시에 없는 것이다. 그중
+    **안쪽 껍질**(바깥면 바로 뒤에 겹으로 붙은 면)은 제외한다 — 면 뒤쪽(-노멀)으로 껍질 두께의 몇 배 안에
+    지금 메시의 표면이 있으면 안쪽 껍질이다. 옷 안쪽 벽의 뒤에는 옷 두께만큼 떨어져 바깥 벽이 있고,
+    옷 아래 피부의 뒤는 몸속이라 표면이 멀다. 껍질 두께는 지금 메시의 바깥면 뒤로 광선을 쏴 pristine 의
+    첫 교차 거리 중위값으로 잰다. UV 는 pristine 의 루프에서 그대로 옮긴다."""
+    from mathutils.kdtree import KDTree
+    current = BVHTree.FromBMesh(bm)
+    thickness = _shell_thickness(bm, guide)
+    polygons = pristine.polygons
+    tree = KDTree(len(polygons))
+    for polygon in polygons:
+        tree.insert(polygon.center, polygon.index)
+    tree.balance()
+    wanted = set()
+    for center, extent in cavities:
+        reach = extent * CAVITY_REACH_RATIO
+        for _co, index, _dist in tree.find_range(center, reach):
+            polygon = polygons[index]
+            hit = current.find_nearest(polygon.center)
+            if hit[0] is not None and (hit[0] - polygon.center).length < 1e-5:
+                continue    # 이미 있는 면
+            backing = current.ray_cast(polygon.center - polygon.normal * 1e-4, -polygon.normal,
+                                       thickness * CAVITY_BACKING_RATIO)
+            if backing[0] is not None:
+                continue    # 바깥면 바로 뒤에 겹친 안쪽 껍질
+            wanted.add(index)
+    if not wanted:
+        return 0
+    uv_layer = bm.loops.layers.uv.active
+    source_uv = pristine.uv_layers.active
+    vert_map = {}
+    for index in wanted:
+        polygon = polygons[index]
+        verts = []
+        for vertex_index in polygon.vertices:
+            if vertex_index not in vert_map:
+                vert_map[vertex_index] = bm.verts.new(pristine.vertices[vertex_index].co)
+            verts.append(vert_map[vertex_index])
+        try:
+            face = bm.faces.new(verts)
+        except ValueError:
+            continue    # 같은 정점 조합의 면이 이미 있다
+        face.material_index = polygon.material_index
+        if uv_layer is not None and source_uv is not None:
+            for loop, loop_index in zip(face.loops, polygon.loop_indices):
+                loop[uv_layer].uv = source_uv.data[loop_index].uv
+    bmesh.ops.remove_doubles(bm, verts=list(vert_map.values()), dist=1e-5)
+    return len(wanted)
+
+
+def _shell_thickness(bm, guide: BVHTree, samples: int = 400) -> float:
+    """바깥면 뒤에 붙은 안쪽 껍질까지의 거리 중위값 — 셰이프 서버 밴드 메시의 껍질 두께."""
+    bm.faces.ensure_lookup_table()
+    step = max(len(bm.faces) // samples, 1)
+    distances = []
+    for index in range(0, len(bm.faces), step):
+        face = bm.faces[index]
+        center = face.calc_center_median()
+        hit = guide.ray_cast(center - face.normal * 1e-4, -face.normal)
+        if hit[0] is not None:
+            distances.append((hit[0] - center).length)
+    if not distances:
+        return 0.0
+    distances.sort()
+    return distances[len(distances) // 2]
 
 
 def _boundary_loops(bm) -> list:
@@ -318,9 +421,11 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
     welded = weld_seams(obj)
     # 컬링 전 표면 — 메운 구멍의 새 정점을 여기에 붙여 원래 굴곡을 되살린다
     guide = BVHTree.FromObject(obj, bpy.context.evaluated_depsgraph_get())
+    pristine = obj.data.copy()   # 공동 입구 둘레의 지운 면을 되살릴 원본
     inner = remove_interior_faces(obj)
     slabs = remove_ground_slabs(obj)
-    holes = fill_small_holes(obj, guide, max(obj.dimensions))
+    holes = fill_small_holes(obj, guide, max(obj.dimensions), pristine=pristine)
+    bpy.data.meshes.remove(pristine)
     normalize(obj, height)
     for polygon in obj.data.polygons:
         polygon.use_smooth = True
@@ -330,4 +435,5 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
     return {"obj": obj, "faces": len(obj.data.polygons), "tris": len(obj.data.loop_triangles),
             "materials": len([m for m in obj.data.materials if m]), "images": sorted(images),
             "ground_slabs": slabs, "welded": welded, "interior_faces": inner,
-            "filled_holes": holes["holes"] + holes["cracks"], "open_loops": holes["open"]}
+            "filled_holes": holes["holes"] + holes["cracks"], "open_loops": holes["open"],
+            "cavities": holes["cavities"], "revived_faces": holes["revived"]}

@@ -44,6 +44,9 @@ VOXEL_SIZE_MIN_DIV = 400.0     # 복셀 한 변의 하한 = 모델 크기 / 이 
 VOXEL_SIZE_MAX_DIV = 8.0       # 복셀 한 변의 상한 = 모델 크기 / 이 값
 QF_MIN_RATIO = 0.3             # QuadriFlow 결과가 목표의 이 비율 미만이면 실패로 본다
 QF_MAX_RATIO = 3.0             # 초과해도 실패
+QF_EXTRA_SHELLS = 2            # QuadriFlow 출력 셸 수가 입력보다 이만큼 넘게 많으면 조각난 출력으로 본다
+QF_MAX_BOUNDARY = 0.1          # QuadriFlow 출력의 경계 엣지가 전체 엣지의 이 비율을 넘으면 깨진 출력으로 본다
+                               # (정상 출력은 0~3%, 실측 2026-09-21 비대칭 시드 1: 702/28k)
 QF_REQUEST_SCALE = 1.15        # QuadriFlow 에 요청할 면수 배수 — 실측(2026-09-20, 17회): 결과가 요청의
                                # 0.67~0.96배(평균 0.81)로 늘 모자라게 나와 목표를 그대로 넣으면 하한을 깬다
 QF_TIMEOUT = 25                # 시도 하나의 제한 시간(초) — 성공은 8~12초라 이보다 길면 정지로 본다
@@ -118,7 +121,7 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             say(f"쿼드 리토폴로지 시도 {attempt}/{len(QF_INPUT_LADDER)}")
             # 같은 형상도 입력이 거칠수록 QuadriFlow 성공률이 크게 오른다(실측 2026-09-20:
             # 3.6만면 전패, 1.3만면 5시드 중 1승, 5천면 전승) — 실패하면 한 단계 낮춰 다시 굽는다
-            if _quadriflow(work, target_faces, symmetry):
+            if _quadriflow(work, target_faces, symmetry, say):
                 quad_ok = True
                 break
         if quad_ok:
@@ -433,7 +436,7 @@ def _voxel_remesh(obj, target_faces: int, wanted: float = 0.0) -> None:
         bpy.data.meshes.remove(original)
 
 
-def _quadriflow(obj, target_faces: int, symmetry: bool) -> bool:
+def _quadriflow(obj, target_faces: int, symmetry: bool, say=lambda _text: None) -> bool:
     """자식 Blender 프로세스에서 QuadriFlow 를 돌려 결과 메시를 받아온다. 성공 여부를 돌려준다.
 
     같은 프로세스에서 돌리지 않는 이유: QuadriFlow 는 내부 멀티스레딩이 비결정적이라 같은 입력·같은
@@ -444,17 +447,21 @@ def _quadriflow(obj, target_faces: int, symmetry: bool) -> bool:
     시드 3 은 60초 초과. 빨리 끝나는 실패(내부 오류)도 다른 시드에서는 성공하므로 종료 코드를 보고
     포기하면 안 된다."""
     request = max(int(target_faces * QF_REQUEST_SCALE), 4)
+    # 출력이 입력보다 훨씬 많은 조각으로 쪼개지면 표면을 덮지 못한 것이다 — 입력 셸 수를 기준으로 삼는다
+    max_shells = _shell_count(obj.data) + QF_EXTRA_SHELLS
     with tempfile.TemporaryDirectory(prefix="lp3d_qf_") as work_dir:
         src = os.path.join(work_dir, "in.blend")
         bpy.data.libraries.write(src, {obj.data}, fake_user=True)
-        mesh = _race_quadriflow(src, work_dir, request, symmetry)
+        mesh = _race_quadriflow(src, work_dir, request, symmetry, target_faces, max_shells)
+        if mesh is None and symmetry:
+            say("대칭 와이어 실패 — 비대칭으로 다시 시도")
+            # 대칭 모드는 입력에 따라 세 시드 모두 멈추거나 NaN 을 낸다(실측 2026-09-21, 갱스터.001:
+            # 시드 1 은 정점 9,436개가 NaN, 시드 2·3 정지). 밀도를 낮추기 전에 비대칭으로 한 번 더
+            # 본다 — 와이어가 대칭이 아닌 것이 형상이 깨지는 것보다 낫다
+            mesh = _race_quadriflow(src, work_dir, request, False, target_faces, max_shells, attempts=2)
         if mesh is None:
             return False
         mesh.use_fake_user = False
-        faces = len(mesh.polygons)
-        if not (target_faces * QF_MIN_RATIO <= faces <= target_faces * QF_MAX_RATIO):
-            bpy.data.meshes.remove(mesh)
-            return False   # 면수가 목표와 크게 어긋난 결과는 쓰지 않는다
         stale, obj.data = obj.data, mesh
         bpy.data.meshes.remove(stale)
         obj.data.name = obj.name
@@ -462,15 +469,64 @@ def _quadriflow(obj, target_faces: int, symmetry: bool) -> bool:
     return True
 
 
+def _qf_output_ok(mesh, target_faces: int, max_shells: int) -> bool:
+    """QuadriFlow 출력이 쓸 수 있는 메시인지 — NaN 정점·과도한 경계·조각남·면수 이탈을 거른다.
 
-def _race_quadriflow(src: str, work_dir: str, request: int, symmetry: bool):
+    QuadriFlow 는 종료 코드 0 으로 끝나면서도 정점 대부분이 NaN 인 메시(대칭 모드)나, 표면을 덮지 못하고
+    닫힌 조각 수십 개로 흩어진 메시(실측 2026-09-21 갱스터.001 비대칭: 입력 2셸 → 출력 20셸)를 내놓을 수
+    있다. 그대로 쓰면 슈링크랩·베이크가 조용히 망가져 구멍 뚫린 형상이 된다."""
+    faces = len(mesh.polygons)
+    if not (target_faces * QF_MIN_RATIO <= faces <= target_faces * QF_MAX_RATIO):
+        return False   # 면수가 목표와 크게 어긋난 결과는 쓰지 않는다
+    if any(not all(math.isfinite(c) for c in v.co) for v in mesh.vertices):
+        return False
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    boundary = sum(1 for e in bm.edges if e.is_boundary)
+    edges = len(bm.edges)
+    shells = _shell_count_bm(bm)
+    bm.free()
+    return boundary <= edges * QF_MAX_BOUNDARY and shells <= max_shells
+
+
+def _shell_count(mesh) -> int:
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    count = _shell_count_bm(bm)
+    bm.free()
+    return count
+
+
+def _shell_count_bm(bm) -> int:
+    """연결 요소(셸) 수."""
+    bm.faces.ensure_lookup_table()
+    seen = set()
+    count = 0
+    for face in bm.faces:
+        if face.index in seen:
+            continue
+        count += 1
+        stack = [face]
+        while stack:
+            cur = stack.pop()
+            if cur.index in seen:
+                continue
+            seen.add(cur.index)
+            for edge in cur.edges:
+                stack.extend(f for f in edge.link_faces if f.index not in seen)
+    return count
+
+
+
+def _race_quadriflow(src: str, work_dir: str, request: int, symmetry: bool, target_faces: int,
+                     max_shells: int, attempts: int = QF_ATTEMPTS):
     """시드를 바꿔 가며 차례로 돌리고, 시간을 넘긴 시도는 죽이고 다음 시드로 넘어간다.
 
     QuadriFlow 의 정지는 완전히 비결정적이다 — 실측(2026-09-20, 고블린 1.3만면): 시드 1·2 는 60초를
     넘기고 시드 3 은 9초에 끝난다. 성공은 10초 안쪽이므로 짧게 끊고 다음 시드로 가는 편이 빠르다.
     동시에 띄우면 서로 코어를 뺏어 9초짜리도 45초를 넘긴다(실측) — 그래서 순차로 돌린다."""
-    for seed in range(1, QF_ATTEMPTS + 1):
-        dst = os.path.join(work_dir, f"out{seed}.blend")
+    for seed in range(1, attempts + 1):
+        dst = os.path.join(work_dir, f"out{'s' if symmetry else 'a'}{seed}.blend")
         command = [bpy.app.binary_path, "--background", "--factory-startup",
                    "--python", _WORKER, "--",
                    src, dst, str(request), "1" if symmetry else "0", str(seed)]
@@ -485,8 +541,12 @@ def _race_quadriflow(src: str, work_dir: str, request: int, symmetry: bool):
             continue      # 빨리 끝난 실패도 시드를 바꾸면 성공한다
         with bpy.data.libraries.load(dst) as (data_from, data_to):
             data_to.meshes = data_from.meshes[:1]
-        if data_to.meshes:
-            return data_to.meshes[0]
+        if not data_to.meshes:
+            continue
+        mesh = data_to.meshes[0]
+        if _qf_output_ok(mesh, target_faces, max_shells):
+            return mesh
+        bpy.data.meshes.remove(mesh)   # NaN·구멍투성이 출력 — 다른 시드로
     return None
 
 

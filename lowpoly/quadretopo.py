@@ -2,7 +2,8 @@
 #
 # 입력은 retopo.import_textured() 가 정리해 둔 단일 셸(용접·안쪽 껍질 제거·키 정규화 완료)과
 # PBR 텍스처다. 순서: 원본 보존 → 작업본 → 복셀 리메시(촘촘히) → 파편 제거 → 데시메이트 → 매니폴드 수리
-# → QuadriFlow(좌우 대칭, 실패 시 데시메이트 폴백) → 투영 슈링크랩+릴랙스 → UV 언랩 → Cycles 베이크 → 새 머티리얼.
+# → QuadriFlow(좌우 대칭이면 양의 반쪽만, 실패 시 데시메이트 폴백) → 구멍 쿼드 메움 → 투영 슈링크랩+릴랙스
+# → 대칭면 미러 용접 → UV 언랩 → Cycles 베이크 → 새 머티리얼.
 #
 # 텍스처를 AI 로 다시 만들지 않고 원본에서 굽는 것이 예전 리토폴로지 경로와의 결정적인 차이다.
 # 어느 단계가 실패해도 원본 오브젝트는 손대지 않는다 — 작업본과 보존본만 지우고 예외를 올린다.
@@ -45,16 +46,38 @@ VOXEL_SIZE_MAX_DIV = 8.0       # 복셀 한 변의 상한 = 모델 크기 / 이 
 QF_MIN_RATIO = 0.3             # QuadriFlow 결과가 목표의 이 비율 미만이면 실패로 본다
 QF_MAX_RATIO = 3.0             # 초과해도 실패
 QF_EXTRA_SHELLS = 2            # QuadriFlow 출력 셸 수가 입력보다 이만큼 넘게 많으면 조각난 출력으로 본다
-QF_MAX_BOUNDARY = 0.1          # QuadriFlow 출력의 경계 엣지가 전체 엣지의 이 비율을 넘으면 깨진 출력으로 본다
+QF_HALF_MAX_SHELLS = 24        # 반쪽 출력은 절단면을 따라 패치가 나뉘어 셸이 늘어난다(실측 2026-09-22: 18개).
+                               # 미러 뒤 remove_fragments 가 부스러기를 걷어내므로 이 정도는 받아들인다
+QF_MAX_BOUNDARY = 0.1          # 대칭면 밖의 구멍 엣지가 전체 엣지의 이 비율을 넘으면 깨진 출력으로 본다
                                # (정상 출력은 0~3%, 실측 2026-09-21 비대칭 시드 1: 702/28k)
+HOLE_MAX_EDGES = 64            # 이보다 큰 구멍이 있으면 표면을 덮지 못한 것으로 보고 출력을 버린다.
+                               # 셰이프 서버 결과는 셸이 수천 개라(실측 2026-09-22: 1,968개) 40~50엣지짜리
+                               # 구멍이 정상 출력에도 남는다 — 16으로 조이면 쓸 만한 결과까지 전부 버린다
+MIN_QUAD_RATIO = 0.95          # 출력의 쿼드 비율 하한 — 나머지는 _repair_output 이 삼각화·병합으로 되돌린다
+# 대칭(반쪽) 경로 전용 사다리 — 반쪽은 형상의 절반만 담으므로 전체와 같은 삼각형 수를 넣으면 QuadriFlow 가
+# 두 배로 촘촘한 와이어를 깔게 되고 그만큼 정지가 잦다. 실측(2026-09-22, 캐릭터 GLB): 반쪽 7,146면은 세 시드
+# 모두 45초를 넘겨 정지, 3,827면·2,237면은 3초에 성공했다. 복셀 밀도는 그대로 두고(좁은 틈 보존) 데시메이트만
+# 낮춘다 — 자르기 전에 한 번만 줄여야 절단면이 상하지 않는다(두 번 줄이면 비매니폴드 정점이 수십 개 생긴다).
+QF_HALF_LADDER = ((32000, 8000), (32000, 5500), (20000, 4000))
 QF_REQUEST_SCALE = 1.15        # QuadriFlow 에 요청할 면수 배수 — 실측(2026-09-20, 17회): 결과가 요청의
                                # 0.67~0.96배(평균 0.81)로 늘 모자라게 나와 목표를 그대로 넣으면 하한을 깬다
-QF_TIMEOUT = 25                # 시도 하나의 제한 시간(초) — 성공은 8~12초라 이보다 길면 정지로 본다
+QF_HALF_REQUEST_SCALE = 1.0    # 경계를 보존한 반쪽 입력은 요청의 1.05~1.1배로 나와 보정이 필요 없다
+PLANE_TOLERANCE_RATIO = 1e-3   # 출력 경계 루프가 모델 크기의 이 비율 안에 있으면 대칭 절단면 루프로 본다
+SNAP_TOLERANCE_RATIO = 1e-5    # 절단 직후 이 비율 안의 정점만 평면에 붙인다 — 넓게 붙이면 미세 엣지가
+                               # 생겨 QuadriFlow 사전 검사가 거절한다
+WELD_RATIO = 1e-4              # 이 비율(모델 크기 기준)보다 짧은 엣지는 양 끝점을 합친다. 1.7m 모델에서 0.17mm
+                               # — 형상에는 무의미하고, 남겨 두면 종횡비 수백짜리 퇴화 면이 된다
+QF_TIMEOUT = 25.0              # 시도 하나의 기본 제한 시간(초) — 성공은 8~12초라 이보다 길면 정지로 본다
+QF_TIMEOUT_PER_QUAD = 1.0 / 400  # 목표 쿼드 하나당 늘려 주는 시간(초)
 QF_ATTEMPTS = 3                # 한 밀도에서 시드를 바꿔 볼 횟수. 실측(2026-09-20): 같은 입력에서 시드 1·2 는 정지,
                                # 시드 3 은 9초 성공 — 비결정적이라 여러 시드를 차례로 본다
 SHRINK_LIMIT = 3.0             # 노멀 투영 한계 = 복셀 한 변 x 이 배수 — 이보다 먼 표면으로는 끌려가지 않는다
 RELAX_ROUNDS = 2               # 스무딩 → 재투영 반복 횟수
 RELAX_FACTOR = 0.5
+SLIVER_ASPECT = 8.0            # 이 종횡비를 넘는 면 주변만 골라 다시 편다 — 전체 스무딩은 형상을 뭉개면서도
+                               # 짧은 엣지를 늘리지 못한다(실측 2026-09-21: 최대 종횡비 22.2 → 7.6)
+SLIVER_ROUNDS = 20             # 슬리버 완화 반복 상한. 남는 몇 개는 형상이 실제로 접힌 곳이다
+SYMMETRY_CENTER_RATIO = 0.05   # 메시가 X=0 에서 이 비율(폭 기준)보다 치우쳐 있으면 대칭을 끈다
 UNWRAP_ANGLE = math.radians(66)
 ISLAND_MARGIN = 0.003
 CAGE_RATIO = 0.01              # 케이지 돌출 = 모델 크기 x 이 비율
@@ -104,8 +127,14 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
         # QuadriFlow 가 실패하면 여기(리메시 이전)로 되돌려 데시메이트한다
         snapshot = work.data.copy()
 
-        quad_ok = False
-        for attempt, (density, triangles) in enumerate(QF_INPUT_LADDER, start=1):
+        # 치우친 모델에서 반쪽을 잘라 미러하면 형상이 통째로 어긋난다 — 그럴 때는 대칭을 포기한다
+        if symmetry and not _centered_on_axis(work, 'X'):
+            say("모델이 X=0 에 정렬돼 있지 않아 대칭을 끕니다")
+            symmetry = False
+
+        outcome = None
+        ladder = QF_HALF_LADDER if symmetry else QF_INPUT_LADDER
+        for attempt, (density, triangles) in enumerate(ladder, start=1):
             if attempt > 1:
                 stale, work.data = work.data, snapshot.copy()
                 bpy.data.meshes.remove(stale)
@@ -118,15 +147,21 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             if not make_manifold(work):
                 say(f"정리 실패 {quadriflow_ready(work)}")
                 continue
-            say(f"쿼드 리토폴로지 시도 {attempt}/{len(QF_INPUT_LADDER)}")
+            say(f"쿼드 리토폴로지 시도 {attempt}/{len(ladder)}")
             # 같은 형상도 입력이 거칠수록 QuadriFlow 성공률이 크게 오른다(실측 2026-09-20:
             # 3.6만면 전패, 1.3만면 5시드 중 1승, 5천면 전승) — 실패하면 한 단계 낮춰 다시 굽는다
-            if _quadriflow(work, target_faces, symmetry, say):
-                quad_ok = True
+            outcome = _quadriflow(work, target_faces, symmetry, say,
+                                  allow_full=attempt == len(ladder))
+            if outcome is not None:
                 break
-        if quad_ok:
+        plane_axes = ()
+        if outcome is not None:
             method = "QUADRIFLOW"
+            # 반쪽을 깐 결과는 대칭면이 열려 있다 — 투영까지 끝낸 뒤 미러로 닫는다
+            plane_axes = ('X',) if outcome == "HALF" else ()
             bpy.data.meshes.remove(snapshot)
+            say("출력 정리")
+            _repair_output(work, plane_axes)
         else:
             say("QuadriFlow 실패 — 데시메이트로 전환")
             stale, work.data = work.data, snapshot
@@ -137,7 +172,13 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
 
         with _visible(stash):
             say("표면 맞춤")
-            _shrinkwrap(work, stash)
+            _shrinkwrap(work, stash, plane_axes)
+            if plane_axes:
+                say("대칭면 미러 용접")
+                _mirror(work, plane_axes)
+                remove_fragments(work)   # 반쪽 출력에서 떨어져 나온 부스러기 패치를 걷어낸다
+                make_manifold(work)      # 미러 뒤 남은 구멍·겹친 면을 닫는다 (결과는 삼각형)
+                _repair_output(work)     # 그 삼각형을 다시 쿼드로 합친다
             say("UV 언랩")
             _unwrap(work)
             say("머티리얼 준비")
@@ -155,6 +196,7 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             "quads": sum(1 for p in polygons if len(p.vertices) == 4),
             "tris": len(work.data.loop_triangles),
             "method": method,
+            "symmetry_error": round(symmetry_error(work), 6) if symmetry else None,
             "images": sorted(image.name for image in images.values()),
             "source_name": stash.name,
             "seconds": round(time.perf_counter() - started, 1),
@@ -278,27 +320,42 @@ def _model_size(obj) -> float:
 
 # --- 토폴로지 --------------------------------------------------------------
 
-def quadriflow_ready(obj) -> dict:
+def quadriflow_ready(obj, plane_axes: tuple = ()) -> dict:
     """QuadriFlow 사전 검사와 같은 기준으로 메시 상태를 센다. 모두 0 이어야 통과한다.
 
     Blender 는 ① 면이 2개가 아닌 엣지, ② 이웃 면의 winding 불일치, ③ **길이 1e-4 미만 엣지**를 모두
     거절 사유로 본다(source/blender/editors/object/object_remesh.cc). 셋째 조건 때문에 눈으로도
-    bmesh 로도 멀쩡한 메시가 계속 거절당했다."""
+    bmesh 로도 멀쩡한 메시가 계속 거절당했다.
+
+    plane_axes 를 주면 그 대칭 절단면의 경계는 세지 않는다 — 반쪽 메시는 거기가 열려 있는 것이 정상이고,
+    QuadriFlow 도 use_preserve_boundary 로 그 테두리를 받아들인다."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
+    plane_edges, plane_verts = _plane_boundary(bm, plane_axes, _local_size(obj))
     report = {
         "tiny": sum(1 for e in bm.edges
                     if all(abs(e.verts[0].co[i] - e.verts[1].co[i]) < 1e-4 for i in range(3))),
-        "open": sum(1 for e in bm.edges if len(e.link_faces) == 1),
-        "edge": sum(1 for e in bm.edges if not e.is_manifold),
-        "vert": sum(1 for v in bm.verts if not v.is_manifold),
-        "wind": sum(1 for e in bm.edges if not e.is_contiguous),
+        "open": sum(1 for e in bm.edges if len(e.link_faces) == 1 and e not in plane_edges),
+        "edge": sum(1 for e in bm.edges if not e.is_manifold and e not in plane_edges),
+        "vert": sum(1 for v in bm.verts if not v.is_manifold and v not in plane_verts),
+        "wind": sum(1 for e in bm.edges if not e.is_contiguous and e not in plane_edges),
     }
     bm.free()
     return report
 
 
-def make_manifold(obj, rounds: int = REPAIR_ROUNDS) -> bool:
+def _plane_boundary(bm, plane_axes: tuple, scale: float):
+    """대칭 절단면 위에 있는 경계 엣지·정점 집합. plane_axes 가 비면 빈 집합이다."""
+    if not plane_axes:
+        return set(), set()
+    edges = set()
+    for loop in _boundary_loops(bm):
+        if _loop_on_plane(loop, plane_axes, scale):
+            edges.update(loop)
+    return edges, {vertex for edge in edges for vertex in edge.verts}
+
+
+def make_manifold(obj, rounds: int = REPAIR_ROUNDS, plane_axes: tuple = ()) -> bool:
     """QuadriFlow 가 받아들이는 상태로 만든다. 성공 여부를 돌려준다.
 
     한 번에 하나씩 고치면 서로를 되살린다 — 미세 엣지를 늘리고, 엣지에 셋 이상 붙은 면 중 **초과분만**
@@ -319,10 +376,12 @@ def make_manifold(obj, rounds: int = REPAIR_ROUNDS) -> bool:
                 extra += [f for f in edge.link_faces if f not in keep]
         if extra:
             bmesh.ops.delete(bm, geom=list(set(extra)), context='FACES')
-        border = [e for e in bm.edges if len(e.link_faces) == 1]
+        # 대칭 절단면의 테두리는 메우지 않는다 — 여기를 닫으면 반쪽을 미러할 수 없다
+        scale = _local_size(obj)
+        border = _open_border(bm, plane_axes, scale)
         if border:
             bmesh.ops.holes_fill(bm, edges=border, sides=64)
-            border = [e for e in bm.edges if len(e.link_faces) == 1]
+            border = _open_border(bm, plane_axes, scale)
             if border:
                 bmesh.ops.triangle_fill(bm, edges=border, use_beauty=True, use_dissolve=False)
         loose = [v for v in bm.verts if not v.link_faces]
@@ -332,9 +391,15 @@ def make_manifold(obj, rounds: int = REPAIR_ROUNDS) -> bool:
         bm.to_mesh(obj.data)
         bm.free()
         obj.data.update()
-        if not any(quadriflow_ready(obj).values()):
+        if not any(quadriflow_ready(obj, plane_axes).values()):
             return True
     return False
+
+
+def _open_border(bm, plane_axes: tuple, scale: float) -> list:
+    """메워야 할 경계 엣지 — 대칭 절단면 위의 테두리는 뺀다."""
+    plane_edges, _ = _plane_boundary(bm, plane_axes, scale)
+    return [e for e in bm.edges if len(e.link_faces) == 1 and e not in plane_edges]
 
 
 def _stretch_tiny_edges(bm) -> int:
@@ -436,8 +501,13 @@ def _voxel_remesh(obj, target_faces: int, wanted: float = 0.0) -> None:
         bpy.data.meshes.remove(original)
 
 
-def _quadriflow(obj, target_faces: int, symmetry: bool, say=lambda _text: None) -> bool:
-    """자식 Blender 프로세스에서 QuadriFlow 를 돌려 결과 메시를 받아온다. 성공 여부를 돌려준다.
+def _quadriflow(obj, target_faces: int, symmetry: bool, say=lambda _text: None, allow_full: bool = True):
+    """자식 Blender 프로세스에서 QuadriFlow 를 돌려 결과 메시로 바꾼다.
+
+    대칭이면 **양의 반쪽(X>=0)만 잘라** 경계를 보존한 채 깔고 "HALF" 를 돌려준다 — 호출자가 미러로 용접한다.
+    QuadriFlow 자체의 대칭 모드는 쓰지 않는다: 어떤 시드·옵션에서도 대칭면을 따라 수십 엣지짜리 구멍을
+    남기거나 정점이 NaN 인 메시를 내놓았다. 반쪽을 깔고 미러하면 구멍 없이 **정확히** 대칭인 결과가 나온다.
+    반쪽이 모든 시드에서 실패하면 닫힌 전체로 한 번 더 보고 "FULL" 을 돌려준다. 전부 실패하면 None.
 
     같은 프로세스에서 돌리지 않는 이유: QuadriFlow 는 내부 멀티스레딩이 비결정적이라 같은 입력·같은
     시드에도 결과가 매번 다르고, 드물게 FixValence() 안에서 영영 끝나지 않는다. bpy.ops 는 중간에
@@ -446,47 +516,151 @@ def _quadriflow(obj, target_faces: int, symmetry: bool, say=lambda _text: None) 
     실패는 **시드를 바꿔 계속 재시도한다.** 실측(2026-09-20, 같은 입력 1.5만면): 시드 1·2 는 8초 성공,
     시드 3 은 60초 초과. 빨리 끝나는 실패(내부 오류)도 다른 시드에서는 성공하므로 종료 코드를 보고
     포기하면 안 된다."""
-    request = max(int(target_faces * QF_REQUEST_SCALE), 4)
+    scale = _local_size(obj)
     # 출력이 입력보다 훨씬 많은 조각으로 쪼개지면 표면을 덮지 못한 것이다 — 입력 셸 수를 기준으로 삼는다
     max_shells = _shell_count(obj.data) + QF_EXTRA_SHELLS
     with tempfile.TemporaryDirectory(prefix="lp3d_qf_") as work_dir:
+        if symmetry:
+            half = _clip_positive(obj.data, ('X',), scale)
+            if half is None:
+                say("양의 반쪽에 면이 없어 대칭을 건너뜁니다")
+            else:
+                mesh = None
+                # 절단은 원본이 멀쩡해도 교차점에 비매니폴드 엣지·정점을 남긴다 — 그대로 보내면
+                # QuadriFlow 가 "manifold 가 아니다"라며 아무것도 하지 않는다(실측 2026-09-22).
+                holder = bpy.data.objects.new(half.name, half)
+                try:
+                    if not make_manifold(holder, plane_axes=('X',)):
+                        say(f"반쪽 정리 실패 {quadriflow_ready(holder, ('X',))}")
+                    else:
+                        request = max(int(target_faces / 2 * QF_HALF_REQUEST_SCALE), 4)
+                        src = os.path.join(work_dir, "half.blend")
+                        bpy.data.libraries.write(src, {holder.data}, fake_user=True)
+                        mesh = _race_quadriflow(src, work_dir, request, expected=request,
+                                                preserve_boundary=True, plane_axes=('X',), scale=scale,
+                                                max_shells=max(max_shells, QF_HALF_MAX_SHELLS))
+                finally:
+                    bpy.data.objects.remove(holder)
+                    bpy.data.meshes.remove(half)
+                if mesh is not None:
+                    _swap_mesh(obj, mesh)
+                    return "HALF"
+                if not allow_full:
+                    say("대칭 반쪽 실패 — 다음 밀도로")
+                    return None      # 전체 메시 시도는 마지막 단에서만 — 정지하면 시드마다 수십 초를 버린다
+                say("대칭 반쪽 실패 — 닫힌 전체로 다시 시도")
+        if symmetry and not allow_full:
+            return None
+        request = max(int(target_faces * QF_REQUEST_SCALE), 4)
         src = os.path.join(work_dir, "in.blend")
         bpy.data.libraries.write(src, {obj.data}, fake_user=True)
-        mesh = _race_quadriflow(src, work_dir, request, symmetry, target_faces, max_shells)
-        if mesh is None and symmetry:
-            say("대칭 와이어 실패 — 비대칭으로 다시 시도")
-            # 대칭 모드는 입력에 따라 세 시드 모두 멈추거나 NaN 을 낸다(실측 2026-09-21, 갱스터.001:
-            # 시드 1 은 정점 9,436개가 NaN, 시드 2·3 정지). 밀도를 낮추기 전에 비대칭으로 한 번 더
-            # 본다 — 와이어가 대칭이 아닌 것이 형상이 깨지는 것보다 낫다
-            mesh = _race_quadriflow(src, work_dir, request, False, target_faces, max_shells, attempts=2)
+        mesh = _race_quadriflow(src, work_dir, request, expected=target_faces,
+                                preserve_boundary=False, plane_axes=(), scale=scale,
+                                max_shells=max_shells,
+                                attempts=2 if symmetry else QF_ATTEMPTS)
         if mesh is None:
-            return False
-        mesh.use_fake_user = False
-        stale, obj.data = obj.data, mesh
-        bpy.data.meshes.remove(stale)
-        obj.data.name = obj.name
-    make_manifold(obj)   # QuadriFlow 는 표면 곳곳에 작은 구멍을 남긴다
-    return True
+            return None
+        _swap_mesh(obj, mesh)
+        return "FULL"
 
 
-def _qf_output_ok(mesh, target_faces: int, max_shells: int) -> bool:
-    """QuadriFlow 출력이 쓸 수 있는 메시인지 — NaN 정점·과도한 경계·조각남·면수 이탈을 거른다.
+def _swap_mesh(obj, mesh) -> None:
+    """오브젝트의 메시를 새 메시로 갈아 끼우고 옛 메시를 지운다."""
+    mesh.use_fake_user = False
+    stale, obj.data = obj.data, mesh
+    bpy.data.meshes.remove(stale)
+    obj.data.name = obj.name
 
-    QuadriFlow 는 종료 코드 0 으로 끝나면서도 정점 대부분이 NaN 인 메시(대칭 모드)나, 표면을 덮지 못하고
-    닫힌 조각 수십 개로 흩어진 메시(실측 2026-09-21 갱스터.001 비대칭: 입력 2셸 → 출력 20셸)를 내놓을 수
-    있다. 그대로 쓰면 슈링크랩·베이크가 조용히 망가져 구멍 뚫린 형상이 된다."""
+
+def _local_size(obj) -> float:
+    """로컬 좌표 기준 경계 상자의 가장 긴 변 — 평면 허용치·용접 거리는 전부 이 값의 비율로 잡는다.
+
+    _model_size 와 달리 월드 행렬을 거치지 않는다: 절단·스냅·미러는 전부 로컬 좌표에서 돈다."""
+    coords = [v.co for v in obj.data.vertices]
+    if not coords:
+        return 0.0
+    return max(max(c[a] for c in coords) - min(c[a] for c in coords) for a in range(3))
+
+
+def _centered_on_axis(obj, axis: str = 'X', ratio: float = SYMMETRY_CENTER_RATIO) -> bool:
+    """메시가 그 축의 0 평면을 기준으로 놓여 있는지.
+
+    치우친 모델에서 반쪽을 잘라 미러하면 형상이 통째로 어긋난다 — 그럴 때는 대칭을 포기하는 편이 낫다."""
+    component = "XYZ".index(axis)
+    values = [v.co[component] for v in obj.data.vertices]
+    if not values:
+        return False
+    low, high = min(values), max(values)
+    width = high - low
+    return width > 0.0 and abs(low + high) <= width * ratio
+
+
+def _clip_positive(mesh, axes: tuple, scale: float):
+    """대칭 축마다 양의 반쪽만 남긴 새 메시. 절단면 정점은 정확히 평면에 놓는다. 남는 면이 없으면 None."""
+    tolerance = SNAP_TOLERANCE_RATIO * scale
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    for axis in axes:
+        component = "XYZ".index(axis)
+        normal = [0.0, 0.0, 0.0]
+        normal[component] = 1.0
+        bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
+                               plane_co=(0.0, 0.0, 0.0), plane_no=tuple(normal),
+                               clear_inner=True, clear_outer=False, dist=1e-6)
+    # 절단이 남긴 미세 엣지는 QuadriFlow 사전 검사에 걸린다(실측: 17개 때문에 시드 전패).
+    # 아주 작은 모델에서 형상을 무너뜨리지 않도록 모델 크기 기준으로도 자른다.
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=min(MERGE_DIST, 1e-3 * scale))
+    for vertex in bm.verts:
+        for axis in axes:
+            component = "XYZ".index(axis)
+            if abs(vertex.co[component]) < tolerance:
+                vertex.co[component] = 0.0
+    loose = [v for v in bm.verts if not v.link_faces]
+    if loose:
+        bmesh.ops.delete(bm, geom=loose, context='VERTS')
+    if not bm.faces:
+        bm.free()
+        return None
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    half = bpy.data.meshes.new(mesh.name + "_half")
+    bm.to_mesh(half)
+    bm.free()
+    half.update()
+    return half
+
+
+def _qf_output_ok(mesh, expected: int, max_shells: int, plane_axes: tuple, scale: float) -> bool:
+    """QuadriFlow 출력이 쓸 수 있는 메시인지 — NaN 정점·비쿼드·큰 구멍·조각남·면수 이탈을 거른다.
+
+    QuadriFlow 는 종료 코드 0 으로 끝나면서도 정점 대부분이 NaN 인 메시나, 표면을 덮지 못하고 닫힌 조각
+    수십 개로 흩어진 메시(실측 2026-09-21 갱스터.001 비대칭: 입력 2셸 → 출력 20셸)를 내놓을 수 있다.
+    그대로 쓰면 슈링크랩·베이크가 조용히 망가져 구멍 뚫린 형상이 된다.
+    대칭 절단면 루프는 구멍이 아니다 — 미러가 닫아 준다."""
     faces = len(mesh.polygons)
-    if not (target_faces * QF_MIN_RATIO <= faces <= target_faces * QF_MAX_RATIO):
+    if not (expected * QF_MIN_RATIO <= faces <= expected * QF_MAX_RATIO):
         return False   # 면수가 목표와 크게 어긋난 결과는 쓰지 않는다
     if any(not all(math.isfinite(c) for c in v.co) for v in mesh.vertices):
         return False
+    quads = sum(1 for polygon in mesh.polygons if len(polygon.vertices) == 4)
+    if quads < faces * MIN_QUAD_RATIO:
+        return False
     bm = bmesh.new()
     bm.from_mesh(mesh)
-    boundary = sum(1 for e in bm.edges if e.is_boundary)
-    edges = len(bm.edges)
-    shells = _shell_count_bm(bm)
+    ok = True
+    hole_edges = 0
+    for loop in _boundary_loops(bm):
+        if _loop_on_plane(loop, plane_axes, scale):
+            continue
+        if len(loop) > HOLE_MAX_EDGES:
+            ok = False
+            break
+        hole_edges += len(loop)
+    if ok and hole_edges > len(bm.edges) * QF_MAX_BOUNDARY:
+        ok = False
+    if ok and _shell_count_bm(bm) > max_shells:
+        ok = False
     bm.free()
-    return boundary <= edges * QF_MAX_BOUNDARY and shells <= max_shells
+    return ok
 
 
 def _shell_count(mesh) -> int:
@@ -518,21 +692,24 @@ def _shell_count_bm(bm) -> int:
 
 
 
-def _race_quadriflow(src: str, work_dir: str, request: int, symmetry: bool, target_faces: int,
+def _race_quadriflow(src: str, work_dir: str, request: int, *, expected: int,
+                     preserve_boundary: bool, plane_axes: tuple, scale: float,
                      max_shells: int, attempts: int = QF_ATTEMPTS):
     """시드를 바꿔 가며 차례로 돌리고, 시간을 넘긴 시도는 죽이고 다음 시드로 넘어간다.
 
     QuadriFlow 의 정지는 완전히 비결정적이다 — 실측(2026-09-20, 고블린 1.3만면): 시드 1·2 는 60초를
     넘기고 시드 3 은 9초에 끝난다. 성공은 10초 안쪽이므로 짧게 끊고 다음 시드로 가는 편이 빠르다.
     동시에 띄우면 서로 코어를 뺏어 9초짜리도 45초를 넘긴다(실측) — 그래서 순차로 돌린다."""
+    timeout = max(1.0, QF_TIMEOUT + request * QF_TIMEOUT_PER_QUAD)
+    tag = 'h' if preserve_boundary else 'c'
     for seed in range(1, attempts + 1):
-        dst = os.path.join(work_dir, f"out{'s' if symmetry else 'a'}{seed}.blend")
+        dst = os.path.join(work_dir, f"out{tag}{seed}.blend")
         command = [bpy.app.binary_path, "--background", "--factory-startup",
                    "--python", _WORKER, "--",
-                   src, dst, str(request), "1" if symmetry else "0", str(seed)]
+                   src, dst, str(request), "1" if preserve_boundary else "0", str(seed)]
         try:
             done = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                  timeout=QF_TIMEOUT)
+                                  timeout=timeout)
         except subprocess.TimeoutExpired:
             continue      # 멈춘 시도 — 다른 시드로
         except OSError:
@@ -544,10 +721,246 @@ def _race_quadriflow(src: str, work_dir: str, request: int, symmetry: bool, targ
         if not data_to.meshes:
             continue
         mesh = data_to.meshes[0]
-        if _qf_output_ok(mesh, target_faces, max_shells):
+        if _qf_output_ok(mesh, expected, max_shells, plane_axes, scale):
             return mesh
         bpy.data.meshes.remove(mesh)   # NaN·구멍투성이 출력 — 다른 시드로
     return None
+
+
+# --- QuadriFlow 출력 정리 ---------------------------------------------------
+
+def _boundary_loops(bm) -> list:
+    """경계 엣지(면이 하나뿐인 엣지)를 연결된 루프 단위로 묶는다."""
+    border_list = [e for e in bm.edges if len(e.link_faces) == 1]
+    border = set(border_list)
+    seen = set()
+    loops = []
+    for edge in border_list:
+        if edge in seen:
+            continue
+        loop = [edge]
+        seen.add(edge)
+        stack = [edge]
+        while stack:
+            current = stack.pop()
+            for vertex in current.verts:
+                for other in vertex.link_edges:
+                    if other in border and other not in seen:
+                        seen.add(other)
+                        loop.append(other)
+                        stack.append(other)
+        loops.append(loop)
+    return loops
+
+
+def _plane_snap_tolerance(loop, scale: float) -> float:
+    """대칭면 루프 정점을 평면으로 되돌릴 때 허용하는 거리.
+
+    QuadriFlow 의 경계 보존은 근사라 밀도가 낮으면 경계 정점이 엣지 길이의 절반 가까이 평면에서 떠 있다
+    (실측 2026-09-21, 옥탄트 128면: 0.049). 루프 엣지 길이 기준으로 허용치를 잡는다."""
+    lengths = sorted(edge.calc_length() for edge in loop)
+    median = lengths[len(lengths) // 2] if lengths else 0.0
+    return max(PLANE_TOLERANCE_RATIO * scale, 1.5 * median)
+
+
+def _loop_on_plane(loop, plane_axes: tuple, scale: float) -> bool:
+    """경계 루프가 대칭 절단면 루프인지 — 정점 과반이 평면 위에 있고 나머지도 엣지 길이 안에서 떠 있어야 한다."""
+    if not plane_axes:
+        return False
+    tight = PLANE_TOLERANCE_RATIO * scale
+    loose = _plane_snap_tolerance(loop, scale)
+    vertices = {vertex for edge in loop for vertex in edge.verts}
+    distances = [min(abs(v.co["XYZ".index(axis)]) for axis in plane_axes) for v in vertices]
+    if any(distance >= loose for distance in distances):
+        return False
+    return sum(1 for distance in distances if distance < tight) >= 0.5 * len(distances)
+
+
+def _ordered_loop_vertices(loop):
+    """루프가 단순 폐곡선(정점마다 루프 엣지 2개)이면 순서대로 정점을 돌려준다. 아니면 None."""
+    adjacency = {}
+    for edge in loop:
+        a, b = edge.verts
+        adjacency.setdefault(a, []).append(b)
+        adjacency.setdefault(b, []).append(a)
+    if any(len(neighbours) != 2 for neighbours in adjacency.values()):
+        return None
+    start = next(iter(adjacency))
+    ordered = [start]
+    previous, current = None, start
+    while True:
+        first, second = adjacency[current]
+        following = second if first is previous else first
+        if following is start:
+            break
+        ordered.append(following)
+        previous, current = current, following
+        if len(ordered) > len(loop):
+            return None
+    return ordered if len(ordered) == len(loop) else None
+
+
+def _repair_output(obj, plane_axes: tuple = ()) -> None:
+    """QuadriFlow 가 남긴 작은 구멍을 **쿼드로** 메우고 대칭면 정점을 평면에 맞춘다. 대칭면 루프는 열어 둔다.
+
+    make_manifold 로 메우면 삼각형이 남아 쿼드 비율이 깎이고, 대칭면 루프까지 닫혀 미러를 할 수 없다.
+    출력은 구멍 가장자리에 겹친 정점(크랙)을 남기기도 해서 먼저 경계 정점을 용접한다. 짝수 구멍은 중심
+    정점을 세워 쿼드 부채로, 그 외는 면을 바로 만들어 삼각화한 뒤 다시 합친다. 한 번에 안 닫히는 구멍이
+    있어 여러 번 돈다. 중심 정점 위치는 뒤따르는 슈링크랩이 원본 표면으로 끌어온다."""
+    scale = _local_size(obj)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    border_vertices = list({v for e in bm.edges if len(e.link_faces) == 1 for v in e.verts})
+    if border_vertices:
+        bmesh.ops.remove_doubles(bm, verts=border_vertices, dist=SNAP_TOLERANCE_RATIO * scale)
+    _weld_degenerate_bm(bm, scale)
+    plane_vertices = {}
+    for _ in range(REPAIR_ROUNDS):
+        leftovers = []
+        open_holes = False
+        for loop in _boundary_loops(bm):
+            if _loop_on_plane(loop, plane_axes, scale):
+                tolerance = _plane_snap_tolerance(loop, scale)
+                for edge in loop:
+                    for vertex in edge.verts:
+                        plane_vertices[vertex] = max(tolerance, plane_vertices.get(vertex, 0.0))
+                continue
+            open_holes = True
+            ordered = _ordered_loop_vertices(loop)
+            if ordered is not None and 3 <= len(ordered) <= HOLE_MAX_EDGES and _fill_loop(bm, ordered):
+                continue
+            leftovers.extend(loop)
+        if not open_holes:
+            break
+        if leftovers:
+            bmesh.ops.holes_fill(bm, edges=sorted(set(leftovers), key=lambda edge: edge.index), sides=0)
+    odd = [face for face in bm.faces if len(face.verts) != 4]
+    if odd:
+        result = bmesh.ops.triangulate(bm, faces=odd)
+        triangles = [f for f in result["faces"] if f.is_valid and len(f.verts) == 3]
+        if triangles:
+            bmesh.ops.join_triangles(bm, faces=triangles, cmp_seam=False, cmp_sharp=False,
+                                     cmp_uvs=False, cmp_vcols=False, cmp_materials=False,
+                                     angle_face_threshold=math.radians(40.0),
+                                     angle_shape_threshold=math.radians(40.0))
+    _snap_plane_vertices({v: t for v, t in plane_vertices.items() if v.is_valid}, plane_axes)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+
+
+def _weld_degenerate_bm(bm, scale: float) -> int:
+    """길이가 사실상 0 인 엣지의 양 끝점을 합친다. 합친 정점 수를 돌려준다.
+
+    QuadriFlow 출력과 투영 슈링크랩은 둘 다 이런 엣지를 남긴다(실측 2026-09-22, 캐릭터: 출력 26개,
+    최대 종횡비 1.1e11). 퇴화한 면은 UV 언랩·베이크를 망가뜨리고 종횡비 지표를 의미 없게 만든다.
+    합쳐진 쿼드는 삼각형이 되지만 뒤따르는 삼각화·병합이 다시 쿼드로 돌린다."""
+    weld = max(WELD_RATIO * scale, 1e-6)
+    degenerate = list({v for e in bm.edges if e.calc_length() < weld for v in e.verts})
+    if not degenerate:
+        return 0
+    bmesh.ops.remove_doubles(bm, verts=degenerate, dist=weld)
+    return len(degenerate)
+
+
+def _weld_degenerate(obj) -> int:
+    """오브젝트 메시에 _weld_degenerate_bm 을 적용한다."""
+    scale = _local_size(obj)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    merged = _weld_degenerate_bm(bm, scale)
+    if merged:
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    bm.free()
+    return merged
+
+
+def _fill_loop(bm, ordered) -> bool:
+    """단순 폐루프 하나를 면으로 닫는다. 짝수 6각 이상은 중심 정점 쿼드 부채, 나머지는 면 하나."""
+    count = len(ordered)
+    try:
+        if count >= 6 and count % 2 == 0:
+            centre_co = ordered[0].co.copy()
+            for vertex in ordered[1:]:
+                centre_co += vertex.co
+            centre = bm.verts.new(centre_co / count)
+            for index in range(0, count, 2):
+                bm.faces.new((centre, ordered[index], ordered[(index + 1) % count],
+                              ordered[(index + 2) % count]))
+        else:
+            bm.faces.new(ordered)
+    except ValueError:
+        return False   # 이미 있는 면과 겹치는 루프 — 일반 구멍 메우기에 맡긴다
+    return True
+
+
+def _snap_plane_vertices(plane_vertices: dict, plane_axes: tuple) -> None:
+    """대칭면 루프 정점을 평면에 붙인다.
+
+    정점마다 가장 가까운 평면 하나에만 붙이고, 두 평면이 만나는 모서리는 평면 쌍마다 교선에 가장 가까운
+    정점 하나만 두 평면에 붙인다 — 이웃한 두 정점을 모두 두 평면에 붙이면 교선 위에 엣지가 놓이고,
+    두 번 미러된 뒤 면 네 개가 그 엣지를 공유해 비매니폴드가 된다."""
+    components = ["XYZ".index(axis) for axis in plane_axes]
+    corners = {}
+    for first in range(len(components)):
+        for second in range(first + 1, len(components)):
+            a, b = components[first], components[second]
+            candidates = sorted(
+                ((abs(v.co[a]) ** 2 + abs(v.co[b]) ** 2, v, tolerance)
+                 for v, tolerance in plane_vertices.items()
+                 if abs(v.co[a]) < tolerance and abs(v.co[b]) < tolerance),
+                key=lambda item: item[0])
+            chosen = []
+            for _, vertex, tolerance in candidates:
+                if any((vertex.co - other.co).length < 2.0 * tolerance for other in chosen):
+                    continue
+                chosen.append(vertex)
+                corners.setdefault(vertex, set()).update((a, b))
+    for vertex, tolerance in plane_vertices.items():
+        if vertex in corners:
+            for component in corners[vertex]:
+                vertex.co[component] = 0.0
+            continue
+        nearest = min(components, key=lambda component: abs(vertex.co[component]))
+        if abs(vertex.co[nearest]) < tolerance:
+            vertex.co[nearest] = 0.0
+
+
+def _mirror(obj, plane_axes: tuple) -> None:
+    """양의 반쪽을 대칭면 기준으로 복제·용접해 닫힌 대칭 메시로 만든다."""
+    mod = obj.modifiers.new("LP3D_Mirror", 'MIRROR')
+    mod.use_axis = tuple(axis in plane_axes for axis in "XYZ")
+    mod.use_bisect_axis = (False, False, False)   # 이미 잘라 놨으므로 다시 자르지 않는다
+    mod.use_mirror_merge = True
+    mod.merge_threshold = max(SNAP_TOLERANCE_RATIO * _local_size(obj), 1e-6)
+    with _override(obj):
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+
+
+def _face_aspect(face) -> float:
+    """면의 가장 긴 엣지 / 가장 짧은 엣지."""
+    lengths = [edge.calc_length() for edge in face.edges]
+    return max(lengths) / max(min(lengths), 1e-12)
+
+
+def symmetry_error(obj, axis: str = 'X') -> float:
+    """정점을 그 축으로 뒤집었을 때 가장 가까운 정점까지의 최대 거리 — 0 에 가까울수록 대칭이다."""
+    from mathutils.kdtree import KDTree
+    vertices = obj.data.vertices
+    tree = KDTree(len(vertices))
+    for index, vertex in enumerate(vertices):
+        tree.insert(vertex.co, index)
+    tree.balance()
+    component = "XYZ".index(axis)
+    worst = 0.0
+    for vertex in vertices:
+        mirrored = vertex.co.copy()
+        mirrored[component] = -mirrored[component]
+        worst = max(worst, tree.find(mirrored)[2])
+    return worst
 
 
 def _decimate(obj, target_faces: int) -> None:
@@ -563,19 +976,54 @@ def _decimate(obj, target_faces: int) -> None:
         bpy.ops.object.modifier_apply(modifier=mod.name)
 
 
-def _shrinkwrap(obj, target) -> None:
+def _shrinkwrap(obj, target, plane_axes: tuple = ()) -> None:
     """리토폴로지 결과를 원본 표면에 붙여 복셀·QuadriFlow 가 뭉갠 디테일을 되찾는다.
 
     최근접점 방식(NEAREST_SURFACEPOINT)만 쓰면 접히는 공간(겨드랑이·소매 안쪽)에서 이웃 정점이 서로 다른
     표면으로 끌려가 면이 교차하고 어둡게 찢어진다(실측 2026-09-21: 원본에서 1% 넘게 벗어난 면 39개).
     그래서 **노멀 방향 투영**(양방향, 복셀 SHRINK_LIMIT 배 안)을 먼저 하고, 노멀 선상에 표면이 없어 빗나간
     정점(옷단 립 등)만 최근접점으로 붙인다. 그 뒤 스무딩 → 다시 투영을 RELAX_ROUNDS 번 반복해 접힌 부분의
-    와이어를 편다(같은 실측에서 7개로 감소)."""
+    와이어를 편다(같은 실측에서 7개로 감소).
+
+    마지막으로 종횡비가 큰 슬리버 면 **주변 한 겹만** 골라 다시 편다 — QuadriFlow 는 구멍 주변에 아주 짧은
+    엣지를 남기고 그것이 면 분포를 망친다(실측 2026-09-21: 최대 종횡비 22.2 → 7.6). 전체 스무딩을 더 돌리면
+    형상만 뭉개지고 짧은 엣지는 늘어나지 않는다.
+
+    plane_axes 가 있으면 그 평면 위 정점은 매 단계 뒤 평면으로 되돌린다 — 평면을 넘어간 정점을 두면
+    미러 복제와 겹쳐 대칭이 깨진다(실측: 대칭 오차 0.07)."""
     import mathutils
     limit = _voxel_size(target, QF_INPUT_FACES) * SHRINK_LIMIT
     tree = mathutils.bvhtree.BVHTree.FromObject(target, bpy.context.evaluated_depsgraph_get())
     to_target = target.matrix_world.inverted() @ obj.matrix_world
     to_local = obj.matrix_world.inverted() @ target.matrix_world
+    components = ["XYZ".index(axis) for axis in plane_axes]
+    # _repair_output 이 대칭면 정점만 정확히 0.0 으로 스냅해 두므로 그 정점을 고정 대상으로 삼는다.
+    # 투영·스무딩은 디폼만 하므로 인덱스가 유지되고, 퇴화 엣지를 용접한 뒤에는 목록을 다시 만든다.
+    pinned = []
+
+    def repin():
+        pinned[:] = [(index, component)
+                     for index, vertex in enumerate(obj.data.vertices)
+                     for component in components if vertex.co[component] == 0.0]
+
+    repin()
+
+    def nearest_local(co):
+        hit = tree.find_nearest(to_target @ co)
+        return to_local @ hit[0] if hit[0] is not None else None
+
+    def pin():
+        """대칭면 위 정점은 평면으로 되돌리고, 평면을 넘어간 정점은 평면에서 멈춘다."""
+        if not components:
+            return
+        vertices = obj.data.vertices
+        for index, component in pinned:
+            vertices[index].co[component] = 0.0
+        for vertex in vertices:
+            for component in components:
+                if vertex.co[component] < 0.0:
+                    vertex.co[component] = 0.0
+        obj.data.update()
 
     def project():
         before = [v.co.copy() for v in obj.data.vertices]
@@ -590,10 +1038,11 @@ def _shrinkwrap(obj, target) -> None:
             bpy.ops.object.modifier_apply(modifier=mod.name)
         for index, vert in enumerate(obj.data.vertices):
             if (vert.co - before[index]).length_squared < 1e-14:
-                nearest = tree.find_nearest(to_target @ vert.co)
-                if nearest[0] is not None:
-                    vert.co = to_local @ nearest[0]
+                nearest = nearest_local(vert.co)
+                if nearest is not None:
+                    vert.co = nearest
         obj.data.update()
+        pin()
 
     def relax():
         bm = bmesh.new()
@@ -603,11 +1052,42 @@ def _shrinkwrap(obj, target) -> None:
         bm.to_mesh(obj.data)
         bm.free()
         obj.data.update()
+        pin()
+
+    def relax_slivers():
+        for _ in range(SLIVER_ROUNDS):
+            bm = bmesh.new()
+            bm.from_mesh(obj.data)
+            slivers = [face for face in bm.faces if _face_aspect(face) > SLIVER_ASPECT]
+            if not slivers:
+                bm.free()
+                return
+            # 슬리버 정점과 그 이웃 한 겹을 함께 펴야 짧은 엣지가 실제로 늘어난다
+            ring = list({neighbour for face in slivers for vertex in face.verts
+                         for edge in vertex.link_edges for neighbour in edge.verts})
+            bmesh.ops.smooth_vert(bm, verts=ring, factor=RELAX_FACTOR,
+                                  use_axis_x=True, use_axis_y=True, use_axis_z=True)
+            for vertex in ring:
+                nearest = nearest_local(vertex.co)
+                if nearest is not None:
+                    vertex.co = nearest
+            bm.to_mesh(obj.data)
+            bm.free()
+            obj.data.update()
+            pin()
 
     project()
     for _ in range(RELAX_ROUNDS):
         relax()
         project()
+    # 투영이 이웃 정점을 같은 자리로 끌어와 퇴화 엣지를 만든다 — 슬리버를 펴기 전에 먼저 합친다
+    if _weld_degenerate(obj):
+        repin()
+        pin()
+    relax_slivers()
+    if _weld_degenerate(obj):
+        repin()
+        pin()
 
 
 def _unwrap(obj) -> None:

@@ -324,6 +324,8 @@ class LP3D_PT_output(bpy.types.Panel):
         row = box.row(align=True)
         row.prop(props, "retopo_faces")
         row.prop(props, "retopo_symmetry", toggle=True)
+        from .ring_guides import draw_ring_guides
+        draw_ring_guides(box, bpy.context, coll)
         run = box.row()
         run.scale_y = 1.2
         run.operator("lp3d.job_retopo", text="다시 리토폴로지" if done else "리토폴로지 시작",

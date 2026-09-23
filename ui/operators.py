@@ -525,19 +525,25 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
                 target.status = f"리토폴로지: {text}"
 
         def _run():
+            from .ring_guides import guide_world_points
             collection = bpy.data.collections.get(collection_name)
             obj = bpy.data.objects.get(source_name)
+            notes = []
             try:
                 if collection is None or obj is None:
                     raise RuntimeError("결과 컬렉션이나 메시가 사라졌습니다")
+                guides = guide_world_points(collection)
                 result = quadretopo.retopologize(
                     obj, collection,
                     target_faces=target_faces, symmetry=symmetry,
                     texture_size=int(prefs.shapegen_texture_size),
                     normal_map=True, progress=_say,
-                    stash=bpy.data.objects.get(stash_name) if stash_name else None)
+                    stash=bpy.data.objects.get(stash_name) if stash_name else None,
+                    ring_guides=guides)
+                notes = result['notes']
+                rings = f" · 링 {result['rings']}개 접합" if guides else ""
                 line = (f"리토폴로지 완료: {result['method']} · 면 {result['faces']} "
-                        f"(쿼드 {result['quads']}) · 텍스처 {len(result['images'])}장 · "
+                        f"(쿼드 {result['quads']}){rings} · 텍스처 {len(result['images'])}장 · "
                         f"{result['seconds']}s")
             except Exception as e:
                 _log.exception("LP3D 리토폴로지 실패")
@@ -545,7 +551,7 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
             target = _job()
             if target:
                 target.status = line
-                target.log = "\n".join((target.log + "\n" + line).strip().splitlines()[-30:])
+                target.log = "\n".join((target.log + "\n" + "\n".join([*notes, line])).strip().splitlines()[-30:])
             runner.remove_keepalive(key)
 
         # 펌프가 꺼져 있으면 제출한 작업이 영영 실행되지 않는다 — keepalive가 펌프를 깨운다

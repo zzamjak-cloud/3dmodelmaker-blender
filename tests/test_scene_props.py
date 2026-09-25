@@ -159,7 +159,7 @@ class TestCreationModeFields(unittest.TestCase):
     def test_scene_size_defaults_to_medium(self):
         field = self.annotations["scene_size"]
         self.assertEqual(field["default"], 'M')
-        self.assertEqual([item[0] for item in field["items"]], ['S', 'M', 'L'])
+        self.assertEqual([item[0] for item in field["items"]], ['S', 'SPOT', 'SITE', 'M', 'L'])
 
     def test_parent_uid_defaults_to_empty(self):
         self.assertEqual(self.annotations["parent_uid"]["default"], "")

@@ -131,24 +131,135 @@ def _kit_root() -> bpy.types.Collection:
 # --- 공개 API ---
 
 def terrain(name="Terrain", size=(40.0, 40.0), cells=(16, 16), heights=None,
-            relief=0.4, seed=0, outline=None) -> bpy.types.Object:
-    """원점 중심의 XY 지형 판을 만든다(미터 단위). 생성된 오브젝트를 반환.
+            relief=0.4, seed=0, outline=None, base=0.0, elevation=0.0,
+            color=None, side_color=None) -> bpy.types.Object:
+    """원점 중심의 지면을 만든다(미터 단위). 생성된 오브젝트를 반환.
+    지면은 격자가 아니라 **윤곽 다각형 하나**다 — outline=[(x,y), ...](6~12점, m)을 주면
+    모서리를 둥글게 다듬어 해안선·절벽 끝 같은 매끈한 테두리가 되고, 없으면 size=(x,y) 직사각형이다.
+    relief=0이면 윗면은 면 하나(평지)이고, relief>0(기복 폭 m)일 때만 안쪽에 성긴 정점을 흩어
+    완만한 언덕을 만든다(cells는 그 정점 밀도: 긴 변을 몇 칸으로 볼지, 각 축 최대 48). 테두리 높이는 elevation이다.
+    **base>0**(m)이면 테두리 아래로 거친 바위 절벽 받침(떠 있는 섬·디오라마 받침·강가 절벽)을
+    그 두께만큼 만들고 바닥을 닫는다. **elevation**은 지면 전체를 들어 올린다 — 언덕 위 고지대는
+    작은 outline으로 lp.terrain(..., elevation=1.5, base=1.5)를 한 번 더 호출해 본 지면에 파묻어 세운다.
+    color / side_color(r,g,b 0~1)를 주면 윗면·절벽면을 각각 칠한다 — 이 둘로 칠하고 나중에 set_color로
+    전체를 덮어 칠하지 마라(절벽 색이 사라진다). heights[행][열](크기 (행+1)x(열+1), m)을 주면 예전처럼
+    cells 격자에 그 높이를 그대로 쓴다(outline·base 무시). 지형 위 오브젝트는 lp.ground_snap으로 높이를 맞춘다.
+    예: ground = lp.terrain("Isle", outline=[(-14,-8), (-4,-12), (10,-9), (15,2), (8,11), (-6,12), (-15,4)],
+                            relief=0.3, base=2.5, color=(0.45, 0.62, 0.3), side_color=(0.5, 0.5, 0.55))
+    예: hill = lp.terrain("Hill", outline=[(4,4), (10,5), (11,10), (5,11)], elevation=1.5, base=1.8,
+                           color=(0.45, 0.62, 0.3), side_color=(0.5, 0.5, 0.55))"""
+    if heights is not None:
+        obj = _grid_terrain(name, size, cells, heights, relief, seed, outline)
+        if color is not None:
+            from .palette import set_color
+            set_color(obj, color)
+        return obj
+    return _island_terrain(name, size, cells, relief, seed, outline, float(base or 0.0),
+                           float(elevation or 0.0), color, side_color)
 
-    size=(x,y)는 지형 전체 크기 — **정사각형일 필요가 없다.** 강가 마을은 (60, 28),
-    골짜기 요새는 (36, 70)처럼 부지 성격에 맞는 비율로 잡아라.
-    cells=(열,행)은 분할 수로 각 축 최대 48까지만 허용된다(면수 = 열x행).
-    relief는 기복의 전체 높이 폭(m)이며 seed를 바꾸면 다른 지형이 나온다.
-    가장자리는 z=0으로 눌러 씬 경계가 평평해진다.
-    **outline=[(x,y), ...]**(6~12점 다각형, m)을 주면 그 윤곽 안쪽만 남긴 비정형
-    지형이 된다 — 해안선·절벽 끝·숲 경계처럼 부지가 직사각형이 아닐 때 쓴다.
-    이때 size는 무시되고 outline의 경계 상자를 덮는 격자에서 바깥 면을 지운다.
-    heights를 주면 노이즈 대신 그 값을 그대로 쓴다 — heights[행][열] 순서의
-    2D 리스트(크기 (행+1)x(열+1), 단위 m)이고 이때 relief/seed는 무시된다.
-    배경 씬에서는 지형을 먼저 1개 만들고 그 위에 구조물·인스턴스를 올린 뒤
-    lp.ground_snap으로 높이를 맞추는 순서를 권장한다.
-    예: ground = lp.terrain("Ground", size=(64, 40), cells=(24, 15), relief=0.5)
-    예: ground = lp.terrain("Isle", outline=[(-30,-18), (-8,-26), (24,-20), (34,4),
-                            (18,22), (-12,26), (-32,8)], cells=(24, 20), relief=0.4)"""
+
+def _island_terrain(name, size, cells, relief, seed, outline, base, elevation, color, side_color):
+    from mathutils.geometry import delaunay_2d_cdt
+
+    from . import terrain_shape as ts
+    from .palette import set_color
+
+    if outline is not None:
+        poly = ts.ccw(outline)
+        if len(poly) < 3 or abs(ts.signed_area(poly)) < 1e-4:
+            raise ValueError("terrain outline은 넓이가 있는 점 3개 이상의 다각형이어야 한다")
+        # 사용자가 준 6~12점 꺾은선은 도면처럼 각져 보인다 — 둥글게 다듬는다
+        poly = ts.chaikin(poly, 2 if len(poly) >= 6 else 1)   # 점이 적으면 한 번만 — 원처럼 뭉개지지 않게
+    else:
+        sx, sy = float(size[0]) / 2, float(size[1]) / 2
+        poly = [(-sx, -sy), (sx, -sy), (sx, sy), (-sx, sy)]
+    xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+    span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-3)
+    relief = max(0.0, float(relief or 0.0))
+    divisions = max(2, min(int(max(cells)) if cells else 16, _MAX_CELLS))
+    # 격자 한 칸에 삼각형 2개였으므로 정점 간격을 두 칸으로 잡아야 예전 cells와 면수가 비슷하다 —
+    # 로우폴리 지면은 그보다 촘촘할 이유가 없다
+    spacing = span / max(2, divisions // 2)
+    # 테두리 정점 간격: 기복이 있으면 안쪽 정점과 비슷하게, 평지면 윤곽 곡선만 살릴 만큼
+    rim = ts.resample(poly, spacing if relief > 0 else span / 12)
+    inner = ts.interior_points(rim, spacing, seed) if relief > 0 else []
+
+    coarse = _noise_lattice(seed, 3)
+    fine = _noise_lattice(seed + 977, 6)
+    ramp = max(1.0, span * 0.12)
+    x0, y0 = min(xs), min(ys)
+
+    def height(x, y):
+        if relief <= 0:
+            return elevation
+        u, v = (x - x0) / span, (y - y0) / span
+        n = _sample_lattice(coarse, u, v) * 0.67 + _sample_lattice(fine, u, v) * 0.33
+        fall = _smoothstep(min(ts.edge_distance(x, y, rim) / ramp, 1.0))
+        return elevation + (n - 0.5) * relief * fall
+
+    bm = bmesh.new()
+    count = len(rim)
+    if inner:
+        coords = [Vector(p) for p in rim + inner]
+        out_verts, _e, out_faces, _ov, _oe, _of = delaunay_2d_cdt(
+            coords, [], [list(range(count))], 1, 1e-6)
+        verts = [bm.verts.new((v.x, v.y, height(v.x, v.y))) for v in out_verts]
+        for tri in out_faces:
+            try:
+                bm.faces.new([verts[i] for i in tri])
+            except ValueError:
+                pass
+        # CDT 출력 정점 순서는 입력과 다르다 — 테두리 고리는 위치로 되찾는다
+        rim_verts = []
+        for x, y in rim:
+            rim_verts.append(min(verts, key=lambda v: (v.co.x - x) ** 2 + (v.co.y - y) ** 2))
+    else:
+        rim_verts = [bm.verts.new((x, y, elevation)) for x, y in rim]
+        bm.faces.new(rim_verts)
+    top_faces = list(bm.faces)
+
+    side_faces = []
+    if base > 0:
+        # 두 단 고리로 바위 절벽을 만든다: 중간 단은 거칠게 들쭉날쭉, 바닥은 안쪽으로 모인다
+        mid = ts.offset_ring(rim, base * 0.12, jitter=base * 0.12, seed=seed + 11)
+        low = ts.offset_ring(rim, base * 0.45, jitter=base * 0.15, seed=seed + 23)
+        rng = random.Random(seed + 31)
+        mid_verts = [bm.verts.new((x, y, elevation - base * (0.45 + (rng.random() - 0.5) * 0.2)))
+                     for x, y in mid]
+        low_verts = [bm.verts.new((x, y, elevation - base)) for x, y in low]
+        for ring_a, ring_b in ((rim_verts, mid_verts), (mid_verts, low_verts)):
+            for i in range(count):
+                j = (i + 1) % count
+                quad = [ring_a[i], ring_b[i], ring_b[j], ring_a[j]]
+                try:
+                    side_faces.append(bm.faces.new(quad))
+                except ValueError:
+                    pass
+        try:
+            side_faces.append(bm.faces.new(list(reversed(low_verts))))
+        except ValueError:
+            pass
+    if side_faces:
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)   # 받침까지 닫힌 덩어리 — 바깥 기준이 선다
+    bm.normal_update()
+    for face in top_faces:
+        if face.normal.z < 0:   # 윗면은 반드시 위를 본다
+            face.normal_flip()
+    bm.faces.index_update()
+    top_ids = [f.index for f in top_faces]
+    side_ids = [f.index for f in side_faces]
+    obj = _new_object(name, bm, (0, 0, 0), (0, 0, 0), (1, 1, 1))
+    for poly_ in obj.data.polygons:
+        poly_.use_smooth = False  # 로우폴리 플랫 셰이딩
+    if color is not None:
+        set_color(obj, color, faces=top_ids)
+    if side_faces:
+        set_color(obj, side_color if side_color is not None else (0.5, 0.5, 0.55), faces=side_ids)
+    return obj
+
+
+def _grid_terrain(name, size, cells, heights, relief, seed, outline):
+    """heights를 직접 준 경우의 예전 격자 지형."""
     cx = max(1, min(int(cells[0]), _MAX_CELLS))
     cy = max(1, min(int(cells[1]), _MAX_CELLS))
     poly = None
@@ -621,28 +732,33 @@ def ground_snap(objs, ground) -> None:
     """오브젝트들을 지형 표면 높이에 맞춰 Z만 내린다(단위 m). 반환값 없음.
 
     각 오브젝트의 (x,y)에서 위에서 아래로 레이캐스트해 ground와 만나는 높이를
-    obj.location.z에 넣는다. 오브젝트 원점이 바닥 중앙이라는 전제이며(시스템이
+    obj.location.z에 넣는다. ground는 지형 하나 또는 리스트다 — 본 지면과 고지대 언덕을 함께 넘기면
+    그 자리에서 가장 높은 면에 놓는다. 오브젝트 원점이 바닥 중앙이라는 전제이며(시스템이
     마무리 단계에서 보장한다) 지형 밖이라 히트가 없으면 기존 z를 유지한다.
     objs는 오브젝트 하나 또는 리스트다 — lp.place_* 결과를 그대로 넘기면 된다.
     배치가 모두 끝난 뒤 마지막에 한 번 호출하는 것이 정석이다.
-    예: lp.ground_snap(lp.place_scatter(lp.kit("tree"), 20, area=(36, 36)), ground)"""
+    예: lp.ground_snap(lp.place_scatter(lp.kit("tree"), 20, area=(36, 36)), [ground, hill])"""
     bpy.context.view_layer.update()  # location 변경을 matrix_world에 반영
     items = [objs] if isinstance(objs, bpy.types.Object) else list(objs)
-    mw = ground.matrix_world
-    inv = mw.inverted()
-    zs = [(mw @ Vector(corner)).z for corner in ground.bound_box]
-    top, bottom = max(zs) + 10.0, min(zs) - 10.0
+    grounds = [ground] if isinstance(ground, bpy.types.Object) else list(ground)
     for obj in items:
         world = obj.matrix_world.translation
-        start = inv @ Vector((world.x, world.y, top))
-        end = inv @ Vector((world.x, world.y, bottom))
-        ray = end - start
-        if ray.length < 1e-6:
-            continue
-        hit, location, _normal, _index = ground.ray_cast(
-            start, ray.normalized(), distance=ray.length)
-        if hit:
-            obj.location.z = (mw @ location).z
+        best = None
+        for g in grounds:
+            mw = g.matrix_world
+            inv = mw.inverted()
+            zs = [(mw @ Vector(corner)).z for corner in g.bound_box]
+            start = inv @ Vector((world.x, world.y, max(zs) + 10.0))
+            end = inv @ Vector((world.x, world.y, min(zs) - 10.0))
+            ray = end - start
+            if ray.length < 1e-6:
+                continue
+            hit, location, _normal, _index = g.ray_cast(start, ray.normalized(), distance=ray.length)
+            if hit:
+                z = (mw @ location).z
+                best = z if best is None else max(best, z)
+        if best is not None:
+            obj.location.z = best
 
 
 def kit(name) -> bpy.types.Object:

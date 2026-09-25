@@ -55,15 +55,21 @@ class TestExtent(unittest.TestCase):
         self.assertEqual(out["scene"]["extent"], [120.0, 60.0])
 
     def test_oversized_extent_is_scaled_down_keeping_ratio(self):
-        out, warnings = scene_plan.normalize(_plan(extent=[400, 200]), 0, 24)
+        # 규모는 참고 크기라 넓은 부지도 받되, 터무니없는 값(참고의 4배 초과)만 막는다
+        out, warnings = scene_plan.normalize(_plan(extent=[1000, 500]), 0, 24)
         w, h = out["scene"]["extent"]
-        self.assertLessEqual(w * h, 100 * 100 * 1.6 + 1)
+        self.assertLessEqual(max(w, h), 100 * 4 + 1e-6)
         self.assertAlmostEqual(w / h, 2.0, places=1)
         self.assertTrue(any("extent" in x for x in warnings))
 
-    def test_tiny_extent_is_lifted_to_minimum(self):
+    def test_small_extent_is_kept_for_real_size(self):
+        # 규모 한 변은 참고 크기다 — 작은 부지를 규모 크기로 부풀리면 가구가 넓은 바닥에 흩어진다
         out, _ = scene_plan.normalize(_plan(extent=[5, 5]), 0, 24)
-        self.assertGreaterEqual(min(out["scene"]["extent"]), 40.0)  # 규모의 40%
+        self.assertEqual(out["scene"]["extent"], [5.0, 5.0])
+
+    def test_degenerate_extent_is_lifted(self):
+        out, _ = scene_plan.normalize(_plan(extent=[0.3, 0.3]), 0, 24)
+        self.assertGreaterEqual(min(out["scene"]["extent"]), 2.4)
 
 
 class TestOutline(unittest.TestCase):

@@ -49,21 +49,23 @@
 
 ```json
 {
-  "scene": {"size": "S|M|L", "palette": ["#rrggbb", "..."], "mood": "분위기 한 줄",
+  "scene": {"size": "S|SPOT|SITE|M|L", "palette": ["#rrggbb", "..."], "mood": "분위기 한 줄",
             "extent": [폭, 깊이], "outline": [[x, y], "... 6~12점 (선택)"]},
-  "terrain": {"relief": 0.0, "style": "지면 성격 한 줄"},
+  "terrain": {"relief": 0.0, "base": 0.0, "style": "지면 성격 한 줄"},
   "zones": [{"name": "영문 슬러그", "center": [x, y], "extent": [w, h], "rotation": 도, "purpose": "구역 역할"}],
   "assets": [{"key": "영문 슬러그", "prompt": "모델링 요청문", "count": 1,
-              "size_class": "L|M|S", "zone": "구역 name", "landmark": false}],
+              "colors": "부위별 고유색 한 줄", "size_class": "L|M|S", "zone": "구역 name", "landmark": false}],
   "rules": ["배치 턴에서 지킬 규칙 한 줄씩"]
 }
 ```
 
-- `scene.extent`는 부지 [폭, 깊이](m)다. **정사각형으로 두지 마라** — 비율 1:1.3~1:2로 지형·강·길에 맞춘다. 규모의 한 변은 "긴 변의 기준"일 뿐이다.
+- `scene.extent`는 부지 [폭, 깊이](m)다. **정사각형으로 두지 마라** — 비율 1:1.3~1:2로 지형·강·길에 맞춘다. 규모의 한 변은 **참고 크기**일 뿐이다 — 부지는 컨셉의 공간감과 들어갈 물건의 실제 치수로 산정한다(거실 4~6m, 캠프 한 곳 8~14m).
 - `scene.outline`(선택)은 부지의 비정형 윤곽 다각형 6~12점이다. 해안선·능선·숲 경계·성벽 안쪽처럼 부지가 직사각형이 아닐 때 넣으면 배치 턴이 `lp.terrain(outline=...)`으로 그대로 쓴다. 넣을 수 있으면 넣어라.
 - `zones[].rotation`(도)은 그 구역의 배치 축이다. 구역마다 다르게 주어 축에 나란한 구역이 없게 하라(0이면 도면처럼 보인다).
 - `key`는 영문 소문자·숫자·밑줄만 쓴다(예: `watchtower`, `dead_tree`). 중복 금지.
 - `prompt`는 그 에셋 **하나**를 만드는 요청문이다. 개수·배치는 쓰지 마라 (`count`가 담당한다).
+- `colors`는 그 에셋의 **부위별 고유색**이다(예: "차체 연회색, 허리 베이지 띠, 분홍 차양, 검은 타이어·창"). 컨셉 시트·참조 이미지에서 **그 물건을 찾아 보이는 색 그대로** 적어라. 에셋 잡은 시트를 보지 못하고 이 글만 받는다 — 비워 두거나 씬 팔레트로 뭉개면 RV가 길 색, 텐트·의자가 풀 색이 되어 배경에 묻힌다.
+- `terrain.base`(m)는 지면 테두리 아래 바위 절벽 받침 두께다. 컨셉 시트·참조가 **떠 있는 섬·디오라마 받침·절벽 둘레**면 1.5~4, 그냥 평지로 이어지는 땅이면 0.
 - `size_class`는 에셋 1개의 트라이 상한 등급이다 (실제 수치는 유저 프롬프트가 스타일에 맞춰 알려준다). 이 상한은 **에셋 1개** 기준이지 씬 전체 예산이 아니다.
 - `zone`은 반드시 `zones`에 있는 `name` 중 하나여야 한다.
 - `landmark`는 씬의 시선을 잡는 주 구조물에만 `true` (1~2개).
@@ -74,11 +76,11 @@
 
 1. **랜드마크 1~2개**: 씬에서 가장 큰 질량 하나를 정하고 사실 대비 **130~160%**로 과장하라. 랜드마크가 없으면 공간이 평평하게 읽힌다.
 2. **반복 프랍은 종류를 줄이고 개수를 늘려라**: 종류는 3~5종으로 제한하되 **개수는 아끼지 마라**. 같은 프랍을 **회전·스케일 지터**로 변주해 밀도를 채운다 — 인스턴스는 메시를 공유하므로 개수를 늘려도 드로우콜이 늘지 않는다. 종류를 늘리는 것만 비싸다.
-3. **씬 팔레트 3~5색 + 악센트 1색**: 지면·구조물·자연물의 주조색을 먼저 정하고, 채도 높은 악센트는 랜드마크와 동선 표시에만 쓴다.
+3. **씬 팔레트 3~5색 + 악센트 1색**: 지면·길·절벽·물·배치 턴 구조물의 주조색이다. 채도 높은 악센트는 랜드마크와 동선 표시에만 쓴다. **에셋 색은 팔레트가 아니라 각 에셋의 `colors`가 정한다.**
 4. **빈 구역은 하나만, 나머지는 채워라**: 중앙 광장·연병장·마당처럼 **의도적으로 비운 구역을 하나** 두되, 그 구역 밖까지 성기게 만들지 마라. 전체를 고르게 듬성듬성 깔면 "넓은 빈 땅"이 되지 "빈 공간의 대비"가 되지 않는다. 비운 구역은 씬 면적의 20~30%가 적당하다.
 5. **구역 경계에 리듬**: 직선 경계(담장·길가)에는 소품을 일정 간격으로 두되 간격을 미세하게 흔들어라. 완벽한 등간격은 기계적으로 보인다.
 6. **동선은 랜드마크로 향한다**: 길(`lp.path_strip`)은 씬 가장자리에서 시작해 랜드마크 입구에서 끝나게 하라. 길이 어디로도 가지 않으면 공간이 읽히지 않는다.
-7. **지면 과장 금지**: 지형 릴리프는 0.1~0.6 범위의 완만한 기복이다. 땅이 프랍보다 튀면 안 된다. 땅의 변화는 색 2톤과 완만한 기복으로만 준다.
+7. **지면은 격자가 아니라 형태다**: `lp.terrain`은 윤곽 다각형 하나로 지면을 만든다 — 평지면 `relief=0`(윗면 1개), 완만한 기복이 필요할 때만 0.1~0.6. 땅이 프랍보다 튀면 안 된다. 원화의 지형 구성은 **층과 경계로** 재현하라: 떠 있는 섬·절벽은 `base`, 언덕 위 고지대는 작은 outline + `elevation`/`base`로 지형을 한 번 더 세워 본 지면에 파묻고, 강·호수는 지면 윤곽 밖에 `relief=0, elevation=-0.3`의 물색 지형으로, 흙마당·광장은 `lp.path_strip`이나 작은 평지 지형으로 색을 나눈다.
 8. **구역마다 밀도를 다르게**: 밀집 구역(막사·시장)과 희박 구역(들판·연병장)을 대비시켜라. 전체가 고르게 차 있으면 어디를 봐야 할지 알 수 없다.
 9. **규칙성은 결함이다 (계획도시 요청 외)**: 정사각 부지, XY축에 나란한 구역, 직선·직각 동선, 등간격 격자 배치는 도면처럼 보여 원화의 느낌을 죽인다. 부지는 비정형 `outline`, 구역은 `rotation`, 길·성벽은 굽은 폴리라인(`lp.meander`), 집·노점은 군집(`lp.place_cluster`), 길가 배치는 지터(`place_along`의 `*_jitter`)로 깨라. 실제 마을은 길이 먼저 굽고 집이 그 길을 따라 불규칙하게 서며, 격자로 정렬되는 것은 군 막사·묘지·밭·근대 계획도시뿐이다.
 
@@ -111,7 +113,7 @@
     "extent": [52, 34],
     "outline": [[-26, -14], [-18, -19], [6, -17], [24, -11], [27, 6], [14, 17], [-9, 16], [-25, 8]]
   },
-  "terrain": {"relief": 0.25, "style": "마른 흙바닥에 잔디 패치가 드문드문"},
+  "terrain": {"relief": 0.25, "base": 0.0, "style": "마른 흙바닥에 잔디 패치가 드문드문"},
   "zones": [
     {"name": "gate", "center": [-4, -15], "extent": [14, 8], "rotation": 12, "purpose": "정문과 검문소, 씬 진입 동선의 시작"},
     {"name": "yard", "center": [2, -1], "extent": [24, 16], "rotation": -8, "purpose": "중앙 연병장 — 의도적으로 비워 둔다"},
@@ -119,12 +121,12 @@
     {"name": "perimeter", "center": [0, 0], "extent": [52, 34], "rotation": 0, "purpose": "outline을 따라 도는 철조망과 감시탑"}
   ],
   "assets": [
-    {"key": "watchtower", "prompt": "나무 기둥 감시탑, 경사 사다리, 지붕 덮인 전망대, 서치라이트 하나", "count": 2, "size_class": "L", "zone": "perimeter", "landmark": true},
-    {"key": "barrack", "prompt": "길쭉한 단층 목조 막사, 박공지붕, 작은 창 4개, 짧은 계단", "count": 3, "size_class": "L", "zone": "barracks", "landmark": false},
-    {"key": "guard_post", "prompt": "작은 검문소 초소, 차단봉, 창문 하나", "count": 1, "size_class": "M", "zone": "gate", "landmark": false},
-    {"key": "dead_tree", "prompt": "잎 없는 마른 나무, 굽은 줄기와 가지 3개", "count": 4, "size_class": "M", "zone": "perimeter", "landmark": false},
-    {"key": "barrel", "prompt": "녹슨 금속 드럼통, 금속 밴드 2개", "count": 6, "size_class": "S", "zone": "yard", "landmark": false},
-    {"key": "crate", "prompt": "나무 보급 상자, 모서리 보강대", "count": 8, "size_class": "S", "zone": "yard", "landmark": false}
+    {"key": "watchtower", "prompt": "나무 기둥 감시탑, 경사 사다리, 지붕 덮인 전망대, 서치라이트 하나", "count": 2, "colors": "기둥·사다리 짙은 갈색 나무, 전망대 지붕 녹슨 붉은 함석, 서치라이트 흰 유리", "size_class": "L", "zone": "perimeter", "landmark": true},
+    {"key": "barrack", "prompt": "길쭉한 단층 목조 막사, 박공지붕, 작은 창 4개, 짧은 계단", "count": 3, "colors": "벽 바랜 회갈색 판자, 지붕 검회색 타르지, 창틀 흰색", "size_class": "L", "zone": "barracks", "landmark": false},
+    {"key": "guard_post", "prompt": "작은 검문소 초소, 차단봉, 창문 하나", "count": 1, "colors": "벽 올리브색, 차단봉 흰색·붉은 줄무늬", "size_class": "M", "zone": "gate", "landmark": false},
+    {"key": "dead_tree", "prompt": "잎 없는 마른 나무, 굽은 줄기와 가지 3개", "count": 4, "colors": "줄기·가지 회갈색", "size_class": "M", "zone": "perimeter", "landmark": false},
+    {"key": "barrel", "prompt": "녹슨 금속 드럼통, 금속 밴드 2개", "count": 6, "colors": "몸통 녹슨 주황갈색, 밴드 어두운 회색", "size_class": "S", "zone": "yard", "landmark": false},
+    {"key": "crate", "prompt": "나무 보급 상자, 모서리 보강대", "count": 8, "colors": "상자 밝은 나무색, 보강대 어두운 갈색", "size_class": "S", "zone": "yard", "landmark": false}
   ],
   "rules": [
     "감시탑 2개는 outline의 서로 먼 꼭짓점 근처에 두어 시선을 잡는다",
@@ -143,8 +145,12 @@
 # 고대 성(L): 비정형 부지 → 굽은 성벽·길 → 군집 배치 → ground_snap
 # 부지는 플랜의 scene.outline(능선 위 길쭉한 요새)을 그대로 쓴다 — 정사각형 지형 금지
 OUTLINE = [(-52, -20), (-30, -34), (12, -38), (48, -22), (56, 8), (30, 34), (-14, 36), (-50, 14)]
-ground = lp.terrain("Ground", outline=OUTLINE, cells=(30, 22), relief=0.5, seed=7)
-lp.set_color(ground, (0.42, 0.52, 0.30))
+ground = lp.terrain("Ground", outline=OUTLINE, cells=(20, 14), relief=0.4, seed=7, base=3.0,
+                    color=(0.42, 0.52, 0.30), side_color=(0.50, 0.49, 0.52))
+# 성채가 선 언덕은 작은 윤곽을 들어 올려 본 지면에 파묻는다 — 격자 기복으로 흉내 내지 않는다
+hill = lp.terrain("KeepHill", outline=[(10, 10), (30, 8), (36, 24), (22, 32), (8, 24)],
+                  relief=0.0, elevation=2.0, base=2.4,
+                  color=(0.40, 0.50, 0.29), side_color=(0.50, 0.49, 0.52))
 # 성벽은 outline을 안쪽으로 줄인 다각형을 meander로 살짝 굽혀 — 직각 사각 둘레가 아니다
 inner = [(x * 0.72, y * 0.72) for x, y in OUTLINE]
 wall = lp.wall_run(lp.meander(inner, amount=1.2, subdivisions=1, seed=2), height=6.0,
@@ -166,5 +172,5 @@ stalls = lp.place_along(lp.kit("stall"), road_pts[2:6], spacing=5.0, offset_jitt
                         spacing_jitter=0.3, rotate_jitter=20.0, seed=5)
 trees = lp.place_cluster(lp.kit("tree"), 30, centers=[(-44, 0), (40, -12), (10, 30)],
                          radius=10.0, min_dist=3.5, scale_jitter=0.25, seed=11)
-lp.ground_snap([keep, gate, *towers, *houses, *stalls, *trees], ground)
+lp.ground_snap([keep, gate, *towers, *houses, *stalls, *trees], [ground, hill])  # 언덕 위는 언덕 높이로
 ```

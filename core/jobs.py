@@ -320,28 +320,80 @@ def reset_stale(props) -> int:
     return fixed
 
 
-def apply_lane_offset(collection_name: str, lane: int, spacing: float = None):
-    """완료된 결과를 레인 번호만큼 Y축으로 밀어 배치 결과가 겹치지 않게 한다.
+PLACE_MARK = "lp3d_offset"  # 컬렉션에 남기는 적용 오프셋 (x, y) — 나중에 생긴 오브젝트도 같은 자리로
+
+
+def _plan_box(objs):
+    """오브젝트들의 월드 평면 AABB (x0, y0, x1, y1). 기하가 없으면 None."""
+    from mathutils import Vector
+    xs, ys = [], []
+    for obj in objs:
+        if obj.type not in {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT', 'VOLUME', 'POINTCLOUD', 'CURVES'}:
+            continue
+        for corner in obj.bound_box:
+            p = obj.matrix_world @ Vector(corner)
+            xs.append(p.x)
+            ys.append(p.y)
+    return (min(xs), min(ys), max(xs), max(ys)) if xs else None
+
+
+def _occupied_boxes(coll):
+    """이미 자리를 잡은 것들의 평면 상자 — 사용자 오브젝트, 배치가 끝난 결과.
+
+    아직 생성 중인 다른 잡(원점에서 조립 중)은 곧 자기 자리로 옮겨 가므로 장애물로 치지 않는다.
+    숨긴 컬렉션(배경 키트 원본 등)도 보이지 않으니 뺀다."""
+    own = set(coll.all_objects)
+    job_colls = set()
+    for scene in bpy.data.scenes:
+        props = getattr(scene, "lp3d", None)
+        for job in (getattr(props, "jobs", None) or []):
+            if job.collection_name:
+                job_colls.add(job.collection_name)
+    boxes = []
+    scene = bpy.context.scene
+    for obj in scene.objects:
+        if obj in own:
+            continue
+        try:
+            if not obj.visible_get():
+                continue
+        except RuntimeError:
+            continue
+        pending = obj.get(LANE_MARK) is None and any(
+            c.name in job_colls and c.get(PLACE_MARK) is None for c in obj.users_collection)
+        if pending:
+            continue
+        box = _plan_box([obj])
+        if box:
+            boxes.append(box)
+    return boxes
+
+
+def apply_lane_offset(collection_name: str, lane: int = 0, spacing: float = None):
+    """완료된 결과를 씬의 빈자리로 옮겨 다른 결과·오브젝트와 겹치지 않게 한다.
 
     생성 코드는 항상 원점 기준으로 작성되므로, 마무리 직전에 한 번만 적용한다.
-
-    이동은 상대 이동이라 누적된다. 그래서 이미 민 오브젝트에는 적용한 레인을 표식으로
-    남기고 차분(lanes.lane_shift)만 적용해 두 번 밀지 않는다 — 코드가 다시 실행되면
-    오브젝트가 새로 생겨 표식이 없으므로 정상적으로 밀린다.
-
-    spacing을 주면 레인 간격을 바꾼다 — 배경 공간처럼 결과가 넓게 퍼지는 잡은
-    기본 간격으로는 옆 레인과 겹친다."""
+    이동은 상대 이동이라 누적된다. 그래서 옮긴 오브젝트에는 표식을, 컬렉션에는 적용한 오프셋을
+    남긴다 — 코드가 다시 실행돼 새로 생긴 오브젝트만 같은 오프셋으로 따라가고 두 번 밀리지 않는다.
+    lane·spacing은 예전 레인 방식의 인자로, 자리는 이제 실제 점유 영역으로 정한다."""
     coll = bpy.data.collections.get(collection_name)
     if not coll:
         return
-    gap = lanes.LANE_SPACING if spacing is None else spacing
     # all_objects: 자식 컬렉션에 담긴 오브젝트까지 같이 민다 — 결과와 같은 자리에 있어야 한다
-    for obj in coll.all_objects:
-        if obj.parent is not None:  # 자식은 부모를 따라 움직인다
-            continue
-        applied = obj.get(LANE_MARK)
-        dy = lanes.lane_shift(applied, lane, gap)
-        if not dy and applied is None:
-            continue  # 레인 0 — 옮길 것도, 남길 표식도 없다
-        obj.location.y += dy
+    fresh = [o for o in coll.all_objects if o.parent is None and o.get(LANE_MARK) is None]
+    if not fresh:
+        return
+    offset = coll.get(PLACE_MARK)
+    if offset is None:
+        bpy.context.view_layer.update()
+        box = _plan_box([o for o in coll.all_objects])
+        if box is None:
+            offset = (0.0, 0.0)   # 기하가 없어도 표식은 남긴다 — 안 남기면 영원히 '생성 중'으로 보인다
+        else:
+            margin = max(lanes.PLACE_MARGIN, 0.1 * max(box[2] - box[0], box[3] - box[1]))
+            offset = (lanes.free_offset(box, _occupied_boxes(coll), margin), 0.0)
+        coll[PLACE_MARK] = offset
+    for obj in fresh:
+        obj.location.x += offset[0]
+        obj.location.y += offset[1]
         obj[LANE_MARK] = lane

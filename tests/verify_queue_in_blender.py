@@ -83,21 +83,29 @@ try:
         jobs.remove_job(bpy.context, 0)
     check("전부 삭제 후 active_job=None", props.active_job() is None)
 
-    # 6) 레인 오프셋 멱등성 — 재적용으로 모델이 중복 이동하지 않아야 한다.
-    coll = bpy.data.collections.new("LP3D_LaneProbe")
-    bpy.context.scene.collection.children.link(coll)
-    obj = bpy.data.objects.new("LP3D_LaneProbeObj", bpy.data.meshes.new("LP3D_LaneProbeMesh"))
-    coll.objects.link(obj)
-    jobs.apply_lane_offset("LP3D_LaneProbe", 2)
-    once = obj.location.y
-    check("레인 2 적용", abs(once - lanes.lane_dy(2)) < 1e-6, f"y={once}")
-    jobs.apply_lane_offset("LP3D_LaneProbe", 2)
-    check("같은 레인 재적용은 이동 없음", abs(obj.location.y - once) < 1e-6,
-          f"{once} -> {obj.location.y}")
-    jobs.apply_lane_offset("LP3D_LaneProbe", 0)
-    check("레인 0 복귀", abs(obj.location.y) < 1e-6, f"y={obj.location.y}")
-    bpy.data.objects.remove(obj)
-    bpy.data.collections.remove(coll)
+    # 6) 빈자리 배치 멱등성 — 재적용으로 모델이 중복 이동하지 않고, 이미 놓인 결과와 겹치지 않아야 한다
+    import bmesh
+    def _cube(name, coll_name):
+        c = bpy.data.collections.new(coll_name)
+        bpy.context.scene.collection.children.link(c)
+        me = bpy.data.meshes.new(name)
+        bm = bmesh.new(); bmesh.ops.create_cube(bm, size=2.0); bm.to_mesh(me); bm.free()
+        o = bpy.data.objects.new(name, me)
+        c.objects.link(o)
+        return c, o
+    coll_a, obj_a = _cube("LP3D_PlaceA", "LP3D_PlaceProbeA")
+    bpy.context.view_layer.update()
+    jobs.apply_lane_offset("LP3D_PlaceProbeA")
+    coll_b, obj_b = _cube("LP3D_PlaceB", "LP3D_PlaceProbeB")
+    bpy.context.view_layer.update()
+    jobs.apply_lane_offset("LP3D_PlaceProbeB")
+    once = obj_b.location.x
+    check("둘째 결과는 첫 결과 옆 빈자리", once - 1.0 >= obj_a.location.x + 1.0 + 0.99, f"x={once}")
+    jobs.apply_lane_offset("LP3D_PlaceProbeB")
+    check("재적용은 이동 없음", abs(obj_b.location.x - once) < 1e-6, f"{once} -> {obj_b.location.x}")
+    for c, o in ((coll_a, obj_a), (coll_b, obj_b)):
+        bpy.data.objects.remove(o)
+        bpy.data.collections.remove(c)
 
     # 7) 스케줄러·세션 유휴 상태
     counts = scheduler.counts()
@@ -319,10 +327,7 @@ try:
                                     bpy.data.meshes.new("LP3D_SceneLaneProbeMesh"))
     lane_coll.objects.link(lane_obj)
     kit_session._apply_lane()
-    check("배경 레인 간격은 씬 크기 기준",
-          abs(lane_obj.location.y - scene_kit.scene_spacing('M')) < 1e-6,
-          f"y={lane_obj.location.y}")
-    check("기본 레인 간격보다 넓음", scene_kit.scene_spacing('M') > lanes.LANE_SPACING)
+    check("배경 결과에 배치 표식", lane_coll.get(jobs.PLACE_MARK) is not None)
 
     # 14) 익스포트 — 인스턴스(공유 메시)가 나가고 키트 컬렉션은 따라가지 않아야 한다
     export_kit = bpy.data.collections.new(kit_session.kit_collection_name)

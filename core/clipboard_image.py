@@ -56,9 +56,12 @@ def is_supported() -> bool:
     return sys.platform in ("darwin", "win32")
 
 
+ARCHIVE_PREFIX = "LP3D_ref_clipboard_"  # 붙여넣기 결과 파일명 접두어 — 결과 폴더로 옮길 대상 판별에도 쓴다
+
+
 def target_path(directory: str) -> str:
     """붙여넣은 이미지를 저장할 경로 — 겹치지 않게 시각을 붙인다."""
-    return os.path.join(directory, f"LP3D_ref_clipboard_{time.strftime('%Y%m%d-%H%M%S')}.png")
+    return os.path.join(directory, f"{ARCHIVE_PREFIX}{time.strftime('%Y%m%d-%H%M%S')}.png")
 
 
 def _run(cmd, cwd=None, flags=0) -> str:

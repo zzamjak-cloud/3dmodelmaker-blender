@@ -51,7 +51,7 @@ def bbox_world(obj):
 # --- terrain: 면수 상한, 가장자리 z=0, 셀 클램프 ---
 new_scene()
 ground = lp.terrain("Ground", size=(40.0, 40.0), cells=(16, 16), relief=0.6, seed=3)
-check("terrain 면수 == 셀 곱", len(ground.data.polygons) == 16 * 16)
+check("terrain 면수는 격자(16x16)보다 성기다", 0 < len(ground.data.polygons) < 16 * 16)
 edge_z = [v.co.z for v in ground.data.vertices
           if abs(abs(v.co.x) - 20.0) < 1e-4 or abs(abs(v.co.y) - 20.0) < 1e-4]
 check("terrain 가장자리 z≈0", edge_z and max(abs(z) for z in edge_z) < 1e-4)
@@ -60,7 +60,9 @@ check("terrain 릴리프가 relief 범위 안", (max(inner_z) - min(inner_z)) <=
 check("terrain 릴리프가 평평하지 않음", (max(inner_z) - min(inner_z)) > 0.1)
 check("terrain 플랫 셰이딩", all(not p.use_smooth for p in ground.data.polygons))
 big = lp.terrain("Big", size=(80.0, 80.0), cells=(200, 200))
-check("terrain 셀 수 48 클램프", len(big.data.polygons) == 48 * 48)
+check("terrain 셀 수 48 클램프", len(big.data.polygons) <= 48 * 48 * 2)
+flat = lp.terrain("Flat", size=(20.0, 12.0), relief=0.0)
+check("평지 terrain은 윗면 하나", len(flat.data.polygons) == 1)
 # 에이전트가 heights 자리만 채워 보내는 일이 흔하다 — 터지지 말고 노이즈로 되돌아가야 한다
 for bad in ([], [[]], [[None]], "높이", 3):
     try:

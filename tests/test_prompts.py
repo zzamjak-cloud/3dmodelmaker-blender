@@ -143,5 +143,21 @@ class TestScenePromptBuilders(unittest.TestCase):
         self.assertIn("STATUS: PLAN", p)
 
 
+class TestSceneAssetColors(unittest.TestCase):
+    """에셋 잡은 시트를 못 보고 글만 받는다 — 플랜이 읽은 고유색이 그대로 가야 한다."""
+
+    def test_asset_colors_override_scene_palette(self):
+        p = prompts.build_scene_asset_prompt(
+            {"key": "rv", "prompt": "캠핑용 RV", "colors": "차체 연회색, 베이지 띠, 분홍 차양"},
+            ["#6f9a4a", "#e0c89a"], 2500)
+        self.assertIn("차체 연회색, 베이지 띠, 분홍 차양", p)
+        self.assertNotIn("이 색들 위주로", p)
+
+    def test_missing_colors_asks_for_own_colors_distinct_from_ground(self):
+        p = prompts.build_scene_asset_prompt({"key": "tent", "prompt": "텐트"}, ["#6f9a4a"], 800)
+        self.assertIn("고유색", p)
+        self.assertIn("#6f9a4a", p)
+
+
 if __name__ == "__main__":
     unittest.main()

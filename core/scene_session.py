@@ -90,6 +90,10 @@ class SceneSession(GenerationSession):
         runner.run_cli_async(cmd, self.workdir, self.timeout, self._on_response,
                              stdin_text=prompt, job_key=self.uid)
 
+    def _save_collections(self):
+        # 인스턴스는 키트 원본 메시를 공유한다 — 키트를 숨긴 채 함께 담아야 파일을 열어도 편집할 수 있다
+        return [self.collection_name], [self.kit_collection_name]
+
     def _apply_lane(self):
         # 배경 결과는 수십 미터에 걸치므로 기본 4m 간격으로는 옆 레인과 겹친다
         jobs.apply_lane_offset(self.collection_name, self.lane,
@@ -121,6 +125,8 @@ class SceneSession(GenerationSession):
         if path:
             self.sceneview = path
             saved = sceneview.archive(path, self.request)
+            if saved:
+                self.archived.append(saved)
             job = self._job()
             if job:
                 job.multiview_path = saved or path  # 패널 썸네일은 같은 칸을 쓴다
@@ -380,7 +386,12 @@ class SceneSession(GenerationSession):
             return
         lowpoly.set_kit_collection(self.kit_collection_name)
         self.kit_manifest = manifest
-        self.place_plan = scene_kit.prune_plan(self.plan, manifest)
+        self.place_plan, scale = scene_plan.fit_to_kit(
+            scene_kit.prune_plan(self.plan, manifest), manifest, self.scene_size)
+        if scale != 1.0:
+            extent = self.place_plan["scene"]["extent"]
+            self._log_line(f"키트 실제 치수에 맞춰 부지를 {scale:.2f}배로 조정했다 "
+                           f"({extent[0]}x{extent[1]}m) — 흩어지거나 파묻히지 않게")
         dropped = scene_kit.dropped_assets(self.plan, manifest)
         self._set_status(f"키트 준비 완료 ({len(manifest)}종)",
                          f"키트 정리 완료: {', '.join(scene_kit.manifest_keys(manifest))}"
@@ -477,13 +488,20 @@ class SceneSession(GenerationSession):
 
     # ---------- ⑥ 마무리 ----------
     def _blender_finalize(self):
-        from ..lowpoly.cleanup import collection_tri_count, game_ready
+        from ..lowpoly.cleanup import collection_tri_count, game_ready, resolve_coplanar_faces
 
         self._set_status("마무리 정리중...", phase='FINAL')
         coll = bpy.data.collections.get(self.collection_name)
         if not coll:
             self._finish("실패: 생성된 오브젝트 없음", ok=False)
             return
+        # 배치 턴이 새로 만든 지형·벽·방·상자끼리 맞닿은 면만 정리한다. 인스턴스까지 넣으면
+        # 수백 개 x 에셋 면수를 훑어 UI가 멈춘다 — 에셋 내부는 키트 단계에서 이미 정리됐다.
+        try:
+            resolve_coplanar_faces([o for o in coll.objects
+                                    if o.type == 'MESH' and o.data.users == 1])
+        except Exception:   # 정리 실패가 완성된 배치를 버리게 하면 안 된다
+            _log.exception("동일평면 겹침 정리 실패")
         # 은면 컬링은 키트 단계에서 에셋마다 이미 끝났다 — 씬 규모로 다시 돌리면
         # 면수x레이 방향만큼 UI가 수십 초 멈춘다.
         # 인스턴스는 메시를 공유하므로 game_ready(트랜스폼 굽기)를 적용하면 안 된다.

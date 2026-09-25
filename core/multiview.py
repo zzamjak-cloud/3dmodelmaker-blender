@@ -114,6 +114,27 @@ def archive(src: str, request: str) -> str:
         return ""
 
 
+# 결과 폴더(autosave)로 옮겨진 시트의 이름 — 옮긴 뒤에도 '저장된 멀티뷰 불러오기'가 찾도록
+RESULT_SHEET_NAMES = ('멀티뷰', '턴어라운드', '정면원화')
+
+
+def result_group_dirs() -> list:
+    """보관 폴더 아래 모드별 결과 폴더들 (<보관>/<모드>/<이름>/)."""
+    from .autosave import MODE_DIRS
+    root = archive_dir()
+    if not root:
+        return []
+    out = []
+    for mode in MODE_DIRS.values():
+        base = os.path.join(root, mode)
+        try:
+            out += [os.path.join(base, n) for n in os.listdir(base)
+                    if os.path.isdir(os.path.join(base, n))]
+        except OSError:
+            continue
+    return out
+
+
 def latest_in(directories) -> str:
     """주어진 폴더들에서 가장 최근에 저장된 멀티뷰 시트 경로 (없으면 빈 문자열)."""
     best, best_mtime = "", -1.0
@@ -125,7 +146,11 @@ def latest_in(directories) -> str:
         except OSError:
             continue
         for name in names:
-            if not name.startswith(ARCHIVE_PREFIX) or not name.lower().endswith(".png"):
+            stem = os.path.splitext(name)[0]
+            is_result_sheet = any(stem == n or (stem.startswith(n + "_") and stem[len(n) + 1:].isdigit())
+                                  for n in RESULT_SHEET_NAMES)
+            if (not (name.startswith(ARCHIVE_PREFIX) or is_result_sheet)
+                    or not name.lower().endswith(".png")):
                 continue
             path = os.path.join(directory, name)
             try:
@@ -142,7 +167,7 @@ def latest_archived() -> str:
 
     세션 상태(multiview_path)는 Blender를 다시 켜면 사라지지만 파일은 남는다 —
     지난 세션에서 만든 시트를 다시 열어볼 수 있도록 파일 쪽에서 되찾는다."""
-    return latest_in([archive_dir(), blend_dir()])
+    return latest_in([archive_dir(), blend_dir()] + result_group_dirs())
 
 
 def build_command(exe: str, work_dir: str, ref_image: str = None) -> list:

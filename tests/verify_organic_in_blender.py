@@ -28,35 +28,55 @@ def check(label, condition, detail=""):
 
 
 def main():
-    # 1. 비정형 지형
+    # 1. 비정형 지형 — 격자가 아니라 윤곽 다각형 지면
+    import bmesh
     hexagon = [(-30, -18), (-8, -26), (24, -20), (34, 4), (18, 22), (-12, 26), (-32, 8)]
+    flat = lp.terrain("FlatIsle", outline=hexagon, relief=0.0)
+    check("평지는 윗면 하나", len(flat.data.polygons) == 1, "%d" % len(flat.data.polygons))
+    check("평지 윗면은 위를 본다", flat.data.polygons[0].normal.z > 0.99)
     ground = lp.terrain("Isle", outline=hexagon, cells=(24, 20), relief=0.4, seed=3)
     full = lp.terrain("Rect", size=(66, 52), cells=(24, 20), relief=0.4, seed=3)
-    check("outline 지형은 직사각 지형보다 면이 적다",
-          len(ground.data.polygons) < len(full.data.polygons),
-          "%d < %d" % (len(ground.data.polygons), len(full.data.polygons)))
-    check("outline 지형에 면이 남아 있다", len(ground.data.polygons) > 100,
+    check("기복 지형은 성긴 삼각형", 30 < len(ground.data.polygons) < 24 * 20 * 2,
           "%d" % len(ground.data.polygons))
+    check("기복 지형 윗면은 모두 위를 본다", all(p.normal.z > 0.2 for p in ground.data.polygons))
     check("outline 지형 원점은 (0,0)", ground.location.length < 1e-6, str(tuple(ground.location)))
-    # 다각형 밖 모서리(경계 상자 구석)에는 면이 없어야 한다
-    corner_faces = [p for p in ground.data.polygons
-                    if p.center.x < -28 and p.center.y > 20]
+    corner_faces = [p for p in ground.data.polygons if p.center.x < -28 and p.center.y > 20]
     check("경계 상자 구석(다각형 밖)에 면이 없다", not corner_faces, "%d개" % len(corner_faces))
-    import bmesh
     bm = bmesh.new()
     bm.from_mesh(ground.data)
     loose = [v for v in bm.verts if not v.link_faces]
+    rim = [e for e in bm.edges if e.is_boundary]
+    # 계단 테두리였다면 축에 나란한 짧은 변이 대부분이다 — 매끈한 윤곽은 그렇지 않다
+    axis = [e for e in rim if min(abs((e.verts[0].co - e.verts[1].co).x),
+                                   abs((e.verts[0].co - e.verts[1].co).y)) < 1e-4]
     bm.free()
     check("outline 지형에 고립 정점 없음", not loose, "%d개" % len(loose))
-    # 정점이 월드 좌표를 그대로 갖는다 (ground_snap 전제)
+    check("테두리가 계단이 아니다", len(axis) < len(rim) * 0.2, "%d/%d" % (len(axis), len(rim)))
     xs = [v.co.x for v in ground.data.vertices]
     check("outline 지형 정점이 다각형 X 범위 안", min(xs) >= -32 - 1e-4 and max(xs) <= 34 + 1e-4,
           "%.1f ~ %.1f" % (min(xs), max(xs)))
     try:
-        lp.terrain("Flat", outline=[(0, 0), (10, 0), (20, 0)], cells=(4, 4))  # 면적 0 다각형
+        lp.terrain("Zero", outline=[(0, 0), (10, 0), (20, 0)], cells=(4, 4))  # 면적 0 다각형
         check("면적 없는 outline은 오류", False, "예외가 나지 않았다")
     except ValueError:
         check("면적 없는 outline은 오류", True)
+
+    # 절벽 받침 + 색
+    isle = lp.terrain("Floating", outline=hexagon, relief=0.3, base=3.0, seed=2,
+                      color=(0.4, 0.65, 0.3), side_color=(0.5, 0.5, 0.55))
+    bm = bmesh.new()
+    bm.from_mesh(isle.data)
+    open_edges = sum(1 for e in bm.edges if e.is_boundary)
+    bm.free()
+    zs = [v.co.z for v in isle.data.vertices]
+    check("받침 지형은 닫힌 덩어리", open_edges == 0, "%d" % open_edges)
+    check("받침 깊이 반영", abs(min(zs) + 3.0) < 1e-4, "%.2f" % min(zs))
+    uv = isle.data.uv_layers.active.data
+    tops = {tuple(round(c, 4) for c in uv[p.loop_indices[0]].uv) for p in isle.data.polygons if p.normal.z > 0.5}
+    sides = {tuple(round(c, 4) for c in uv[p.loop_indices[0]].uv) for p in isle.data.polygons if p.normal.z < 0.3}
+    check("윗면·절벽 색이 다르다", tops and sides and not (tops & sides), "%s / %s" % (tops, sides))
+    hill = lp.terrain("Hill", outline=[(0, 0), (8, 0), (8, 8), (0, 8)], relief=0.0, elevation=1.5, base=2.0)
+    check("고지대 윗면 높이", abs(max(v.co.z for v in hill.data.vertices) - 1.5) < 1e-4)
 
     # 비정사각 지형
     wide = lp.terrain("Wide", size=(64, 40), cells=(24, 15))

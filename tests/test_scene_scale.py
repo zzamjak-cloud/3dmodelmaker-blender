@@ -23,6 +23,28 @@ prompts = _load("prompts_scale", "core/prompts.py")
 
 
 class TestSizeProfile(unittest.TestCase):
+    def test_outdoor_sizes_narrower_than_zone(self):
+        # 구역(M)보다 좁은 옥외 규모가 있어야 가게 한 채·캠프 한 곳을 만들 수 있다
+        for size in ("SPOT", "SITE"):
+            self.assertFalse(scene_plan.is_interior(size))
+            self.assertLess(scene_plan.SCENE_SIZE_M[size], scene_plan.SCENE_SIZE_M["M"])
+        self.assertLess(scene_plan.SCENE_SIZE_M["SPOT"], scene_plan.SCENE_SIZE_M["SITE"])
+        self.assertLess(scene_plan.target_instances("SPOT"), scene_plan.target_instances("SITE"))
+        self.assertLess(scene_plan.target_instances("SITE"), scene_plan.target_instances("M"))
+
+    def test_small_outdoor_plan_keeps_size_and_gets_note(self):
+        p = prompts.build_scene_plan_prompt("주유소 한 곳", "SITE", 0, 12)
+        self.assertIn("소구역", p)
+        self.assertIn("24m", p)
+        self.assertIn(scene_plan.SIZE_PROFILE["SITE"]["note"], p)
+        self.assertNotIn("지형(terrain)을 만들지 마라", p)
+
+    def test_plan_normalize_accepts_new_sizes(self):
+        plan = {"scene": {"size": "spot"}, "zones": [{"name": "a", "center": [0, 0], "extent": [5, 5]}],
+                "assets": [{"key": "fire", "prompt": "모닥불", "count": 1, "size_class": "S", "zone": "a"}]}
+        normalized, _warnings = scene_plan.normalize(plan, 0, 8)
+        self.assertEqual(normalized["scene"]["size"], "SPOT")
+
     def test_small_is_interior_others_are_not(self):
         self.assertTrue(scene_plan.is_interior("S"))
         self.assertFalse(scene_plan.is_interior("M"))
@@ -139,7 +161,7 @@ class TestInteriorPrompts(unittest.TestCase):
         plan = {"scene": {"size": "M"}, "assets": [], "zones": [], "rules": []}
         p = prompts.build_scene_place_prompt(plan, manifest, 0, scene_size="M")
         self.assertIn("lp.terrain", p)
-        self.assertIn("lp.ground_snap(모든 인스턴스 리스트, 지형)", p)
+        self.assertIn("lp.ground_snap(모든 인스턴스 리스트, 지형", p)
 
     def test_place_prompt_takes_size_from_plan_when_not_given(self):
         plan = {"scene": {"size": "S"}, "assets": [], "zones": [], "rules": []}

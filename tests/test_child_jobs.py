@@ -361,31 +361,5 @@ class _Object:
         self._custom[key] = value
 
 
-class TestLaneSpacingPassthrough(ChildJobTestCase):
-    """배경 씬은 결과가 수십 미터라 기본 4m 간격으로는 옆 레인과 겹친다."""
-
-    def test_spacing_argument_reaches_lanes(self):
-        obj = _Object()
-        coll = SimpleNamespace(objects=[obj], all_objects=[obj])
-        with patch.dict(jobs.bpy.data.collections, {"LP3D_Scene": coll}, clear=True):
-            jobs.apply_lane_offset("LP3D_Scene", 2, spacing=20.0)
-        self.assertEqual(obj.location.y, 40.0)
-
-    def test_default_spacing_unchanged(self):
-        obj = _Object()
-        coll = SimpleNamespace(objects=[obj], all_objects=[obj])
-        with patch.dict(jobs.bpy.data.collections, {"LP3D_Scene": coll}, clear=True):
-            jobs.apply_lane_offset("LP3D_Scene", 2)
-        self.assertEqual(obj.location.y, jobs.lanes.lane_dy(2))
-
-    def test_reapplying_same_lane_does_not_accumulate(self):
-        obj = _Object()
-        coll = SimpleNamespace(objects=[obj], all_objects=[obj])
-        with patch.dict(jobs.bpy.data.collections, {"LP3D_Scene": coll}, clear=True):
-            jobs.apply_lane_offset("LP3D_Scene", 2, spacing=20.0)
-            jobs.apply_lane_offset("LP3D_Scene", 2, spacing=20.0)
-        self.assertEqual(obj.location.y, 40.0)
-
-
 if __name__ == "__main__":
     unittest.main()

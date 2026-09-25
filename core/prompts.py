@@ -281,14 +281,21 @@ def build_scene_plan_prompt(request: str, scene_size: str, tri_budget: int, max_
     target = sp.target_instances(size)
     interior = profile["interior"]
 
-    place = (f"씬 규모: {size} — {profile['label']}. "
-             + (f"한 변 약 {int(meters)}m의 실내 공간(방·홀·상점 내부).\n"
+    scale_rule = (f"**크기는 컨셉과 대상의 실제 치수로 정하라.** 한 변 {int(meters)}m는 이 규모의 **참고 크기**일 뿐 "
+                  "목표도 상한도 아니다 — 첨부 이미지가 보여 주는 공간감과, 들어갈 가구·건물·프랍의 실제 크기와 통로 폭을 "
+                  "더해 `scene.extent`를 산정하라"
+                  + (" (거실·침실 4~6m, 카페·상점 6~10m). 소파는 약 2.2m, 책장 약 1m다. "
+                     if interior else
+                     " (캠프 한 곳 8~14m, 주유소 한 곳 18~26m, 마을 한 구역 30~40m). RV는 약 7m, 텐트는 약 2.5m다. ")
+                  + "키트가 나온 뒤 시스템이 실제 치수에 맞춰 부지를 늘이거나 줄이지만(모양은 유지), 처음부터 맞게 잡아라.\n")
+    place = (f"씬 규모: {size} — {profile['label']}. " + scale_rule
+             + ("실내 공간(방·홀·상점 내부).\n"
                 "**지형(terrain)을 만들지 마라.** 바닥·벽·천장은 `lp.room` 하나로 만든다. "
                 "`terrain.relief`는 실내에서 무시되므로 0으로 두어라.\n"
                 "구역(zones)은 옥외 구획이 아니라 **실내 영역**이다 "
                 "(계산대 주변 / 진열 구역 / 통로 / 창가 자리).\n"
                 if interior else
-                f"긴 변 약 {int(meters)}m 안팎의 옥외 부지.\n"
+                "옥외 부지.\n"
                 "**부지를 정사각형으로 잡지 마라.** `scene.extent`는 [폭, 깊이]로 비율 1:1.3~1:2 "
                 "사이에서 지형·강·길에 맞춰 정하고, 가능하면 `scene.outline`에 6~12점 다각형으로 "
                 "비정형 윤곽(해안선·능선·숲 경계)을 그려라. 구역(zones)에는 `rotation`(도)을 넣어 "
@@ -296,7 +303,8 @@ def build_scene_plan_prompt(request: str, scene_size: str, tri_budget: int, max_
                 "**격자·등간격·직각은 계획도시를 명시적으로 요청받았을 때만.** 그 외에는 실제 "
                 "정착지처럼 길이 굽고 건물이 길목·광장·우물 주변에 뭉치며 간격이 고르지 않아야 한다. "
                 "`rules`에 이 씬의 배치 성격(예: '집들은 굽은 큰길을 따라 불규칙하게, 뒤편은 군집')을 "
-                "한 줄 이상 적어라.\n"))
+                "한 줄 이상 적어라.\n"
+                + (profile["note"] + "\n" if profile.get("note") else "")))
 
     budget_text = (f"씬 전체 트라이 예산: {tri_budget} — Σ(count × size_class 상한) + 지형 여유 "
                    f"{sp.TERRAIN_RESERVE_TRI} 이 예산을 넘지 않게 개수를 정하라.\n"
@@ -310,9 +318,9 @@ def build_scene_plan_prompt(request: str, scene_size: str, tri_budget: int, max_
         + f"에셋 종류 상한: {max_assets}종 — 종류를 늘리지 말고 같은 프랍을 count로 반복하라.\n"
         + f"에셋 1개당 트라이 상한: {_tri_class_text(style_scale)}\n"
         + budget_text
-        + f"**배치 총량 기준: 인스턴스 합계 {target}개 안팎** — `assets`의 count를 모두 더한 값이 "
-        f"이 수에 가깝게 나오도록 개수를 정하라. {int(meters)}m 공간을 이보다 적은 수로 채우면 "
-        "텅 비어 보인다. 한두 종을 수십 개씩 반복하는 것이 종류를 늘리는 것보다 낫다.\n"
+        + f"**배치 총량 기준: 부지 100㎡당 인스턴스 {profile['density']:g}개** (참고 크기 {int(meters)}m 부지라면 "
+        f"{target}개) — 정한 extent의 면적으로 계산해 `assets`의 count 합을 그 수에 맞춰라. 적으면 텅 비고, "
+        "많으면 작은 방이 화분으로 뒤덮인다. 첨부 이미지가 있으면 거기 보이는 물건 수가 우선이다.\n"
         + f"랜드마크: {profile['landmarks']}개 — 시선을 잡는 주 구조물에만 `landmark: true`.\n\n"
         + "이번 턴은 **플랜 턴**이다. 코드를 쓰지 마라. 구역(zones)·지형(terrain)·"
         "에셋 목록(assets)·씬 팔레트를 설계해 시스템 지침의 플랜 JSON 스키마 그대로 출력하라.\n"
@@ -326,11 +334,19 @@ def build_scene_asset_prompt(asset: dict, palette: list, tri_limit: int) -> str:
     asset = asset or {}
     key = str(asset.get("key") or "asset")
     prompt = str(asset.get("prompt") or key.replace("_", " ")).strip()
-    colors = ", ".join(str(c) for c in (palette or [])) or "캐주얼 톤 자유 배색"
+    own = str(asset.get("colors") or "").strip()
+    scene_colors = ", ".join(str(c) for c in (palette or []))
+    if own:
+        # 씬 팔레트 '위주'로 칠하라고 하면 RV가 길 색, 의자·텐트가 풀 색이 되어 배경에 묻힌다
+        color_line = (f"색: {own} — 이 부위별 색을 그대로 따르라. 씬 지면·길 색과 겹쳐 묻히지 않게 "
+                      "명도 대비를 유지하라.\n")
+    else:
+        color_line = ("색: 이 물건의 실제 고유색으로 칠하라(재질별 2~4색). "
+                      + (f"씬 지면·길 색({scene_colors})과는 구분되게 하라.\n" if scene_colors else "\n"))
     return (
         f"{prompt}\n"
-        f"씬 팔레트 힌트: {colors} — 이 색들 위주로 배색하되 재질 고유색은 지켜라.\n"
-        f"트라이 상한 {tri_limit} 이내로 만들어라.\n"
+        + color_line
+        + f"트라이 상한 {tri_limit} 이내로 만들어라.\n"
         "원점은 바닥 중앙(X=Y=0, 바닥이 Z=0)에 오게 하고, 마지막에 lp.join으로 "
         "단일 오브젝트로 마무리하라.\n"
         "배경에 여러 개가 반복 배치될 프랍이다 — 캐주얼 과장(특징 부위 130~160%)은 유지하되 "
@@ -361,9 +377,9 @@ def build_scene_place_prompt(plan: dict, kit_manifest: list, tri_budget: int,
     if size not in sp.SCENE_SIZE_M:
         size = "M"
     interior = sp.is_interior(size)
-    target = sp.target_instances(size)
+    target = sp.target_instances(size, ((plan or {}).get("scene") or {}).get("extent"))
     shell = ("`lp.room`으로 방 껍데기(바닥·벽) 1개" if interior
-             else "`lp.terrain`으로 지형 1개")
+             else "`lp.terrain`으로 본 지형 1개(컨셉 시트에 고지대·물가가 있으면 작은 지형을 더)")
     return (
         "에셋 키트가 준비됐다. 이번 턴은 **배치 턴**이다 — 아래 플랜대로 "
         + ("실내 공간과 구조물을 만들고 " if interior else "지형·구조물을 만들고 ")
@@ -371,7 +387,10 @@ def build_scene_place_prompt(plan: dict, kit_manifest: list, tri_budget: int,
         + (f"**이 씬은 실내다.** 지형(`lp.terrain`)을 만들지 마라 — 기복 있는 땅 위에 가구를 놓으면 "
            "실내로 읽히지 않는다. 바닥·벽은 `lp.room`으로 만들고, 천장은 위에서 안이 보이도록 "
            "`ceiling=False`로 둔다. 사람이 드나드는 쪽 벽 하나는 `open_sides`로 열어 단면처럼 보여라. "
-           "`lp.ground_snap`은 실내에서 쓰지 마라 (바닥이 평평하므로 z=0에 그대로 놓으면 된다).\n\n"
+           "`lp.ground_snap`은 실내에서 쓰지 마라 (바닥이 평평하므로 z=0에 그대로 놓으면 된다).\n"
+           "**방 크기는 플랜의 `scene.extent` 그대로**, 가구는 컨셉 시트 평면도의 자리를 좌표로 옮겨라. "
+           "벽에 붙는 가구(소파·책장·벽난로·선반)는 키트 표의 깊이 절반만큼 벽 안쪽에 두고 방 중앙을 향하게 "
+           "회전하라 — 벽에서 떨어진 가구는 넓은 빈 바닥을 만든다. 러그·테이블은 앉는 가구 앞에 붙인다.\n\n"
            if interior else "")
         + f"**배치 총량 기준: 인스턴스 합계 {target}개 안팎.** 플랜의 count를 임의로 줄이지 마라 — "
         "빈 공간 규칙은 '의도적으로 비운 구역 하나'를 뜻하지 전체를 성기게 깔라는 뜻이 아니다.\n\n"
@@ -379,7 +398,11 @@ def build_scene_place_prompt(plan: dict, kit_manifest: list, tri_budget: int,
            "**규칙적으로 보이면 실패다.** 결과가 도면처럼 격자·등간격·직각으로 읽히면 원화 느낌이 "
            "사라진다. 다음을 지켜라:\n"
            "- 지형은 플랜의 `scene.extent`(비정사각) 크기로 만들고, `scene.outline`이 있으면 "
-           "`lp.terrain(outline=...)`으로 그 윤곽을 그대로 써라. 정사각 지형 금지.\n"
+           "`lp.terrain(outline=...)`으로 그 윤곽을 그대로 써라. 정사각 지형 금지. "
+           "받침 두께는 플랜의 `terrain.base`를 `base=`로 넘기고, 색은 `color=`(윗면)·`side_color=`(절벽)로 준다.\n"
+           "- **지면을 잘게 나눈 평판으로 때우지 마라.** 컨셉 시트의 층(고지대 언덕·절벽·물가)은 작은 윤곽의 "
+           "`lp.terrain(..., elevation=, base=)`을 더 세워 표현하고, 흙마당·광장·길은 `lp.path_strip`으로 색을 "
+           "나눈다. `lp.ground_snap`에는 지형 리스트([본 지면, 고지대, ...])를 넘겨 가장 높은 면에 놓는다.\n"
            "- 길·개천·성벽·울타리의 폴리라인은 반드시 `lp.meander`로 굽혀서 넘겨라. "
            "직선 두 점으로 그은 길은 도면이다.\n"
            "- 집·노점·덤불·잔해 같은 '모여 있는 것'은 `lp.place_cluster`로 광장·우물·길목 주변에 "
@@ -409,7 +432,7 @@ def build_scene_place_prompt(plan: dict, kit_manifest: list, tri_budget: int,
         "`lp.place_scatter` / `lp.instance`로 배치한다. 회전·스케일 지터로 변주하라.\n"
         + ("4. 실내이므로 `lp.ground_snap`은 호출하지 않는다 (바닥이 평평하다).\n\n"
            if interior else
-           "4. 마지막에 `lp.ground_snap(모든 인스턴스 리스트, 지형)`을 **한 번** 호출한다.\n\n")
+           "4. 마지막에 `lp.ground_snap(모든 인스턴스 리스트, 지형 또는 [지형, 고지대, ...])`을 **한 번** 호출한다.\n\n")
         + "`lp.set_color`는 이 턴에서 새로 만든 오브젝트(지형·방·벽·울타리·길·box)에만 쓴다. "
         "인스턴스에 칠하면 공유 메시의 UV가 바뀌어 원본과 나머지 인스턴스까지 전부 같은 색이 된다 — "
         "키트 에셋의 색은 이미 정해져 있으니 건드리지 마라.\n\n"

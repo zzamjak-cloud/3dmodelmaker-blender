@@ -13,7 +13,10 @@ SIZE_CLASS_TRI = {"L": 6000, "M": 2500, "S": 800}
 # 예전에는 20/40/80이었고 규모가 바닥 크기만 바꿨다. 그래서 대형은 같은 밀도를
 # 16배 넓은 땅에 뿌려 텅 비어 보였다. 규모를 "무엇을 만드는가"로 다시 정의하고
 # (S=건물 내부 / M=구역 / L=도시·성채) 밀도 기준을 규모마다 따로 둔다.
-SCENE_SIZE_M = {"S": 12.0, "M": 40.0, "L": 100.0}
+#
+# 구역(40m)과 실내 사이가 비어 있어 가게 한 채·캠프 한 곳 같은 좁은 옥외 공간을 만들 수 없었다.
+# 옥외 규모를 스팟(한 장소) / 소구역(건물 한두 채 + 마당)으로 더 쪼갠다.
+SCENE_SIZE_M = {"S": 12.0, "SPOT": 12.0, "SITE": 24.0, "M": 40.0, "L": 100.0}
 # 지형·구조물이 쓸 트라이 여유분
 TERRAIN_RESERVE_TRI = 2000
 
@@ -24,13 +27,21 @@ TERRAIN_RESERVE_TRI = 2000
 #   landmarks    — 시선을 잡는 주 구조물 개수
 SIZE_PROFILE = {
     # 건물 내부: 바닥 면적은 작지만 가구·소품이 촘촘하다. 빈 바닥을 남길 이유가 없다
-    "S": {"interior": True, "max_assets": 10, "density": 26.0, "landmarks": 1,
+    "S": {"interior": True, "max_assets": 10, "density": 55.0, "landmarks": 1, "fill": 0.35,
           "label": "실내 (건물 내부)"},
+    # 옥외 한 장소: 캠프파이어·우물가·노점 하나·버스 정류장. 주인공 하나를 소품이 둘러싼다
+    "SPOT": {"interior": False, "max_assets": 8, "density": 20.0, "landmarks": 1, "fill": 0.25,
+             "label": "스팟 (옥외 한 장소)",
+             "note": "구역(zones)은 1~3개면 충분하다 — 주인공 구조물 하나와 그 주변 소품 무리로 짜라."},
+    # 건물 한두 채와 마당·주차장: 주유소 한 곳·농가 마당·골목 한 블록
+    "SITE": {"interior": False, "max_assets": 12, "density": 12.0, "landmarks": 1, "fill": 0.22,
+             "label": "소구역 (건물 한두 채 + 마당)",
+             "note": "구역(zones)은 2~4개다 — 건물 하나를 중심으로 앞마당·옆길·뒤편을 나눠라."},
     # 여러 건물과 주변 요소가 들어가는 구역
-    "M": {"interior": False, "max_assets": 16, "density": 7.0, "landmarks": 2,
+    "M": {"interior": False, "max_assets": 16, "density": 7.0, "landmarks": 2, "fill": 0.18,
           "label": "구역 (건물 여러 채 + 주변)"},
     # 대도시·대형 성채. 넓은 만큼 종류와 총량이 함께 커져야 허전하지 않다
-    "L": {"interior": False, "max_assets": 24, "density": 5.0, "landmarks": 3,
+    "L": {"interior": False, "max_assets": 24, "density": 5.0, "landmarks": 3, "fill": 0.15,
           "label": "대규모 (도시·성채)"},
 }
 
@@ -44,14 +55,57 @@ def is_interior(scene_size) -> bool:
     return bool(size_profile(scene_size)["interior"])
 
 
-def target_instances(scene_size) -> int:
+def target_instances(scene_size, extent=None) -> int:
     """이 규모에서 배치할 인스턴스 총량의 기준값 (면적 x 밀도).
 
     플랜 턴에 "몇 개를 깔아야 안 허전한가"를 수치로 알려주기 위한 값이다.
-    예전에는 이런 기준이 없어 규모와 무관하게 비슷한 개수가 나왔다."""
+    extent([폭, 깊이])를 주면 규모 상한이 아니라 실제 부지 면적으로 센다 — 5m 거실에 12m 방
+    기준 개수를 요구하면 화분만 잔뜩 늘어난다."""
     profile = size_profile(scene_size)
     meters = SCENE_SIZE_M.get(_size_class(scene_size), SCENE_SIZE_M["M"])
-    return int(round(meters * meters / 100.0 * profile["density"]))
+    area = meters * meters
+    if extent and len(extent) == 2:
+        try:
+            area = max(1.0, float(extent[0]) * float(extent[1]))
+        except (TypeError, ValueError):
+            pass
+    return max(1, int(round(area / 100.0 * profile["density"])))
+
+
+def fit_to_kit(plan: dict, manifest, scene_size) -> tuple:
+    """부지를 키트 실제 치수에 맞춰 늘이거나 줄인다. (새 플랜, 배율)을 돌려준다.
+
+    플랜은 에셋이 만들어지기 전에 부지를 정하므로 물건이 실제 몇 m인지 모른다. 거실을 12m로 잡고
+    2m 소파를 놓으면 가구가 흩어지고, 반대로 7m RV 여러 대를 10m 캠프에 넣으면 서로 파묻힌다.
+    키트가 나온 뒤 Σ(개수 x 바닥 면적)을 규모별 채움 비율로 나눠 필요한 면적을 구하고, 부지가 그
+    0.8~1.3배 밖이면 extent·outline·구역 좌표를 같은 배율로 맞춘다. 비율(모양)은 컨셉 시트 그대로다."""
+    import copy as _copy
+    scene = (plan or {}).get("scene") or {}
+    extent = scene.get("extent") or []
+    if len(extent) != 2:
+        return plan, 1.0
+    sizes = {str(m.get("key")): m.get("size") or (0, 0, 0) for m in manifest or []}
+    footprint = 0.0
+    for asset in (plan or {}).get("assets") or []:
+        size = sizes.get(str(asset.get("key")))
+        if not size:
+            continue
+        footprint += max(0.05, float(size[0]) * float(size[1])) * int(asset.get("count") or 1)
+    if footprint <= 0:
+        return plan, 1.0
+    area = float(extent[0]) * float(extent[1])
+    need = footprint / size_profile(scene_size).get("fill", 0.2)
+    if need * 0.8 <= area <= need * 1.3:
+        return plan, 1.0
+    k = min(3.0, max(0.25, (need * (1.15 if area > need else 1.0) / area) ** 0.5))
+    fitted = _copy.deepcopy(plan)
+    sc = fitted["scene"]
+    sc["extent"] = [round(float(v) * k, 1) for v in extent]
+    sc["outline"] = [[round(float(p[0]) * k, 1), round(float(p[1]) * k, 1)] for p in sc.get("outline") or []]
+    for zone in fitted.get("zones") or []:
+        zone["center"] = [round(float(v) * k, 2) for v in zone.get("center") or [0, 0]]
+        zone["extent"] = [round(float(v) * k, 2) for v in zone.get("extent") or [1, 1]]
+    return fitted, k
 
 _DEFAULT_SIZE_CLASS = "M"
 _DEFAULT_PALETTE = ["#7fa855", "#c2a06a", "#8fb8d8", "#e4dcc4", "#d9603f"]
@@ -258,13 +312,15 @@ def _normalize_scene(plan: dict, warnings: list):
     # 그 다각형이 실제 부지 윤곽이 된다(terrain outline으로 그대로 넘어간다).
     meters = SCENE_SIZE_M[size]
     extent = _pair(scene.get("extent"), (meters, meters))
-    extent = (max(extent[0], meters * 0.4), max(extent[1], meters * 0.4))
-    area_cap = meters * meters * 1.6  # 규모보다 지나치게 넓어지는 것만 막는다
-    if extent[0] * extent[1] > area_cap:
-        k = (area_cap / (extent[0] * extent[1])) ** 0.5
+    # 규모 한 변은 참고 크기일 뿐 고정도 상한도 아니다 — 부지는 컨셉 시트와 들어갈 물건의 실제 치수가
+    # 정한다(키트가 나온 뒤 fit_to_kit이 실제 치수로 다시 맞춘다). 여기서는 퇴화값과 터무니없는 값만 막는다
+    floor_m = min(2.5, meters * 0.2)
+    extent = (max(extent[0], floor_m), max(extent[1], floor_m))
+    ceiling_m = meters * 4.0
+    if max(extent) > ceiling_m:
+        k = ceiling_m / max(extent)
         extent = (extent[0] * k, extent[1] * k)
-        warnings.append("부지 extent가 규모 %s보다 너무 넓어 %.0fx%.0fm로 줄였다"
-                        % (size, extent[0], extent[1]))
+        warnings.append("부지 extent가 비정상적으로 커서 %.0fx%.0fm로 줄였다" % extent)
     scene["extent"] = [round(extent[0], 1), round(extent[1], 1)]
 
     outline = scene.get("outline")
@@ -295,6 +351,11 @@ def _normalize_terrain(plan: dict, warnings: list):
         warnings.append("지형 릴리프 %.2f를 0.0~1.5 범위로 잘랐다" % relief)
         relief = min(max(relief, 0.0), 1.5)
     terrain["relief"] = relief
+    base = _to_float(terrain.get("base"), 0.0)
+    if base < 0.0 or base > 12.0:
+        warnings.append("지형 받침 두께 %.2f를 0~12m로 잘랐다" % base)
+        base = min(max(base, 0.0), 12.0)
+    terrain["base"] = base
     terrain["style"] = str(terrain.get("style") or "")
     plan["terrain"] = terrain
 
@@ -362,6 +423,8 @@ def _normalize_assets(plan: dict, zone_names: list, warnings: list):
             "size_class": size_class,
             "zone": zone,
             "landmark": bool(asset.get("landmark")),
+            # 컨셉 시트에서 읽은 그 에셋의 고유색 — 없으면 자식 잡이 씬 팔레트로 뭉개 칠한다
+            "colors": str(asset.get("colors") or "").strip()[:240],
         })
     if not assets:
         raise PlanError("쓸 수 있는 에셋이 하나도 없다")

@@ -1,7 +1,6 @@
 # 생성 세션 상태머신: 프롬프트 → 코드 생성 → 실행 → 마무리
 import logging
 import os
-import re
 import shutil
 import tempfile
 import time
@@ -13,7 +12,7 @@ _log = logging.getLogger(__name__)
 from .. import preferences
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import (errors, executor, jobs, library, models, multiview,
+from . import (errors, executor, jobs, library, models, multiview, naming,
                prompts, runner, scheduler, shapegen, snapshots, styles, texgen)
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
@@ -151,11 +150,6 @@ def _end_session(uid):
     runner.remove_keepalive(uid)
 
 
-def _slug(text: str) -> str:
-    ascii_part = re.sub(r"[^A-Za-z0-9]+", "_", text)[:24].strip("_")
-    return ascii_part or "Model"
-
-
 class GenerationSession:
     system_mode = 'OBJECT'  # prompts.build_system_prompt에 넘길 제작 모드
 
@@ -177,6 +171,10 @@ class GenerationSession:
             dest = os.path.join(self.workdir, "reference" + os.path.splitext(ref_image)[1].lower())
             shutil.copy(ref_image, dest)
             self.ref_image = dest
+        self.ref_source = ref_image  # 사용자가 지정한 원본 경로 — 클립보드 붙여넣기면 결과 폴더로 옮긴다
+        self.archived = []           # 이 잡이 보관 폴더 최상단에 남긴 파일 — 완료 시 결과 폴더로 옮긴다
+        self.child_workdirs = []     # 배경 에셋 자식 잡의 작업 폴더 — AI 이미지를 부모 결과 폴더에 모은다
+        self._result_folder = ""     # 첫 저장에서 만든 결과 폴더 — 매핑 뒤 재저장도 같은 폴더에
         self.multiview = None  # 생성한 참조 이미지 경로 (정면 원화 또는 멀티뷰 시트)
         self._shape_server = None   # 셰이프 서버 확인 결과 캐시
         self.last_images = []  # 마지막 캡처 (라이브러리 썸네일용)
@@ -234,7 +232,7 @@ class GenerationSession:
         self.stateless = False       # resume 실패 시 폴백 모드
         self.fallback_used = False
         self.last_code = None
-        base = f"LP3D_{_slug(request)}"
+        base = naming.result_name(request)
         name, n = base, 1
         # 컬렉션 생성 전인 다른 세션의 이름도 점유로 본다.
         while (bpy.data.collections.get(name)
@@ -449,6 +447,8 @@ class GenerationSession:
             self.multiview = path
             # .blend 옆에 남겨 나중에 참조 이미지로 다시 쓸 수 있게 한다
             saved = multiview.archive(path, self.request)
+            if saved:
+                self.archived.append(saved)
             job = self._job()
             if job:
                 job.multiview_path = saved or path
@@ -614,22 +614,88 @@ class GenerationSession:
         _end_session(self.uid)
         self._notify_parent(ok)
 
+    def _sheet_label(self) -> str:
+        if self.system_mode == 'SCENE':
+            return '컨셉시트'
+        if self._sheet_kind() == 'FRONT':
+            return '정면원화'
+        return '턴어라운드' if self.system_mode == 'CHARACTER' else '멀티뷰'
+
+    def _save_collections(self):
+        """개별 .blend에 담을 (보이는 컬렉션, 숨길 컬렉션) 이름 — 큐의 다른 결과는 섞지 않는다."""
+        return [self.collection_name], []
+
     def _autosave(self):
+        try:
+            self._autosave_unguarded()
+        except Exception:   # 저장 실패가 완성된 결과를 실패·폴백으로 되돌리면 안 된다 — 로그만 남긴다
+            _log.exception("결과 자동 저장 실패")
+
+    def _autosave_unguarded(self):
         """이번 잡이 만든 것을 폴더 하나로 즉시 남긴다 — 저장을 잊어 결과를 잃지 않도록.
 
-        기하가 완성된 지점(모델링 완료·최종 완료)에서만 부른다. 실패는 잡을 실패시키지 않는다."""
-        if self.parent_uid:   # 씬 에셋 자식 잡 — 부모가 씬 전체를 한 번에 저장한다
+        기하가 완성된 지점(모델링 완료·최종 완료)에서만 부른다. 실패는 잡을 실패시키지 않는다.
+        보관 폴더 최상단에 먼저 떨어진 재료(클립보드 참조·시트·텍스처)는 결과 폴더로 옮기고,
+        세션 작업 폴더의 AI 이미지도 같은 폴더에 펼쳐 둔다(내용이 같은 사본은 하나만)."""
+        if self.parent_uid:
+            # 씬 에셋 자식 잡 — 부모가 씬 전체를 한 번에 저장한다. 내 재료는 부모 폴더로 넘긴다
+            parent = self._parent_session()
+            if parent is not None:
+                parent.archived += self.archived
+                parent.child_workdirs.append(self.workdir)
             return
         from . import autosave
         job = self._job()
-        sheet_label = '정면원화' if self._sheet_kind() == 'FRONT' else '턴어라운드'
-        files = {'원화': self.ref_image,
-                 sheet_label: self.multiview or (getattr(job, 'multiview_path', "") if job else ""),
-                 '셰이프': getattr(self, 'shape_path', ""),
-                 '텍스처': self.texture_path}
-        path = autosave.save_result(self.collection_name, self.system_mode, files)
-        if path and job:
-            job.log = "\n".join((job.log + f"\n결과 저장: {path}").strip().splitlines()[-30:])
+        folder = self._result_folder or autosave.group_dir(self.collection_name, self.system_mode)
+        if not folder:
+            return
+        ref_label = '원화' if self.system_mode == 'CHARACTER' else '참조'
+        # 보관본(job.multiview_path)을 우선한다 — 작업 폴더 원본을 쓰면 보관본이 최상단에 따로 남는다
+        sheet = (getattr(job, 'multiview_path', "") if job else "") or self.multiview
+        files, move = {'셰이프': getattr(self, 'shape_path', "")}, {}
+        if autosave.is_loose_archive(self.ref_source):
+            move[ref_label] = self.ref_source
+        elif not self._result_folder:
+            files[ref_label] = self.ref_image
+        for label, src in ((self._sheet_label(), sheet), ('텍스처', self.texture_path)):
+            if src and (src in self.archived or autosave.is_loose_archive(src)):
+                move[label] = src
+            elif src:
+                files[label] = src
+        loose = [p for p in self.archived if p not in move.values() and p not in files.values()]
+        moved = autosave.store(folder, files=files, move=move, loose=loose,
+                               process_dirs=[self.workdir] + self.child_workdirs)
+        self._relocate(moved)
+        self._result_folder = folder
+        visible, hidden = self._save_collections()
+        autosave.write_blend(folder, self.collection_name, visible, hidden)
+        if job:
+            job.log = "\n".join((job.log + f"\n결과 저장: {folder}").strip().splitlines()[-30:])
+
+    def _relocate(self, moved: dict):
+        """옮긴 재료를 가리키던 잡 경로·이미지 경로를 새 자리로 바꾼다 (다음 실행·.blend가 깨지지 않게)."""
+        if not moved:
+            return
+        norm = {os.path.normcase(os.path.abspath(k)): v for k, v in moved.items()}
+
+        def new_path(path):
+            if not path:
+                return None
+            return norm.get(os.path.normcase(os.path.abspath(bpy.path.abspath(path))))
+
+        scene = bpy.data.scenes.get(self.scene_name)
+        for job in (scene.lp3d.jobs if scene and getattr(scene, "lp3d", None) else []):
+            for attr in ('ref_image_path', 'multiview_path', 'texture_path'):
+                dest = new_path(getattr(job, attr, ""))
+                if dest:
+                    setattr(job, attr, dest)
+        for image in bpy.data.images:
+            dest = new_path(image.filepath)
+            if dest:
+                image.filepath = dest
+        self.archived = [moved.get(p, p) for p in self.archived]
+        if self.texture_path in moved:
+            self.texture_path = moved[self.texture_path]
 
     def _parent_session(self):
         """이 세션을 스폰한 배경 세션. 부모가 아니거나 이미 끝났으면 None."""
@@ -881,18 +947,26 @@ class GenerationSession:
         self._submit_blender(self._blender_finalize)
 
     def _blender_finalize(self):
-        from ..lowpoly.cleanup import collection_tri_count, cull_hidden_faces, game_ready
+        from ..lowpoly.cleanup import (collection_tri_count, cull_hidden_faces, game_ready,
+                                       resolve_coplanar_faces)
         self._set_status("마무리 정리중 (은면 제거·게임레디)...", phase='FINAL')
         coll = bpy.data.collections.get(self.collection_name)
         if coll:
             mesh_objs = [o for o in coll.objects if o.type == 'MESH']
             removed = cull_hidden_faces(mesh_objs)
+            # 은면 판정은 닫힌 파트를 기준으로 하므로, 파트를 여는 동일평면 절단은 그 뒤에 한다
+            try:
+                coplanar = resolve_coplanar_faces(mesh_objs)
+            except Exception:   # 정리 실패가 완성된 모델을 버리게 하면 안 된다
+                _log.exception("동일평면 겹침 정리 실패")
+                coplanar = 0
             for obj in mesh_objs:
                 game_ready(obj)
             tris = collection_tri_count(coll)
             # 배치 실행 결과가 원점에 겹치지 않도록 레인만큼 옆으로 민다 (텍스처 대기 중에도)
             self._apply_lane()
-            note = f", 은면 {removed}개 제거" if removed else ""
+            note = (f", 은면 {removed}개 제거" if removed else "") + \
+                   (f", 겹친 면 {coplanar}개 정리" if coplanar else "")
             self._final_note = f"{tris} tris{note}"
             if self.modeling_type == 'TEXTURE' and mesh_objs:
                 if not texgen.is_available():
@@ -1052,6 +1126,7 @@ class GenerationSession:
             # 세션 임시 폴더는 사라지므로 보관 폴더에 복사한 파일을 이미지 원본으로 삼는다
             saved = multiview.unique_path(multiview.archive_dir(), name)
             shutil.copy(png, saved)
+            self.archived.append(saved)
             result = tex_apply.finalize(mesh_objs, saved, name)
             self.texture_path = saved
             job = self._job()

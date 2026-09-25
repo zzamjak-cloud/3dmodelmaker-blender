@@ -231,5 +231,70 @@ class TestSceneviewPrompt(unittest.TestCase):
         self.assertEqual(sceneview.ARCHIVE_PREFIX, "LP3D_sceneview_")
 
 
+class TestPlanColorsAndBase(unittest.TestCase):
+    def test_asset_colors_and_terrain_base_survive(self):
+        plan = {"scene": {"size": "SPOT"}, "terrain": {"relief": 0.2, "base": 2.5},
+                "zones": [{"name": "camp", "center": [0, 0], "extent": [8, 8]}],
+                "assets": [{"key": "rv", "prompt": "RV", "colors": " 연회색 차체 ", "zone": "camp"}]}
+        result, _w = scene_plan.normalize(plan, 0, 8)
+        self.assertEqual(result["assets"][0]["colors"], "연회색 차체")
+        self.assertEqual(result["terrain"]["base"], 2.5)
+
+    def test_base_is_clamped(self):
+        plan = {"scene": {}, "terrain": {"base": 40},
+                "zones": [{"name": "a", "center": [0, 0], "extent": [8, 8]}],
+                "assets": [{"key": "a", "prompt": "a", "zone": "a"}]}
+        result, warnings = scene_plan.normalize(plan, 0, 8)
+        self.assertEqual(result["terrain"]["base"], 12.0)
+        self.assertTrue(any("받침" in w for w in warnings))
+
+
+class TestFitToKit(unittest.TestCase):
+    """거실을 12m로 잡고 2m 소파를 놓으면 가구가 흩어진다 — 키트 치수로 부지를 줄인다."""
+
+    def _plan(self, extent):
+        return {"scene": {"size": "S", "extent": extent, "outline": [[-6, -6], [6, -6], [6, 6]]},
+                "zones": [{"name": "a", "center": [4, 2], "extent": [4, 4]}],
+                "assets": [{"key": "sofa", "count": 1}, {"key": "plant", "count": 4}]}
+
+    def test_oversized_room_shrinks_with_zones(self):
+        manifest = [{"key": "sofa", "size": (2.2, 0.9, 0.9)}, {"key": "plant", "size": (0.5, 0.5, 0.8)}]
+        fitted, k = scene_plan.fit_to_kit(self._plan([12, 12]), manifest, "S")
+        self.assertLess(k, 1.0)
+        w, d = fitted["scene"]["extent"]
+        need = (2.2 * 0.9 + 4 * 0.25) / scene_plan.SIZE_PROFILE["S"]["fill"]
+        self.assertLessEqual(w * d, need * 1.3)
+        self.assertAlmostEqual(fitted["zones"][0]["center"][0], round(4 * k, 2))
+        self.assertAlmostEqual(fitted["scene"]["outline"][1][0], round(6 * k, 1))
+
+    def test_fitting_room_is_untouched(self):
+        manifest = [{"key": "sofa", "size": (2.2, 0.9, 0.9)}, {"key": "plant", "size": (0.5, 0.5, 0.8)}]
+        plan = self._plan([3.0, 3.0])
+        fitted, k = scene_plan.fit_to_kit(plan, manifest, "S")
+        self.assertEqual(k, 1.0)
+        self.assertIs(fitted, plan)
+
+    def test_crowded_site_grows(self):
+        # 7m RV 네 대를 6m 부지에 넣으면 서로 파묻힌다 — 부지를 늘린다
+        plan = {"scene": {"size": "SPOT", "extent": [6, 5], "outline": []},
+                "zones": [{"name": "a", "center": [1, 1], "extent": [3, 3]}],
+                "assets": [{"key": "rv", "count": 4}]}
+        fitted, k = scene_plan.fit_to_kit(plan, [{"key": "rv", "size": (7.0, 2.5, 3.0)}], "SPOT")
+        self.assertGreater(k, 1.0)
+        w, d = fitted["scene"]["extent"]
+        self.assertAlmostEqual(w / d, 6 / 5, places=1)   # 모양(비율)은 컨셉 그대로
+        need = 4 * 7.0 * 2.5 / scene_plan.SIZE_PROFILE["SPOT"]["fill"]
+        self.assertGreaterEqual(w * d, need * 0.8)
+
+    def test_large_site_is_not_capped_by_tier(self):
+        out, _ = scene_plan.normalize({"scene": {"size": "SPOT", "extent": [30, 20]},
+                                       "zones": [{"name": "a", "center": [0, 0], "extent": [8, 8]}],
+                                       "assets": [{"key": "a", "prompt": "a", "zone": "a"}]}, 0, 8)
+        self.assertEqual(out["scene"]["extent"], [30.0, 20.0])
+
+    def test_target_follows_actual_extent(self):
+        self.assertLess(scene_plan.target_instances("S", [5, 5]), scene_plan.target_instances("S"))
+
+
 if __name__ == "__main__":
     unittest.main()

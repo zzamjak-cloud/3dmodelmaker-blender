@@ -954,7 +954,7 @@ class GenerationSession:
         if coll:
             mesh_objs = [o for o in coll.objects if o.type == 'MESH']
             removed = cull_hidden_faces(mesh_objs)
-            # 은면 판정은 닫힌 파트를 기준으로 하므로, 파트를 여는 동일평면 절단은 그 뒤에 한다
+            # 은면 판정은 파트 위치 기준이므로, 파트를 미세하게 옮기는 동일평면 띄우기는 그 뒤에 한다
             try:
                 coplanar = resolve_coplanar_faces(mesh_objs)
             except Exception:   # 정리 실패가 완성된 모델을 버리게 하면 안 된다
@@ -966,7 +966,7 @@ class GenerationSession:
             # 배치 실행 결과가 원점에 겹치지 않도록 레인만큼 옆으로 민다 (텍스처 대기 중에도)
             self._apply_lane()
             note = (f", 은면 {removed}개 제거" if removed else "") + \
-                   (f", 겹친 면 {coplanar}개 정리" if coplanar else "")
+                   (f", 겹친 파트 {coplanar}개 띄움" if coplanar else "")
             self._final_note = f"{tris} tris{note}"
             if self.modeling_type == 'TEXTURE' and mesh_objs:
                 if not texgen.is_available():

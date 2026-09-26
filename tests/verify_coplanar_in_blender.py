@@ -1,7 +1,8 @@
-# 동일평면 겹침(Z-fighting) 절단 확인 — Blender 안에서 실행한다.
+# 동일평면 겹침(Z-fighting) 띄우기 확인 — Blender 안에서 실행한다.
 #   blender --background --factory-startup --python tests/verify_coplanar_in_blender.py
 #
-# 맞닿은 면·나란한 면이 한 평면에 하나만 남는지, 면적과 노멀·색 UV가 보존되는지, 다시 돌리면 할 일이 없는지 본다.
+# 같은 방향으로 겹친 면의 좁은 쪽 파트만 노멀 방향으로 옮겨지는지, 면 수·토폴로지가 그대로인지,
+# 맞댄 면은 건드리지 않는지, 다시 돌리면 할 일이 없는지 본다.
 import os
 import sys
 
@@ -10,7 +11,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lowpoly import cleanup  # noqa: E402
+from lowpoly import cleanup, coplanar  # noqa: E402
 
 failures = []
 
@@ -54,87 +55,67 @@ def make(name, boxes, matrix=None):
     return obj
 
 
-def area(obj):
-    return sum(p.area for p in obj.data.polygons)
-
-
-def facing_area(obj, axis, sign, at, tol=1e-5):
+def part_min(obj, axis, pick):
+    """pick(월드 좌표)을 만족하는 꼭짓점들의 axis 최솟값."""
     mw = obj.matrix_world
-    total = 0.0
-    for p in obj.data.polygons:
-        n = (mw.to_3x3() @ p.normal).normalized()
-        c = mw @ p.center
-        if n[axis] * sign > 0.999 and abs(c[axis] - at) < tol:
-            total += p.area * abs(mw.to_3x3().determinant()) ** (2 / 3)
-    return total
+    return min((mw @ v.co)[axis] for v in obj.data.vertices if pick(mw @ v.co))
 
 
-# 1) 받침 위 상자 (한 오브젝트, fast join 결과와 같은 느슨한 파트 2개)
+def topology(obj):
+    return len(obj.data.vertices), len(obj.data.edges), len(obj.data.polygons)
+
+
+# 1) 받침 위 상자 (맞댄 면) — 아무것도 하지 않는다
 new_scene()
 obj = make("Stack", [((0, 0, 0), (2, 2, 1)), ((0.5, 0.5, 1), (1.5, 1.5, 2))])
-changed = cleanup.resolve_coplanar_faces([obj])
-check("접촉 면 2개 정리", changed == 2, f"({changed})")
-check("z=1 윗면은 둘레만 남음", abs(facing_area(obj, 2, 1, 1.0) - 3.0) < 1e-4, f"({facing_area(obj, 2, 1, 1.0):.4f})")
-check("z=1 아랫면 사라짐", facing_area(obj, 2, -1, 1.0) < 1e-6)
-check("재실행 시 할 일 없음", cleanup.resolve_coplanar_faces([obj]) == 0)
-bm = bmesh.new()
-bm.from_mesh(obj.data)
-check("열린 테두리 0 (수밀)", sum(1 for e in bm.edges if e.is_boundary) == 0,
-      f"({sum(1 for e in bm.edges if e.is_boundary)})")
-check("3면 공유 변 0", sum(1 for e in bm.edges if len(e.link_faces) > 2) == 0)
-bm.free()
+before = [v.co.copy() for v in obj.data.vertices]
+check("맞댄 면 불변", cleanup.resolve_coplanar_faces([obj]) == 0
+      and all((v.co - b).length == 0 for v, b in zip(obj.data.vertices, before)))
 
-# 2) 벽 앞면에 붙인 패널 — 서로 다른 색 UV, 패널 색이 남아야 한다
+# 2) 벽 앞면에 붙인 패널 + 그 위 명판 (한 오브젝트, 느슨한 파트 3개)
 new_scene()
-wall = make("Wall", [((0, 0, 0), (4, 0.3, 3), (0.1, 0.1)), ((1, 0, 1), (2, 0.1, 2), (0.9, 0.9))])
+wall = make("Wall", [((0, 0, 0), (4, 0.3, 3)), ((1, 0, 1), (2, 0.1, 2)), ((1.2, 0, 1.2), (1.5, 0.05, 1.5))])
+topo = topology(wall)
+step = coplanar.nudge_distance(cleanup._coplanar_scale([wall]))
 changed = cleanup.resolve_coplanar_faces([wall])
-front = facing_area(wall, 1, -1, 0.0)
-check("플러시 면 정리", changed >= 1, f"({changed})")
-check("앞면 총면적 보존(12)", abs(front - 12.0) < 1e-4, f"({front:.4f})")
-layer = wall.data.uv_layers.active.data
-panel_uv = [p for p in wall.data.polygons
-            if p.normal.y < -0.999 and abs(p.center.y) < 1e-5 and 1 < p.center.x < 2 and 1 < p.center.z < 2]
-check("패널 앞면 색 유지", panel_uv and all(abs(layer[i].uv[0] - 0.9) < 1e-6
-                                         for p in panel_uv for i in p.loop_indices))
-wall_uv = [p for p in wall.data.polygons if p.normal.y < -0.999 and abs(p.center.y) < 1e-5 and p.center.x > 2.1]
-check("벽 조각 색 유지", wall_uv and all(abs(layer[i].uv[0] - 0.1) < 1e-6
-                                      for p in wall_uv for i in p.loop_indices))
-check("재실행 시 할 일 없음(플러시)", cleanup.resolve_coplanar_faces([wall]) == 0)
+check("플러시 파트 2개 이동", changed == 2, f"({changed})")
+check("면·변·점 수 불변", topology(wall) == topo, f"({topology(wall)} vs {topo})")
+wall_y = part_min(wall, 1, lambda p: p.x < 0.5 or p.x > 2.5)
+panel_y = part_min(wall, 1, lambda p: 1 <= p.x <= 2 and 1 <= p.z <= 2 and not (1.2 <= p.x <= 1.5 and 1.2 <= p.z <= 1.5))
+plate_y = part_min(wall, 1, lambda p: 1.2 <= p.x <= 1.5 and 1.2 <= p.z <= 1.5 and p.y < 0.06)
+check("벽 제자리", abs(wall_y) < 1e-6, f"({wall_y})")
+check("패널 한 단 앞", abs(panel_y + step) < 1e-6, f"({panel_y})")
+check("명판 두 단 앞", abs(plate_y + 2 * step) < 1e-6, f"({plate_y})")
+check("재실행 시 할 일 없음", cleanup.resolve_coplanar_faces([wall]) == 0)
 
-# 3) 서로 다른 오브젝트 + 회전·음수 스케일 트랜스폼
+# 3) 서로 다른 오브젝트 + 회전·음수 스케일 — 월드 노멀 방향으로 밀린다
 new_scene()
 rot = Matrix.Rotation(0.6, 4, 'Z') @ Matrix.Rotation(0.3, 4, 'X')
 a = make("A", [((-1, -1, -1), (1, 1, 1))], rot)
-b = make("B", [((-1, -1, -1), (1, 1, 1))], rot @ Matrix.Translation((2, 0, 0)) @ Matrix.Diagonal((-1, 1, 1, 1)))
+b = make("B", [((-0.5, -0.5, 0.5), (0.5, 0.5, 1))], rot @ Matrix.Diagonal((-1, 1, 1, 1)))
+top = (rot.to_3x3() @ Vector((0, 0, 1))).normalized()
+ref = (b.matrix_world @ b.data.vertices[0].co).copy()
 changed = cleanup.resolve_coplanar_faces([a, b])
-check("회전·미러 오브젝트 접촉 면 정리", changed == 2, f"({changed})")
-check("면 수 5+5", (len(a.data.polygons), len(b.data.polygons)) == (5, 5),
-      f"({len(a.data.polygons)}, {len(b.data.polygons)})")
-bm = bmesh.new()
-bm.from_mesh(b.data)
-bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
-normals_before = [f.normal.copy() for f in bm.faces]
-bm.free()
-check("미러 오브젝트 노멀 유지", all(p.normal.dot(n) > 0.99 for p, n in zip(b.data.polygons, normals_before)))
+moved = (b.matrix_world @ b.data.vertices[0].co) - ref
+check("회전·미러 오브젝트 이동", changed == 1, f"({changed})")
+check("월드 윗면 노멀 방향", moved.normalized().dot(top) > 0.999, f"({moved})")
 
-# 4) 인스턴스(공유 메시)는 자르지 않는다
+# 4) 인스턴스(공유 메시)는 움직이지 않는다
 new_scene()
-src = make("Src", [((0, 0, 0), (1, 1, 1))])
+src = make("Src", [((1, 0, 1), (2, 0.1, 2))])
 inst = src.copy()
 bpy.context.scene.collection.objects.link(inst)
-inst.location = (5, 0, 0)
-slab = make("Slab", [((-1, -1, -1), (7, 2, 0))])
+inst.location = (1.5, 0, 0)
+slab = make("Slab", [((0, 0, 0), (4, 0.3, 3))])
 bpy.context.view_layer.update()
-before = len(src.data.polygons)
-changed = cleanup.resolve_coplanar_faces([src, inst, slab])
-check("인스턴스 메시 불변", len(src.data.polygons) == before)
-check("받침 윗면에서 두 자리 오림", abs(facing_area(slab, 2, 1, 0.0) - (8 * 3 - 2)) < 1e-4,
-      f"({facing_area(slab, 2, 1, 0.0):.4f})")
+co = [v.co.copy() for v in src.data.vertices]
+cleanup.resolve_coplanar_faces([src, inst, slab])
+check("인스턴스 메시 불변", all((v.co - c).length == 0 for v, c in zip(src.data.vertices, co)))
+check("상대 벽이 안쪽으로 물러남", part_min(slab, 1, lambda p: True) > 1e-4)
 
 # 5) 관통만 하는 박스는 건드리지 않는다
 new_scene()
 obj = make("Pierce", [((0, 0, 0), (1, 1, 1)), ((0.5, 0.2, 0.2), (1.5, 0.8, 0.8))])
-count = len(obj.data.polygons)
-check("관통 박스 불변", cleanup.resolve_coplanar_faces([obj]) == 0 and len(obj.data.polygons) == count)
+check("관통 박스 불변", cleanup.resolve_coplanar_faces([obj]) == 0)
 
 print("RESULT:", "FAIL " + ", ".join(failures) if failures else "ALL PASS")

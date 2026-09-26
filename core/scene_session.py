@@ -495,7 +495,7 @@ class SceneSession(GenerationSession):
         if not coll:
             self._finish("실패: 생성된 오브젝트 없음", ok=False)
             return
-        # 배치 턴이 새로 만든 지형·벽·방·상자끼리 맞닿은 면만 정리한다. 인스턴스까지 넣으면
+        # 배치 턴이 새로 만든 지형·벽·방·상자끼리 겹친 면만 정리한다. 인스턴스까지 넣으면
         # 수백 개 x 에셋 면수를 훑어 UI가 멈춘다 — 에셋 내부는 키트 단계에서 이미 정리됐다.
         try:
             resolve_coplanar_faces([o for o in coll.objects

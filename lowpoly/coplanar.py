@@ -1,19 +1,20 @@
-"""서로 다른 파트의 면이 같은 평면에서 겹치는 곳(Z-fighting)을 찾아 잘라내는 순수 기하 계산. bpy 없이 테스트한다.
+"""서로 다른 파트의 면이 같은 방향으로 같은 평면에 겹치는 곳(Z-fighting)을 찾아 좁은 쪽 파트를 띄우는 순수 기하 계산. bpy 없이 테스트한다.
 
-박스 두 개가 면을 정확히 맞대거나(접촉) 같은 방향 면이 한 평면에 나란히 놓이면(플러시) 깊이 버퍼가
-두 면을 가르지 못해 지글거린다. 겹친 영역을 면에서 오려 내 한 평면에 면이 하나만 남게 한다.
-  접촉(노멀 반대): 겹친 영역은 두 파트 사이에 끼어 보이지 않는다 — 양쪽 면에서 모두 오린다.
-  플러시(노멀 같음): 넓은 면에서 오린다 — 좁은 면이 붙인 디테일(패널·띠)이라 그 색이 남아야 한다.
-절단은 볼록 다각형 연산이다. 오목 면(프리즘 뚜껑 등)은 삼각형으로 쪼개 같은 방식으로 다룬다.
+같은 방향 면이 한 평면에 겹치면(플러시 — 벽에 붙인 패널, 받침에 파묻은 상판) 깊이 버퍼가 두 면을 가르지 못해 지글거린다.
+면을 오려 내면 조각·T자 이음새·용접으로 면이 불어나 손으로 고치기 어려워지므로, 면은 그대로 두고
+좁은 쪽 파트(붙인 디테일)를 통째로 노멀 방향으로 미세하게 민다 — 좁은 쪽 색이 앞에 보인다.
+맞댄 면(노멀 반대 — 받침 위 상자의 밑면)은 두 솔리드 사이에 끼어 어느 쪽에서도 보이지 않으므로 건드리지 않는다.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import math
 
-# 한 평면에서 반복 절단 상한 (조각끼리 다시 겹칠 수 있어 수렴을 보장한다)
-MAX_PASSES = 400
+# 띄우는 거리 = 모델 크기 x 이 비율, [NUDGE_MIN, NUDGE_MAX] m 로 자른다 — 뷰포트·엔진 깊이 정밀도를 넘기되 눈에 띄지 않게
+NUDGE_RATIO = 0.002
+NUDGE_MIN = 0.001
+NUDGE_MAX = 0.01
 
 
 @dataclass
@@ -22,15 +23,7 @@ class Face:
     key: object
     island: object
     points: list          # 월드 좌표 (x, y, z) 목록, 노멀 방향으로 반시계
-    mutable: bool = True  # 메시를 공유하는 인스턴스 면은 자를 수 없다 — 상대 면만 자른다
-
-
-@dataclass
-class _Poly:
-    face: Face
-    sign: int             # 면 노멀이 평면 기준 노멀과 같으면 +1
-    loop: list            # 평면 2D 좌표, 기준 노멀 기준 반시계
-    parts: list = field(default_factory=list)
+    mutable: bool = True  # 메시를 공유하는 인스턴스 면은 움직일 수 없다 — 상대 파트를 민다
 
 
 def _sub(a, b):
@@ -148,56 +141,6 @@ def clip(subject, cutter, tol):
     return out
 
 
-def subtract(subject, hole, tol):
-    """볼록 subject − 볼록 hole → 볼록 조각 목록. hole의 변마다 바깥쪽을 떼어 낸다."""
-    pieces, rest = [], subject
-    for i in range(len(hole)):
-        if not rest:
-            break
-        inside, outside = _split(rest, hole[i], hole[(i + 1) % len(hole)], tol)
-        if outside:
-            pieces.append(outside)
-        rest = inside
-    return pieces
-
-
-def _conform(loops, tol):
-    """조각 변 위에 다른 조각의 꼭짓점이 놓이면 그 변에 끼워 넣는다 — T자 이음새로 생기는 틈을 막는다."""
-    points = [p for loop in loops for p in loop]
-    out = []
-    for loop in loops:
-        new = []
-        for i in range(len(loop)):
-            a, b = loop[i], loop[(i + 1) % len(loop)]
-            new.append(a)
-            dx, dy = b[0] - a[0], b[1] - a[1]
-            length2 = dx * dx + dy * dy
-            if length2 <= tol * tol:
-                continue
-            on = []
-            for p in points:
-                t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2
-                if t <= 1e-9 or t >= 1 - 1e-9:
-                    continue
-                if abs(_side(a, b, p)) / math.sqrt(length2) <= tol:
-                    on.append((t, p))
-            for _t, p in sorted(on):
-                if not any(abs(p[0] - q[0]) <= tol and abs(p[1] - q[1]) <= tol for q in new[-1:]):
-                    new.append(p)
-        out.append(_clean_dupes(new, tol))
-    return out
-
-
-def _clean_dupes(loop, tol):
-    out = []
-    for p in loop:
-        if not out or abs(p[0] - out[-1][0]) > tol or abs(p[1] - out[-1][1]) > tol:
-            out.append(p)
-    if len(out) > 1 and abs(out[0][0] - out[-1][0]) <= tol and abs(out[0][1] - out[-1][1]) <= tol:
-        out.pop()
-    return out
-
-
 def _ear_clip(loop, tol):
     """반시계 단순 다각형 → 삼각형 목록. 실패하면 빈 목록."""
     rest = list(loop)
@@ -233,63 +176,56 @@ def _bbox(loop):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def _find_hit(items, skip, area_tol, tol):
-    boxes = {id(p): _bbox(p) for _poly, parts in items for p in parts}
-    for i in range(len(items)):
-        for j in range(i + 1, len(items)):
-            if items[i][0].face.island == items[j][0].face.island:
+
+
+def nudge_distance(scale):
+    """모델 크기(m)에 맞춘 한 단 띄우는 거리."""
+    return min(NUDGE_MAX, max(NUDGE_MIN, NUDGE_RATIO * scale))
+
+
+def _overlaps(parts_a, parts_b, area_tol, tol):
+    for pa in parts_a:
+        ax0, ay0, ax1, ay1 = _bbox(pa)
+        for pb in parts_b:
+            bx0, by0, bx1, by1 = _bbox(pb)
+            if ax1 <= bx0 + tol or bx1 <= ax0 + tol or ay1 <= by0 + tol or by1 <= ay0 + tol:
                 continue
-            for pa in items[i][1]:
-                ax0, ay0, ax1, ay1 = boxes[id(pa)]
-                for pb in items[j][1]:
-                    bx0, by0, bx1, by1 = boxes[id(pb)]
-                    if ax1 <= bx0 + tol or bx1 <= ax0 + tol or ay1 <= by0 + tol or by1 <= ay0 + tol:
-                        continue
-                    if (id(pa), id(pb)) in skip:
-                        continue
-                    overlap = clip(pa, pb, tol)
-                    if overlap and area2d(overlap) > area_tol:
-                        return i, j, pa, pb, overlap
-    return None
+            overlap = clip(pa, pb, tol)
+            if overlap and area2d(overlap) > area_tol:
+                return True
+    return False
 
 
-def _resolve_bucket(polys, area_tol, tol):
-    """한 평면 안에서 겹침이 없어질 때까지 자른다. 바뀐 면 key → 최종 2D 조각 목록."""
-    items = [(p, list(p.parts)) for p in polys]  # (원본, 현재 조각들)
-    changed, skip = set(), set()
-    for _ in range(MAX_PASSES):
-        hit = _find_hit(items, skip, area_tol, tol)
-        if hit is None:
-            break
-        i, j, pa, pb, overlap = hit
-        a, b = items[i][0], items[j][0]
-        if a.sign != b.sign:
-            # 접촉 — 겹친 영역은 두 파트 사이라 어느 쪽에서도 보이지 않는다
-            targets = [k for k in (i, j) if items[k][0].face.mutable]
-        else:
-            # 플러시 — 넓은 쪽을 오린다. 넓은 쪽이 인스턴스면 좁은 쪽이라도 오려 겹침을 없앤다
-            order = sorted(((abs(area2d(pa)), i), (abs(area2d(pb)), j)), reverse=True)
-            targets = [k for _area, k in order if items[k][0].face.mutable][:1]
-        if not targets:
-            skip.add((id(pa), id(pb)))  # 둘 다 자를 수 없다 — 이 쌍만 포기한다
+def _levels(islands, area_tol, tol):
+    """한 평면·한 방향에서 겹치는 파트들의 층 번호. {island: 층} — 0이 제자리, +1마다 한 단 앞으로.
+
+    islands: {island: (면적, 움직일 수 있는가, 볼록 조각들)}. 넓은 파트부터 놓고, 좁은 파트는
+    겹치는 파트들보다 한 단 앞에 둔다 — 패널 위 명판처럼 겹겹이 붙어도 층마다 서로 떨어진다.
+    움직일 수 없는 파트(인스턴스)는 제자리에 두고, 같은 층에서 겹치는 상대를 한 단 뒤로 민다."""
+    order = sorted(islands, key=lambda k: -islands[k][0])
+    level = {}
+    for key in order:
+        area, mutable, parts = islands[key]
+        under = [o for o in level if _overlaps(parts, islands[o][2], area_tol, tol)]
+        if mutable:
+            level[key] = max((level[o] for o in under), default=-1) + 1
             continue
-        for k in targets:
-            src = pa if k == i else pb
-            parts = [p for p in items[k][1] if p is not src]
-            parts += [piece for piece in subtract(src, overlap, tol) if area2d(piece) > area_tol]
-            items[k] = (items[k][0], parts)
-            changed.add(k)
-    return {items[k][0].face.key: _conform(items[k][1], tol) for k in changed}
+        level[key] = 0
+        for o in under:
+            if level[o] == 0 and islands[o][1]:
+                level[o] = -1
+    return level
 
 
 def resolve(faces, scale=1.0):
-    """겹친 동일평면 면을 오린 결과. {face.key: [조각 월드 좌표 목록, ...]} — 바뀐 면만 담는다.
+    """같은 방향으로 한 평면에 겹친 면을 가진 파트를 띄울 월드 이동량. {island: (dx, dy, dz)} — 움직일 파트만 담는다.
 
-    조각이 빈 목록이면 그 면은 통째로 지운다. 조각 꼭짓점 순서는 원래 면 노멀 방향 반시계다.
-    scale은 모델 크기(m) — 허용 오차를 크기에 비례시켜 큰 배경에서도 판정이 흔들리지 않게 한다."""
+    면은 자르지도 지우지도 않는다. 한 파트가 여러 방향에서 겹치면 방향마다 이동을 더한다.
+    scale은 모델 크기(m) — 허용 오차와 띄우는 거리를 크기에 비례시킨다."""
     tol = max(1e-6, 1e-5 * scale)
     plane_tol = max(1e-5, 1e-4 * scale)
     area_tol = max(1e-10, (1e-4 * scale) ** 2)
+    step = nudge_distance(scale)
     by_normal = {}
     for face in faces:
         if len(face.points) < 3:
@@ -301,7 +237,8 @@ def resolve(faces, scale=1.0):
         by_normal.setdefault(_normal_key(base), []).append((_dot(base, face.points[0]), base, sign, face))
 
     # 같은 노멀 안에서 d(원점 거리) 순으로 늘어놓고 틈이 plane_tol을 넘을 때만 끊는다 —
-    # 고정 칸으로 반올림하면 칸 경계에 걸친 동일평면 쌍이 서로 다른 묶음으로 갈라진다
+    # 고정 칸으로 반올림하면 칸 경계에 걸친 동일평면 쌍이 서로 다른 묶음으로 갈라진다.
+    # 맞댄 면(부호 반대)은 보이지 않으므로 부호까지 같은 면끼리만 묶는다.
     buckets, frames = {}, {}
     for nkey, entries in by_normal.items():
         entries.sort(key=lambda e: e[0])
@@ -313,8 +250,7 @@ def resolve(faces, scale=1.0):
                 u, v = _basis(entries[0][1])
                 frames[(nkey, cluster)] = (entries[0][1], u, v, d)
             last = d
-            key = (nkey, cluster)
-            base, u, v, d0 = frames[key]
+            base, u, v, d0 = frames[(nkey, cluster)]
             # 평면에서 벗어난 면(비평면 쿼드)은 투영하면 모양이 달라진다 — 다루지 않는다
             if any(abs(_dot(base, p) - d0) > plane_tol * 2 for p in face.points):
                 continue
@@ -327,26 +263,31 @@ def resolve(faces, scale=1.0):
             parts = [loop] if _is_convex(loop, tol * 10) else _ear_clip(loop, tol)
             if not parts:
                 continue
-            buckets.setdefault(key, []).append(_Poly(face=face, sign=sign, loop=loop, parts=parts))
+            key = (nkey, cluster, sign)
+            frames[key] = (base[0] * sign, base[1] * sign, base[2] * sign)
+            group = buckets.setdefault(key, {})
+            area, mutable, pieces = group.get(face.island, (0.0, True, []))
+            group[face.island] = (area + area2d(loop), mutable and face.mutable, pieces + parts)
+
+    # 파트·방향마다 가장 먼 층만 남긴다 (계단 윗면처럼 한 파트가 같은 방향 여러 평면에 걸칠 수 있다)
+    shifts = {}
+    for key, group in buckets.items():
+        if len(group) < 2:
+            continue
+        for island, lv in _levels(group, area_tol, tol).items():
+            if lv == 0:
+                continue
+            slot = shifts.setdefault(island, {})
+            prev = slot.get(key[0])
+            if prev is None or abs(lv) > abs(prev[0]):
+                slot[key[0]] = (lv, frames[key])
 
     result = {}
-    for key, polys in buckets.items():
-        if len({p.face.island for p in polys}) < 2:
-            continue
-        base, u, v, d = frames[key]
-        origin = (base[0] * d, base[1] * d, base[2] * d)
-        changed = _resolve_bucket(polys, area_tol, tol)
-        sign_of = {p.face.key: p.sign for p in polys}
-        for face_key, parts in changed.items():
-            out = []
-            for loop in parts:
-                if len(loop) < 3:
-                    continue
-                pts = [(origin[0] + x * u[0] + y * v[0],
-                        origin[1] + x * u[1] + y * v[1],
-                        origin[2] + x * u[2] + y * v[2]) for x, y in loop]
-                if sign_of[face_key] < 0:
-                    pts.reverse()
-                out.append(pts)
-            result[face_key] = out
+    for island, slot in shifts.items():
+        dx = dy = dz = 0.0
+        for lv, n in slot.values():
+            dx += n[0] * lv * step
+            dy += n[1] * lv * step
+            dz += n[2] * lv * step
+        result[island] = (dx, dy, dz)
     return result

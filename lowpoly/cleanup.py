@@ -226,12 +226,12 @@ def cull_hidden_faces(objs) -> int:
     return removed
 
 
-# ---------- 동일평면 겹침(Z-fighting) 절단 ----------
-# 판정·절단 계산은 lowpoly/coplanar.py(순수 기하)가 하고, 여기서는 결과 조각을 메시에 되돌린다.
+# ---------- 동일평면 겹침(Z-fighting) 띄우기 ----------
+# 판정 계산은 lowpoly/coplanar.py(순수 기하)가 하고, 여기서는 결과 이동량을 파트 꼭짓점에 적용한다.
 
 
 def _loose_part_ids(mesh):
-    """면 인덱스 → 연결 요소(느슨한 파트) 번호."""
+    """꼭짓점 인덱스 → 연결 요소(느슨한 파트) 번호."""
     parent = list(range(len(mesh.vertices)))
 
     def find(i):
@@ -244,7 +244,7 @@ def _loose_part_ids(mesh):
         a, b = find(edge.vertices[0]), find(edge.vertices[1])
         if a != b:
             parent[a] = b
-    return [find(p.vertices[0]) for p in mesh.polygons]
+    return [find(i) for i in range(len(mesh.vertices))]
 
 
 def _coplanar_scale(objs) -> float:
@@ -258,114 +258,49 @@ def _coplanar_scale(objs) -> float:
     return min(10.0, max(0.1, size))
 
 
-def _rebuild_face(bm, face, pieces, mw, inv, flip, tol):
-    """face를 월드 좌표 조각들로 갈아 끼운다. 원래 변 위에 놓인 조각 꼭짓점은 그 변을 쪼개 이웃 면과 공유한다."""
-    def on_edge(edge, p):
-        a, b = mw @ edge.verts[0].co, mw @ edge.verts[1].co
-        ab = b - a
-        length2 = ab.length_squared
-        if length2 <= tol * tol:
-            return None
-        t = (p - a).dot(ab) / length2
-        if t <= 1e-6 or t >= 1 - 1e-6 or (a + ab * t - p).length > tol:
-            return None
-        return t
-
-    created = []  # (월드 좌표, BMVert) — 조각 사이에 공유되는 내부 꼭짓점
-
-    def vert_at(p):
-        for v in face.verts:
-            if (mw @ v.co - p).length <= tol:
-                return v
-        for q, v in created:
-            if (q - p).length <= tol:
-                return v
-        for edge in face.edges:
-            t = on_edge(edge, p)
-            if t is not None:
-                _edge, v = bmesh.utils.edge_split(edge, edge.verts[0], t)
-                v.co = inv @ p
-                return v
-        v = bm.verts.new(inv @ p)
-        created.append((p, v))
-        return v
-
-    made = []
-    for piece in pieces:
-        verts = [vert_at(Vector(p)) for p in piece]
-        if flip:
-            verts.reverse()
-        if len(set(verts)) < 3:
-            continue
-        try:
-            new = bm.faces.new(verts, face)
-        except ValueError:   # 같은 꼭짓점의 면이 이미 있다
-            continue
-        for loop in new.loops:
-            loop.copy_from_face_interp(face)
-        made.append(new)
-    return made
-
-
 def resolve_coplanar_faces(objs) -> int:
-    """서로 다른 파트의 면이 한 평면에서 겹친 곳을 오려 Z-fighting을 없앤다. 바꾼 면 수를 반환.
+    """서로 다른 파트의 면이 같은 방향으로 한 평면에 겹친 곳의 Z-fighting을 없앤다. 옮긴 파트 수를 반환.
 
-    맞닿은 면(노멀 반대)은 겹친 영역을 양쪽에서 지우고, 같은 방향으로 나란한 면은 넓은 쪽에서 오린다.
-    메시를 공유하는 인스턴스는 자르지 않고 상대 면만 자른다."""
+    면을 자르거나 지우지 않고, 좁은 쪽 파트(벽에 붙인 패널 등)를 통째로 노멀 방향으로 수 mm 띄운다.
+    맞댄 면(노멀 반대)은 두 솔리드 사이라 보이지 않으므로 그대로 둔다.
+    메시를 공유하는 인스턴스는 움직이지 않고 상대 파트를 민다."""
     from . import coplanar
 
     meshes = [o for o in objs if o.type == 'MESH' and o.data.polygons]
-    if len(meshes) == 0:
+    if not meshes:
         return 0
-    faces = []
+    faces, roots = [], {}
     for obj in meshes:
         mesh, mw = obj.data, obj.matrix_world
         mutable = mesh.users == 1
-        parts = _loose_part_ids(mesh)
+        root = _loose_part_ids(mesh)
+        roots[obj.name] = root
         world = [mw @ v.co for v in mesh.vertices]
         # 음수 스케일은 월드 좌표의 감기 방향을 뒤집는다 — Blender가 보여 주는 노멀과 맞추려면 되돌린다
         order = -1 if mw.determinant() < 0 else 1
         for poly in mesh.polygons:
             faces.append(coplanar.Face(
-                key=(obj.name, poly.index), island=(obj.name, parts[poly.index]),
+                key=(obj.name, poly.index), island=(obj.name, root[poly.vertices[0]]),
                 points=[tuple(world[i]) for i in poly.vertices][::order], mutable=mutable))
-    scale = _coplanar_scale(meshes)
-    changes = coplanar.resolve(faces, scale=scale)
-    if not changes:
+    shifts = coplanar.resolve(faces, scale=_coplanar_scale(meshes))
+    if not shifts:
         return 0
-    tol = max(1e-6, 1e-5 * scale)
     by_obj = {}
-    for (name, index), pieces in changes.items():
-        by_obj.setdefault(name, {})[index] = pieces
+    for (name, part), offset in shifts.items():
+        by_obj.setdefault(name, {})[part] = Vector(offset)
     for obj in meshes:
         todo = by_obj.get(obj.name)
         if not todo or obj.data.users > 1:
             continue
-        mw = obj.matrix_world.copy()
-        inv = mw.inverted()
-        flip = mw.determinant() < 0   # 음수 스케일이면 로컬에서 감기 방향이 뒤집힌다
-        bm = bmesh.new()
-        bm.from_mesh(obj.data)
-        bm.faces.ensure_lookup_table()
-        targets = [(bm.faces[i], pieces) for i, pieces in todo.items()]
-        # 원래부터 떠 있던 변·점은 사용자 의도일 수 있으니 남기고, 이번에 떨어져 나온 것만 지운다
-        kept_edges = {e for e in bm.edges if not e.link_faces}
-        kept_verts = {v for v in bm.verts if not v.link_edges}
-        for face, pieces in targets:
-            _rebuild_face(bm, face, pieces, mw, inv, flip, tol)
-        bmesh.ops.delete(bm, geom=[face for face, _p in targets], context='FACES_ONLY')
-        bmesh.ops.delete(bm, geom=[e for e in bm.edges if not e.link_faces and e not in kept_edges],
-                         context='EDGES')
-        bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_edges and v not in kept_verts],
-                         context='VERTS')
-        # 오려 낸 구멍 둘레와 상대 파트의 테두리가 같은 자리에 있다 — 이어 붙여 틈 없는 한 덩어리로 만든다
-        rim = [v for v in bm.verts if any(e.is_boundary for e in v.link_edges)]
-        if rim:
-            bmesh.ops.remove_doubles(bm, verts=rim, dist=tol / max(1e-9, max(abs(c) for c in mw.to_scale())))
-        bm.to_mesh(obj.data)
-        bm.free()
+        to_local = obj.matrix_world.to_3x3().inverted()
+        local = {part: to_local @ offset for part, offset in todo.items()}
+        root = roots[obj.name]
+        for i, v in enumerate(obj.data.vertices):
+            offset = local.get(root[i])
+            if offset is not None:
+                v.co += offset
         obj.data.update()
-    return len(changes)
+    return len(shifts)
 
 
 def _island_bounds(objs):

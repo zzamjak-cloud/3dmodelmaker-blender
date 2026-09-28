@@ -510,7 +510,7 @@ class GenerationSession:
         self._submit_ai(lambda: shapegen.generate(
             views, self.shape_path, max(self.prefs.timeout, 1500), self._on_shape,
             job_key=self.uid,
-            # 안쪽 겹이 임포트에서 지워지므로 목표의 두 배를 요청한다 (CRUST_FACE_FACTOR 주석 참고)
+            # 절반 가까이가 보이지 않는 안쪽 겹이므로 목표의 두 배를 요청한다 (CRUST_FACE_FACTOR 주석 참고)
             face_count=int(getattr(self.prefs, "shapegen_faces", 12000)) * shapegen.CRUST_FACE_FACTOR,
             multiview=False, texture=True,
             texture_size=int(getattr(self.prefs, "shapegen_texture_size", 2048))))
@@ -548,8 +548,6 @@ class GenerationSession:
         self.last_code = ""
         self.compare_turns_left = 0
         weld = f", 심 중복 정점 {info['welded']:,}개 용접" if info.get('welded') else ""
-        weld += f", 안쪽 면 {info['interior_faces']:,}개 제거" if info.get('interior_faces') else ""
-        weld += f", 구멍 {info['filled_holes']:,}개 메움" if info.get('filled_holes') else ""
         self._final_note = f"{info['tris']} tris, PBR 텍스처 {len(info['images'])}장{weld}"
         self._apply_lane()
         self._finish(f"완료 — {info['obj'].name} ({info['faces']:,}면, PBR 재질 {info['materials']}개)", ok=True)

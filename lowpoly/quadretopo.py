@@ -1,9 +1,10 @@
 # 쿼드 리토폴로지 — 셰이프 서버가 구운 PBR 메시 위에 새 와이어를 깔고 텍스처를 베이크로 옮긴다
 #
-# 입력은 retopo.import_textured() 가 정리해 둔 단일 셸(용접·안쪽 껍질 제거·키 정규화 완료)과
-# PBR 텍스처다. 순서: 원본 보존 → 작업본 → 복셀 리메시(촘촘히) → 파편 제거 → 데시메이트 → 매니폴드 수리
+# 입력은 retopo.import_textured() 가 가져온 메시(용접·키 정규화 완료, 셰이프 서버의 속 빈 이중 껍질 그대로)와
+# PBR 텍스처다. 순서: 원본 보존 → 작업본 → 속 채우기(solid_fill) → 복셀 리메시(촘촘히) → 파편 제거 → 데시메이트
+# → 매니폴드 수리
 # → (링 가이드 위치에 절단 띠) → QuadriFlow(좌우 대칭이면 양의 반쪽만, 실패 시 데시메이트 폴백)
-# → (절단 링 접합) → 구멍 쿼드 메움 → 투영 슈링크랩+릴랙스 → 대칭면 미러 용접 → UV 언랩 → Cycles 베이크
+# → (절단 링 접합) → 구멍 쿼드 메움 → 투영 슈링크랩(바깥 면만)+슬리버 펴기 → 대칭면 미러 용접 → UV 언랩 → Cycles 베이크
 # → 새 머티리얼.
 #
 # 링 가이드: 팔·다리·목 같은 원통은 가우스 곡률이 0 이라 QuadriFlow 방향장이 임의 각도로 굳어 나선 와이어가
@@ -23,7 +24,7 @@ import bmesh
 import bpy
 from mathutils import Vector
 
-from . import ring_cut
+from . import ring_cut, solid_fill
 from .names import safe_id_name
 
 SOURCE_SUFFIX = '_원본'
@@ -36,6 +37,10 @@ MERGE_DIST = 2e-4              # 이보다 짧은 엣지는 이 길이까지 늘
                                # 완전 매니폴드 메시가 계속 거절당했다)
 FRAGMENT_RATIO = 0.005         # 전체 면수의 이 비율 미만인 떨어진 셸은 복셀 리메시 거품으로 보고 지운다
 REPAIR_ROUNDS = 4              # 수리 반복 상한 — 실측상 1회면 끝난다
+SOLID_PITCH_DIV = 300.0        # 속 채우기 격자 한 변 = 모델 크기 / 이 값 (1.8m 에서 6mm — 4mm 껍질을 벽으로 찍는다)
+SOLID_CLOSE_DIV = 180.0        # 속 채우기가 막는 틈 반폭 = 모델 크기 / 이 값 (1.8m 에서 1cm). 찢김 입구는 막고
+                               # 겨드랑이 틈(3.8cm, 2026-09-21 죄수)은 남긴다
+OUTER_MIN_RATIO = 0.3          # 바깥을 향한 면이 원본의 이 비율 미만이면 판정이 어긋난 것으로 보고 원본 전체에 붙인다
 # QuadriFlow 입력 사다리 — (복셀 리메시 면수, 데시메이트 뒤 삼각형 수). 실패하면 다음 단으로 내려간다.
 # 복셀은 촘촘히 굽고(겨드랑이·다리 사이 같은 좁은 틈이 살아남게) 데시메이트로 QuadriFlow 가 받는 크기까지
 # 낮춘다. 실측(2026-09-21, 죄수): 복셀 1.4만면(2.2cm)은 3.8cm 겨드랑이 틈을 메워 팔이 몸통에 붙었고,
@@ -87,8 +92,7 @@ SCORE_OUTPUTS = 2              # 링 접합 점수를 매겨 볼 QuadriFlow 출�
 QF_ATTEMPTS = 3                # 한 밀도에서 시드를 바꿔 볼 횟수. 실측(2026-09-20): 같은 입력에서 시드 1·2 는 정지,
                                # 시드 3 은 9초 성공 — 비결정적이라 여러 시드를 차례로 본다
 SHRINK_LIMIT = 3.0             # 노멀 투영 한계 = 복셀 한 변 x 이 배수 — 이보다 먼 표면으로는 끌려가지 않는다
-RELAX_ROUNDS = 2               # 스무딩 → 재투영 반복 횟수
-RELAX_FACTOR = 0.5
+RELAX_FACTOR = 0.5             # 슬리버 주변 스무딩 강도
 SLIVER_ASPECT = 8.0            # 이 종횡비를 넘는 면 주변만 골라 다시 편다 — 전체 스무딩은 형상을 뭉개면서도
                                # 짧은 엣지를 늘리지 못한다(실측 2026-09-21: 최대 종횡비 22.2 → 7.6)
 SLIVER_ROUNDS = 20             # 슬리버 완화 반복 상한. 남는 몇 개는 형상이 실제로 접힌 곳이다
@@ -143,6 +147,14 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
         work.hide_render = False
         _set_hidden(work, False)
 
+        # 셰이프 서버 메시는 속 빈 껍질이라 그대로 복셀 리메시하면 껍질이 얇은 곳마다 몸속으로 구멍이 뚫리고
+        # QuadriFlow 결과가 구겨진다(실측 2026-09-28, 좀비: 보이는 뒷면 64%). 먼저 속을 채운 덩어리로 바꾼다
+        say("속 채우기")
+        size = _local_size(work)
+        filled = solid_fill.fill_interior(work, size / SOLID_PITCH_DIV, size / SOLID_CLOSE_DIV)
+        # 채운 덩어리는 계단 면이라 면적이 부푼다 — 링 띠 폭(엣지 길이)은 원본의 바깥 면 넓이로 잡는다
+        surface_area = filled.get("outer_area") or None
+
         # QuadriFlow 가 실패하면 여기(리메시 이전)로 되돌려 데시메이트한다
         snapshot = work.data.copy()
 
@@ -153,7 +165,8 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
 
         notes = []
         # 대칭 반쪽은 +X 로 미러·중복 제거한 링을, 닫힌 전체 폴백은 사용자가 둔 그대로의 링을 자른다
-        requested, full_requested = _requested_cuts(work, ring_guides, target_faces, symmetry, notes)
+        requested, full_requested = _requested_cuts(work, ring_guides, target_faces, symmetry, notes,
+                                                    area=surface_area)
         max_retries = len(full_requested)   # 실패한 가이드를 하나씩은 빼므로 가이드 수만큼이면 충분하다
         for first, second, gap in ring_cut.crowded_pairs(requested):
             notes.append(f"링 가이드 '{first}' 와 '{second}' 의 간격({gap:.3g})이 좁아 접합이 서로 간섭할 수 있습니다 "
@@ -211,6 +224,23 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             retries += 1
             attempt -= 1
             outcome, seams = None, ()
+        if outcome is None and full_requested:
+            # 링을 넣은 시도가 모든 밀도에서 실패했다 — 데시메이트로 떨어지기 전에 첫 밀도로 링 없이 한 번 더 깐다.
+            # 링 없는 반쪽 재시도는 사다리 마지막 단에만 있어, 그 단이 매니폴드 정리에서 막히면 한 번도 돌지 않았다
+            # (실측 2026-09-28, 근육질 좀비 12,000면: 목 가이드 하나 때문에 데시메이트 폴백, 링 없이는 바로 성공)
+            density, triangles = ladder[0]
+            say("링을 넣은 시도가 모두 실패 — 링 없이 다시 깔기")
+            stale, work.data = work.data, snapshot.copy()
+            bpy.data.meshes.remove(stale)
+            _voxel_remesh(work, target_faces, wanted=density)
+            remove_fragments(work)
+            _decimate(work, triangles)
+            if make_manifold(work):
+                outcome, _cuts = _quadriflow(work, target_faces, symmetry, say, allow_full=True, notes=notes)
+                if outcome is not None:
+                    notes.append("링 가이드를 넣은 시도가 모든 밀도에서 실패해 링 없이 깔았습니다 "
+                                 "— 가이드를 단면이 일정한 위치로 옮겨 주세요")
+            seams = ()
         for seam in seams:
             notes.append(f"링 '{seam.name}': 절단 링 {seam.ring_sizes[0]}·{seam.ring_sizes[1]}정점 접합"
                          + (f" (전이 삼각형 {seam.triangles}개)" if seam.triangles else ""))
@@ -227,12 +257,15 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             stale, work.data = work.data, snapshot
             bpy.data.meshes.remove(stale)
             work.data.name = work.name
+            # snapshot 은 속 채우기의 계단 덩어리다 — 복셀 리메시로 한 번 녹인 뒤 줄인다
+            _voxel_remesh(work, target_faces)
             _decimate(work, target_faces)
             method = "DECIMATE"
 
         with _visible(stash):
             say("표면 맞춤")
-            _shrinkwrap(work, stash, plane_axes)
+            with _outer_surface(stash, filled.get("outer")) as surface:
+                _shrinkwrap(work, surface, plane_axes)
             if plane_axes:
                 say("대칭면 미러 용접")
                 # 구멍 메우기가 대칭면 옆에 남긴 웹의 내부 정점이 평면 위에 있으면 미러가 거울상과 용접해
@@ -332,6 +365,38 @@ def _visible(obj):
     finally:
         _set_hidden(obj, True)
         obj.hide_render = render
+
+
+@contextmanager
+def _outer_surface(source, outer):
+    """source 에서 안쪽 껍질 면을 뺀 임시 슈링크랩 대상을 잠시 만든다 (outer: 폴리곤별 바깥 면 여부).
+
+    셰이프 서버 원본은 바깥 껍질 4mm 뒤에 노멀이 몸속을 향한 안쪽 껍질이 붙은 이중 껍질이다. 복셀·QuadriFlow 가
+    다듬은 표면은 볼록한 곳에서 바깥 껍질보다 안쪽에 놓이고, 그 정점이 안쪽 껍질에 붙으면 이웃과 서로 다른 껍질로
+    갈려 면이 엇갈린다(실측 2026-09-28, 좀비: 슈링크랩 전 교차 246쌍 → 후 6,854쌍). 판정은 속 채우기 격자가 한다."""
+    count = len(source.data.polygons)
+    kept = int(outer.sum()) if outer is not None and len(outer) == count else count
+    if kept == count or kept < count * OUTER_MIN_RATIO:
+        yield source
+        return
+    mesh = source.data.copy()
+    surface = None
+    try:
+        bm = bmesh.new()
+        bm.from_mesh(mesh)
+        bm.faces.ensure_lookup_table()
+        bmesh.ops.delete(bm, geom=[bm.faces[i] for i, keep in enumerate(outer) if not keep], context='FACES')
+        bm.to_mesh(mesh)
+        bm.free()
+        surface = bpy.data.objects.new(safe_id_name(source.name + "_바깥면"), mesh)
+        surface.matrix_world = source.matrix_world.copy()
+        surface.hide_render = True
+        source.users_collection[0].objects.link(surface)
+        yield surface
+    finally:
+        if surface is not None:
+            bpy.data.objects.remove(surface, do_unlink=True)
+        bpy.data.meshes.remove(mesh)
 
 
 @contextmanager
@@ -712,14 +777,16 @@ def _cut_bands(holder, requested_cuts: tuple, scale: float, say, notes: list, pl
     return cuts
 
 
-def _requested_cuts(work, ring_guides, target_faces: int, symmetry: bool, notes=None) -> tuple:
+def _requested_cuts(work, ring_guides, target_faces: int, symmetry: bool, notes=None, area=None) -> tuple:
     """월드 좌표 링 가이드를 작업본 로컬 절단 링으로 바꾼다. (반쪽용, 전체용) 을 돌려준다 — 대칭이면 반쪽용은
-    음의 쪽 가이드를 양의 쪽으로 미러하고 중복을 합친다. 띠 반폭은 출력 엣지 길이(표면적 / 목표 면수)의 절반이다."""
+    음의 쪽 가이드를 양의 쪽으로 미러하고 중복을 합친다. 띠 반폭은 출력 엣지 길이(표면적 / 목표 면수)의 절반이다.
+    area 를 주면 작업본 면적 대신 그 값을 표면적으로 쓴다."""
     if not ring_guides:
         return (), ()
     to_local = work.matrix_world.inverted()
     guides = [(name, [tuple(to_local @ Vector(point)) for point in points]) for name, points in ring_guides]
-    area = sum(polygon.area for polygon in work.data.polygons)
+    if area is None:
+        area = sum(polygon.area for polygon in work.data.polygons)
     edge = math.sqrt(max(area, 1e-12) / max(int(target_faces), 1))
     # 띠 폭 = 출력 엣지 하나. 엣지 두 개로 넓히면 오거(014)에서 접합이 5개 중 1개로 줄었다(실측 2026-09-23)
     cuts = ring_cut.ring_cuts(guides, edge)
@@ -1310,15 +1377,22 @@ def _shrinkwrap(obj, target, plane_axes: tuple = ()) -> None:
     최근접점 방식(NEAREST_SURFACEPOINT)만 쓰면 접히는 공간(겨드랑이·소매 안쪽)에서 이웃 정점이 서로 다른
     표면으로 끌려가 면이 교차하고 어둡게 찢어진다(실측 2026-09-21: 원본에서 1% 넘게 벗어난 면 39개).
     그래서 **노멀 방향 투영**(양방향, 복셀 SHRINK_LIMIT 배 안)을 먼저 하고, 노멀 선상에 표면이 없어 빗나간
-    정점(옷단 립 등)만 최근접점으로 붙인다. 그 뒤 스무딩 → 다시 투영을 RELAX_ROUNDS 번 반복해 접힌 부분의
-    와이어를 편다(같은 실측에서 7개로 감소).
+    정점(옷단 립 등)만 최근접점으로 붙인다.
+
+    예전에는 그 뒤 전체 스무딩 → 다시 투영을 두 번 돌려 접힌 와이어를 폈지만, 속 채우기(solid_fill)가 들어온
+    뒤로는 접힘이 투영 전부터 거의 없고 스무딩이 오히려 형상을 망쳤다 — 스무딩으로 안쪽에 들어간 정점이 다시
+    투영될 때 옷자락·몸 등 엉뚱한 겹으로 흩어졌다(실측 2026-09-28, 보이는 뒷면 비율: 근육질 좀비 4.7% → 14.1%,
+    뚱뚱한 좀비 0.4% → 96.7%·부피 부호 반전). 그래서 전체 스무딩은 뺐다.
 
     마지막으로 종횡비가 큰 슬리버 면 **주변 한 겹만** 골라 다시 편다 — QuadriFlow 는 구멍 주변에 아주 짧은
     엣지를 남기고 그것이 면 분포를 망친다(실측 2026-09-21: 최대 종횡비 22.2 → 7.6). 전체 스무딩을 더 돌리면
     형상만 뭉개지고 짧은 엣지는 늘어나지 않는다.
 
     plane_axes 가 있으면 그 평면 위 정점은 매 단계 뒤 평면으로 되돌린다 — 평면을 넘어간 정점을 두면
-    미러 복제와 겹쳐 대칭이 깨진다(실측: 대칭 오차 0.07)."""
+    미러 복제와 겹쳐 대칭이 깨진다(실측: 대칭 오차 0.07).
+
+    target 은 안쪽 껍질을 뺀 바깥 면(_outer_surface)이라 투영 한계도 그 면적으로 잡힌다 — 두 겹 전체로 재면
+    한계가 약 1.4배로 커져 먼 겹으로 끌려갈 여지가 늘어난다."""
     import mathutils
     limit = _voxel_size(target, QF_INPUT_FACES) * SHRINK_LIMIT
     tree = mathutils.bvhtree.BVHTree.FromObject(target, bpy.context.evaluated_depsgraph_get())
@@ -1372,16 +1446,6 @@ def _shrinkwrap(obj, target, plane_axes: tuple = ()) -> None:
         obj.data.update()
         pin()
 
-    def relax():
-        bm = bmesh.new()
-        bm.from_mesh(obj.data)
-        bmesh.ops.smooth_vert(bm, verts=bm.verts[:], factor=RELAX_FACTOR,
-                              use_axis_x=True, use_axis_y=True, use_axis_z=True)
-        bm.to_mesh(obj.data)
-        bm.free()
-        obj.data.update()
-        pin()
-
     def relax_slivers():
         for _ in range(SLIVER_ROUNDS):
             bm = bmesh.new()
@@ -1405,9 +1469,6 @@ def _shrinkwrap(obj, target, plane_axes: tuple = ()) -> None:
             pin()
 
     project()
-    for _ in range(RELAX_ROUNDS):
-        relax()
-        project()
     # 투영이 이웃 정점을 같은 자리로 끌어와 퇴화 엣지를 만든다 — 슬리버를 펴기 전에 먼저 합친다
     if _weld_degenerate(obj):
         repin()

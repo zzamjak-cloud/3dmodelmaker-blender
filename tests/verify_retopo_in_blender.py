@@ -88,6 +88,54 @@ def render_views(objs, prefix: str, resolution: int = 800) -> list:
     return paths
 
 
+def open_edges(obj) -> int:
+    """면 하나에만 붙은 엣지 수."""
+    import bmesh
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    count = sum(1 for e in bm.edges if e.is_boundary)
+    bm.free()
+    return count
+
+
+def visible_backface_ratio(obj, rays: int = 4000, seed: int = 3) -> float:
+    """바깥 구면에서 모델 경계 상자 안으로 쏜 광선이 처음 닿은 면이 뒷면인 비율.
+
+    표면이 접히거나 몸속으로 구멍이 뚫리면 바깥에서 뒷면이 보인다 — 렌더의 검은 얼룩과 같은 현상이다.
+    (자기 교차 수는 원본 자체의 교차 — 몸을 파고든 천 자락 등 — 를 물려받아 지표로 쓸 수 없다.)"""
+    import math
+    import random
+
+    import bmesh
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.transform(obj.matrix_world)
+    tree = BVHTree.FromBMesh(bm)
+    points = [v.co for v in bm.verts]
+    lo = Vector((min(p.x for p in points), min(p.y for p in points), min(p.z for p in points)))
+    hi = Vector((max(p.x for p in points), max(p.y for p in points), max(p.z for p in points)))
+    bm.free()
+    center, radius = (lo + hi) / 2, (hi - lo).length
+    rng = random.Random(seed)
+    hits = back = 0
+    for _ in range(rays):
+        z = rng.uniform(-1.0, 1.0)
+        angle = rng.uniform(0.0, 2.0 * math.pi)
+        ring = math.sqrt(1.0 - z * z)
+        origin = center + Vector((ring * math.cos(angle), ring * math.sin(angle), z)) * radius
+        aim = Vector((rng.uniform(lo.x, hi.x), rng.uniform(lo.y, hi.y), rng.uniform(lo.z, hi.z)))
+        direction = (aim - origin).normalized()
+        location, normal, _index, _distance = tree.ray_cast(origin, direction, radius * 3)
+        if location is None:
+            continue
+        hits += 1
+        back += normal.dot(direction) > 0
+    return back / max(hits, 1)
+
+
 def mirror_ratio(obj, tolerance: float = 0.004) -> float:
     """정점마다 x 를 뒤집은 자리에서 tolerance x 모델 크기 안에 정점이 있는 비율."""
     from mathutils import Vector
@@ -211,13 +259,11 @@ def main():
     imported = retopo.import_textured(GLB, "캐릭터", coll)
     source = imported["obj"]
     print(f"INFO 임포트: 면 {imported['faces']} · 트라이 {imported['tris']} · "
-          f"이미지 {imported['images']} · 구멍 메움 {imported['filled_holes']} · "
-          f"열린 테두리 {imported['open_loops']} · 공동 {imported['cavities']} "
-          f"(되살린 면 {imported['revived_faces']}) · {time.perf_counter() - started:.1f}s")
-    # ⓪ 컬링이 남긴 작은 구멍은 임포트에서 메워지고, 옷의 진짜 테두리(소매·밑단·깃)만 열려 있다
-    check("컬링 구멍 메움", imported["filled_holes"], 1, "ge")
-    check("메운 루프가 남긴 테두리보다 많음", imported["filled_holes"], imported["open_loops"], "ge")
+          f"이미지 {imported['images']} · 용접 {imported['welded']} · {time.perf_counter() - started:.1f}s")
+    # ⓪ 임포트는 서버 메시를 지우거나 메우지 않는다 — 용접만 해도 열린 엣지가 거의 없어야 한다
+    check("임포트 열린 엣지 (면수의 2% 이하)", open_edges(source), int(imported["faces"] * 0.02), "le")
     before = render_views([source], "01_원본")
+    source_back = visible_backface_ratio(source)
 
     def say(text):
         print(f"  … {text}")
@@ -227,6 +273,11 @@ def main():
     obj = result["obj"]
     print(f"INFO 결과: {result['method']} · 면 {result['faces']} · 쿼드 {result['quads']} · "
           f"트라이 {result['tris']} · {result['seconds']}s")
+    # ⓪' 속 빈 껍질을 그대로 리메시하면 몸속으로 구멍이 뚫리고 표면이 구겨져, 바깥에서 뒷면이 보인다(렌더의 검은
+    # 얼룩). 실측(2026-09-28, 좀비 4종): 속 채우기 전 30~64%, 뒤 0.1~4.7%
+    back = visible_backface_ratio(obj)
+    print(f"INFO 보이는 뒷면 비율: 원본 {source_back:.3f} → 결과 {back:.3f}")
+    check("보이는 뒷면 비율 (10% 이하)", round(back, 3), 0.1, "le")
 
     # ① 면수가 목표의 0.7~1.5배
     check("면수 하한 (목표 x0.7)", result["faces"], int(TARGET * 0.7), "ge")

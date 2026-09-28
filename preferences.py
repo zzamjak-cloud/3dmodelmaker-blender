@@ -134,8 +134,8 @@ class LP3DPreferences(bpy.types.AddonPreferences):
     )
     shapegen_faces: IntProperty(
         name="셰이프 목표 면수",
-        description="완성된 캐릭터 메시의 목표 삼각형 수. 서버 내보내기는 바깥·안쪽 두 겹을 만들고 "
-                    "임포트에서 안쪽 겹을 지우므로, 서버에는 이 값의 두 배를 요청한다",
+        description="보이는 바깥 겹의 목표 삼각형 수. 서버 내보내기는 바깥·안쪽 두 겹을 만들므로 서버에는 "
+                    "이 값의 두 배를 요청하고, 가져온 메시(두 겹 모두)는 이 값의 약 두 배가 된다",
         default=12000, min=2000, max=100000,
         update=_persist_cb,
     )

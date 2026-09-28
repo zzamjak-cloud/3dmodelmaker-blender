@@ -89,9 +89,9 @@ def guide_world_points(collection) -> list:
 
 
 def section_source(collection):
-    """단면을 잴 메시 — 보존된 원본이 있으면 그것(리토폴로지 결과는 다시 깔 때 사라진다), 없으면 대상 메시."""
+    """단면을 잴 메시 — 리토폴로지 원본(결과는 별도 컬렉션에 옆으로 비켜 있어 가이드 기준이 될 수 없다)."""
     from ..lowpoly import quadretopo
-    return quadretopo.find_retopo_source(collection) or quadretopo.find_retopo_target(collection)
+    return quadretopo.find_retopo_target(collection)
 
 
 def _retopo_target(collection):

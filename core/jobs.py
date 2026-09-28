@@ -162,6 +162,12 @@ def remove_job(context, index: int):
     index = next((i for i, job in enumerate(props.jobs) if job.uid == uid), index)
     if session.is_active(uid):
         session.cancel_session(uid)
+    # 결과는 남기되 파일을 다시 열 때 생성 정보로 항목이 되살아나지 않게 한다
+    try:
+        from . import genmeta
+        genmeta.dismiss(props.jobs[index].collection_name)
+    except Exception:
+        log.exception("생성 정보 표시 실패")
     props.jobs.remove(index)
     props.job_index = min(index, max(0, len(props.jobs) - 1))
 

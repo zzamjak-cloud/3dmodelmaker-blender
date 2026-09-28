@@ -287,6 +287,7 @@ class LP3D_PT_output(bpy.types.Panel):
                 col.label(text="부모 배경 키트에 병합됨", icon='LINKED')
             else:
                 col.label(text="완료된 항목을 선택하세요", icon='INFO')
+            self._draw_adopt(layout, context)
             return
 
         col.label(text=f"결과: {job.collection_name}", icon='OUTLINER_COLLECTION')
@@ -318,9 +319,12 @@ class LP3D_PT_output(bpy.types.Panel):
         if quadretopo.find_retopo_target(coll) is None:
             return
         box = layout.box()
-        done = quadretopo.has_retopo_source(coll)
-        box.label(text="리토폴로지" + (" — 완료 (원본은 숨김)" if done else ""),
+        done = quadretopo.has_retopo_result(coll)
+        result = quadretopo.find_retopo_result(coll)
+        box.label(text="리토폴로지" + (" — 완료 (원본은 그대로)" if done else ""),
                   icon='CHECKMARK' if done else 'MOD_REMESH')
+        if result is not None:
+            box.label(text=f"결과: {result.name} (+X 옆)", icon='OUTLINER_COLLECTION')
         row = box.row(align=True)
         row.prop(props, "retopo_faces")
         row.prop(props, "retopo_symmetry", toggle=True)
@@ -330,6 +334,16 @@ class LP3D_PT_output(bpy.types.Panel):
         run.scale_y = 1.2
         run.operator("lp3d.job_retopo", text="다시 리토폴로지" if done else "리토폴로지 시작",
                      icon='FILE_REFRESH' if done else 'MOD_REMESH')
+
+
+    def _draw_adopt(self, layout, context):
+        """큐 항목이 없는 메시를 골랐을 때 — 옛 버전에서 저장한 결과를 다시 후처리할 수 있게 등록 버튼을 보인다."""
+        from .operators import untracked_collection
+        if context.mode != 'OBJECT' or untracked_collection(context) is None:
+            return
+        box = layout.box()
+        box.label(text=f"큐 항목이 없는 메시: {context.active_object.name}", icon='QUESTION')
+        box.operator("lp3d.adopt_mesh", icon='IMPORT')
 
 
 _CLASSES = (LP3D_UL_jobs, LP3D_PT_main, LP3D_PT_log, LP3D_PT_output)

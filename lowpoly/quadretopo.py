@@ -1,18 +1,18 @@
 # 쿼드 리토폴로지 — 셰이프 서버가 구운 PBR 메시 위에 새 와이어를 깔고 텍스처를 베이크로 옮긴다
 #
 # 입력은 retopo.import_textured() 가 가져온 메시(용접·키 정규화 완료, 셰이프 서버의 속 빈 이중 껍질 그대로)와
-# PBR 텍스처다. 순서: 원본 보존 → 작업본 → 속 채우기(solid_fill) → 복셀 리메시(촘촘히) → 파편 제거 → 데시메이트
+# PBR 텍스처다. 순서: 원본 복제(작업본, 결과 컬렉션) → 속 채우기(solid_fill) → 복셀 리메시(촘촘히) → 파편 제거 → 데시메이트
 # → 매니폴드 수리
 # → (링 가이드 위치에 절단 띠) → QuadriFlow(좌우 대칭이면 양의 반쪽만, 실패 시 데시메이트 폴백)
 # → (절단 링 접합) → 구멍 쿼드 메움 → 투영 슈링크랩(바깥 면만)+슬리버 펴기 → 대칭면 미러 용접 → UV 언랩 → Cycles 베이크
-# → 새 머티리얼.
+# → 새 머티리얼 → 원본 옆(+X)으로 옮김.
 #
 # 링 가이드: 팔·다리·목 같은 원통은 가우스 곡률이 0 이라 QuadriFlow 방향장이 임의 각도로 굳어 나선 와이어가
 # 생긴다. 가이드 위치의 얇은 띠를 지워 경계를 만들고 경계 보존으로 깔면 그 경계가 앵커가 되어 링 루프가 축을
 # 따라 전파된다. QuadriFlow 가 막은 캡을 지우고 양쪽 링을 브리지로 다시 잇는다(ring_cut.py).
 #
 # 텍스처를 AI 로 다시 만들지 않고 원본에서 굽는 것이 예전 리토폴로지 경로와의 결정적인 차이다.
-# 어느 단계가 실패해도 원본 오브젝트는 손대지 않는다 — 작업본과 보존본만 지우고 예외를 올린다.
+# 원본 오브젝트는 어느 경우에도 손대지 않는다 — 실패하면 작업본만 지우고 예외를 올린다.
 import math
 import os
 import subprocess
@@ -28,7 +28,11 @@ from . import ring_cut, solid_fill
 from .names import safe_id_name
 
 SOURCE_SUFFIX = '_원본'
-SOURCE_KEY = 'lp3d_source_mesh'   # 이 표식이 있는 오브젝트는 리토폴로지 대상이 아닌 보존본이다
+SOURCE_KEY = 'lp3d_source_mesh'   # 옛 방식(v0.38 이전)에서 원본을 숨겨 남긴 보존본 표식 — 옛 파일에서만 보인다
+RESULT_SUFFIX = '_리토폴로지'
+RETOPO_OF_KEY = 'lp3d_retopo_of'  # 리토폴로지 결과(컬렉션·오브젝트)에 원본 이름을 남긴다 — 결과는 다시 깔 대상이 아니다
+RETOPO_LINK_KEY = 'lp3d_retopo_link'  # 원본·결과 컬렉션이 함께 갖는 토큰 — 원본 컬렉션 이름이 바뀌어도 결과를 찾는다
+RESULT_GAP_RATIO = 0.25           # 결과를 원본 폭의 (1 + 이 비율)만큼 +X 로 옮겨 나란히 둔다
 
 _WORKER = os.path.join(os.path.dirname(__file__), "quadriflow_worker.py")
 
@@ -97,6 +101,12 @@ SLIVER_ASPECT = 8.0            # 이 종횡비를 넘는 면 주변만 골라 �
                                # 짧은 엣지를 늘리지 못한다(실측 2026-09-21: 최대 종횡비 22.2 → 7.6)
 SLIVER_ROUNDS = 20             # 슬리버 완화 반복 상한. 남는 몇 개는 형상이 실제로 접힌 곳이다
 SYMMETRY_CENTER_RATIO = 0.05   # 메시가 X=0 에서 이 비율(폭 기준)보다 치우쳐 있으면 대칭을 끈다
+MIRROR_MISMATCH_MAX = 0.03     # 원본을 X 로 뒤집은 정점 중 베이크 광선 거리 밖으로 벗어나는 비율이 이보다 크면 대칭을 끈다.
+                               # 대칭은 양의 반쪽만 원본에 맞춰 미러하므로, 자세가 좌우로 다른 모델은 음의 쪽이 원본에서
+                               # 떨어져 베이크 광선이 빗나가 검게 구워진다. 실측(2026-09-29, 원본 비율 → 대칭 시 음의 쪽
+                               # 검은 면): 근육질 좀비 44.5% → 55%(대칭 끄면 0.2%), 뚱뚱한 좀비 4.3% → 6%,
+                               # LP3D_Model_001 0.0% → 0.2%
+MIRROR_SAMPLES = 6000          # 비대칭 판정에 쓰는 원본 정점 표본 수
 UNWRAP_ANGLE = math.radians(66)
 ISLAND_MARGIN = 0.003
 CAGE_RATIO = 0.01              # 케이지 돌출 = 모델 크기 x 이 비율
@@ -113,37 +123,37 @@ _MAP_PLAN = (
 
 
 def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
-                 texture_size=2048, normal_map=True, progress=None, stash=None,
-                 ring_guides=()) -> dict:
-    """source_obj 를 쿼드 메시로 다시 깔고 텍스처를 베이크로 옮긴다.
+                 texture_size=2048, normal_map=True, progress=None, ring_guides=()) -> dict:
+    """source_obj 를 복제해 쿼드 메시로 다시 깔고 텍스처를 베이크로 옮긴다. **원본은 건드리지 않는다.**
 
-    원본은 `<이름>_원본` 으로 같은 컬렉션에 숨겨 남기고, 결과가 원래 이름을 이어받는다.
+    결과는 `<원본 컬렉션>_리토폴로지` 컬렉션에 `<이름>_리토폴로지` 로 만들고, 원본과 겹치지 않게 원본 폭만큼
+    +X 로 옮겨 나란히 둔다. 다시 누르면 지난 결과를 지우고 원본에서 새로 깐다 — 원본에 새겨 둔 생성 정보와
+    형상이 그대로라 목표 면수·대칭을 바꿔 몇 번이든 다시 할 수 있다.
     progress 는 `progress("단계 설명")` 으로 불리는 선택적 콜백이다.
-
-    stash 를 주면 **다시 리토폴로지**다 — 이미 보존된 원본(stash)에서 새 작업본을 만들고, source_obj
-    (지난 결과)를 지우고 그 이름을 이어받는다. 보존본은 새로 만들지 않으며 실패해도 손대지 않는다.
 
     ring_guides 는 (이름, 월드 좌표 닫힌 점 열) 목록이다. 각 위치를 절단 링으로 써서 링 루프를 깐다.
     쓸 수 없거나 접합에 실패한 가이드는 빼고 계속하며 사유는 결과의 notes 에 남긴다."""
     started = time.perf_counter()
     say = progress or (lambda _text: None)
     base_name = source_obj.name
-    own_stash = stash is None
+    # 옛 방식의 보존본(`_원본`)에서 다시 깔면 결과 이름에 접미어가 겹치지 않게 뗀다
+    if source_obj.get(SOURCE_KEY) and base_name.endswith(SOURCE_SUFFIX):
+        base_name = base_name[:-len(SOURCE_SUFFIX)]
+    stash = source_obj   # 베이크·슈링크랩 소스 — 원본 그대로
     work = snapshot = None
     try:
         # 사용자가 편집 모드에 있으면 아래 오퍼레이터들이 전부 어긋난다 — 먼저 오브젝트 모드로 내린다
         if bpy.context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
-        if own_stash:
-            say("원본 보존")
-            stash = _stash_source(source_obj, collection)
-        else:
-            say("보존된 원본에서 다시 시작")
 
         say("작업본 생성")
-        work = _duplicate(stash, base_name + "_리토폴로지", collection)
-        work[SOURCE_KEY] = False
-        del work[SOURCE_KEY]
+        # 작업본은 원본 컬렉션에서 깐다 — 사용자가 결과 컬렉션을 숨기거나 제외해 두었어도 선택·베이크가 되게.
+        # 결과 컬렉션으로는 모든 단계가 끝난 뒤에 옮긴다
+        work = _duplicate(stash, base_name + RESULT_SUFFIX + "_작업", collection)
+        for key in (SOURCE_KEY, 'lp3d_gen'):   # 생성 정보는 원본의 것이다 — 결과가 원본 행세를 하지 않게
+            if key in work:
+                del work[key]
+        work[RETOPO_OF_KEY] = source_obj.name
         work.hide_render = False
         _set_hidden(work, False)
 
@@ -159,11 +169,20 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
         snapshot = work.data.copy()
 
         # 치우친 모델에서 반쪽을 잘라 미러하면 형상이 통째로 어긋난다 — 그럴 때는 대칭을 포기한다
+        symmetry_note = ""
         if symmetry and not _centered_on_axis(work, 'X'):
             say("모델이 X=0 에 정렬돼 있지 않아 대칭을 끕니다")
             symmetry = False
+        elif symmetry:
+            mismatch = mirror_mismatch(stash)
+            if mismatch > MIRROR_MISMATCH_MAX:
+                # 음의 쪽을 미러로 만들면 원본에서 떨어져 텍스처가 검게 구워진다 — 좌우를 따로 깐다
+                symmetry = False
+                symmetry_note = (f"원본이 좌우 비대칭이라(뒤집은 정점 {mismatch:.0%} 가 원본에서 벗어남) X 대칭을 끄고 "
+                                 "좌우를 따로 깔았습니다 — 대칭으로 깔면 음의 쪽 텍스처가 검게 구워집니다")
+                say("원본이 좌우 비대칭이라 대칭을 끕니다")
 
-        notes = []
+        notes = [symmetry_note] if symmetry_note else []
         # 대칭 반쪽은 +X 로 미러·중복 제거한 링을, 닫힌 전체 폴백은 사용자가 둔 그대로의 링을 자른다
         requested, full_requested = _requested_cuts(work, ring_guides, target_faces, symmetry, notes,
                                                     area=surface_area)
@@ -266,15 +285,15 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             say("표면 맞춤")
             with _outer_surface(stash, filled.get("outer")) as surface:
                 _shrinkwrap(work, surface, plane_axes)
-            if plane_axes:
-                say("대칭면 미러 용접")
-                # 구멍 메우기가 대칭면 옆에 남긴 웹의 내부 정점이 평면 위에 있으면 미러가 거울상과 용접해
-                # 면 4개짜리 엣지가 된다(3DRemesher 실측: 목 링 둘에서 3개) — 내부 정점만 살짝 띄운다
-                _lift_interior_plane_vertices(work, plane_axes)
-                _mirror(work, plane_axes)
-                remove_fragments(work)   # 반쪽 출력에서 떨어져 나온 부스러기 패치를 걷어낸다
-                make_manifold(work)      # 미러 뒤 남은 구멍·겹친 면을 닫는다 (결과는 삼각형)
-                _repair_output(work)     # 그 삼각형을 다시 쿼드로 합친다
+                if plane_axes:
+                    say("대칭면 미러 용접")
+                    # 구멍 메우기가 대칭면 옆에 남긴 웹의 내부 정점이 평면 위에 있으면 미러가 거울상과 용접해
+                    # 면 4개짜리 엣지가 된다(3DRemesher 실측: 목 링 둘에서 3개) — 내부 정점만 살짝 띄운다
+                    _lift_interior_plane_vertices(work, plane_axes)
+                    _mirror(work, plane_axes)
+                    remove_fragments(work)   # 반쪽 출력에서 떨어져 나온 부스러기 패치를 걷어낸다
+                    make_manifold(work)      # 미러 뒤 남은 구멍·겹친 면을 닫는다 (결과는 삼각형)
+                    _repair_output(work)     # 그 삼각형을 다시 쿼드로 합친다
             say("UV 언랩")
             _unwrap(work)
             say("머티리얼 준비")
@@ -283,10 +302,9 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             _connect_material(nodes)
 
         say("마무리")
-        _replace_source(source_obj, work, base_name)
         work.data.calc_loop_triangles()
         polygons = work.data.polygons
-        return {
+        summary = {
             "obj": work,
             "faces": len(polygons),
             "quads": sum(1 for p in polygons if len(p.vertices) == 4),
@@ -294,16 +312,22 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             "method": method,
             "symmetry_error": round(symmetry_error(work), 6) if symmetry else None,
             "images": sorted(image.name for image in images.values()),
-            "source_name": stash.name,
+            "source_name": source_obj.name,
             "seconds": round(time.perf_counter() - started, 1),
             "rings": sum(1 for seam in seams if seam.bridged),
             "notes": notes,
         }
+        # 지난 결과는 맨 마지막에 지운다 — 앞 단계가 실패하면 지난 결과가 그대로 남는다
+        result_coll = _result_collection(collection)
+        _move_to(work, collection, result_coll)
+        _replace_previous(result_coll, work, base_name + RESULT_SUFFIX)
+        _place_beside(work, source_obj)
+        summary["collection"] = result_coll.name
+        return summary
     except Exception:
-        # 실패해도 원본은 그대로 둔다 — 중간 산물만 걷어낸다 (다시 리토폴로지면 보존본은 남긴다)
-        for leftover in (work, stash if own_stash else None):
-            if leftover is not None:
-                _discard(leftover)
+        # 실패해도 원본과 지난 결과는 그대로 둔다 — 이번 작업본만 걷어낸다
+        if work is not None and work.name in bpy.data.objects:
+            _discard(work)
         if snapshot is not None and snapshot.name in bpy.data.meshes and snapshot.users == 0:
             bpy.data.meshes.remove(snapshot)
         raise
@@ -322,13 +346,37 @@ def _duplicate(obj, name: str, collection):
     return copy
 
 
-def _stash_source(obj, collection):
-    """리토폴로지 전 메시를 `<이름>_원본` 으로 숨겨 남긴다 — 베이크 소스이자 되돌릴 기준이다."""
-    stash = _duplicate(obj, obj.name + SOURCE_SUFFIX, collection)
-    stash[SOURCE_KEY] = True
-    stash.hide_render = True
-    _set_hidden(stash, True)
-    return stash
+def _parents_of(collection) -> list:
+    """collection 을 자식으로 둔 컬렉션(씬 마스터 컬렉션 포함)."""
+    parents = [c for c in bpy.data.collections if collection.name in c.children]
+    parents += [s.collection for s in bpy.data.scenes if collection.name in s.collection.children]
+    return parents
+
+
+def _result_collection(collection):
+    """원본 컬렉션 옆의 리토폴로지 결과 컬렉션. 없으면 같은 부모 아래 새로 만든다."""
+    import uuid
+    result = find_retopo_result(collection)
+    if result is None:
+        result = bpy.data.collections.new(safe_id_name(collection.name + RESULT_SUFFIX))
+        for parent in _parents_of(collection) or [bpy.context.scene.collection]:
+            parent.children.link(result)
+    elif not _parents_of(result):
+        # 모든 씬에서 떼어 낸 결과 컬렉션 — 원본 옆에 다시 붙여 결과가 보이게 한다
+        for parent in _parents_of(collection) or [bpy.context.scene.collection]:
+            parent.children.link(result)
+    token = collection.get(RETOPO_LINK_KEY) or uuid.uuid4().hex
+    collection[RETOPO_LINK_KEY] = token
+    result[RETOPO_LINK_KEY] = token
+    result[RETOPO_OF_KEY] = collection.name
+    return result
+
+
+def _move_to(obj, source, target) -> None:
+    """obj 를 source 컬렉션에서 target 으로 옮긴다."""
+    target.objects.link(obj)
+    if obj.name in source.objects:
+        source.objects.unlink(obj)
 
 
 def _discard(obj) -> None:
@@ -338,11 +386,32 @@ def _discard(obj) -> None:
         bpy.data.meshes.remove(mesh)
 
 
-def _replace_source(source_obj, work, name: str) -> None:
-    """원본 오브젝트를 지우고 작업본이 그 이름을 이어받게 한다."""
-    _discard(source_obj)
+def _replace_previous(result_coll, work, name: str) -> None:
+    """지난 리토폴로지 결과를 지우고 새 결과가 그 이름을 이어받게 한다."""
+    for obj in list(result_coll.objects):
+        if obj is not work and obj.type == 'MESH' and obj.get(RETOPO_OF_KEY):
+            _discard(obj)
     work.name = safe_id_name(name)
     work.data.name = work.name
+
+
+def _world_x_range(obj) -> tuple:
+    points = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    return min(p.x for p in points), max(p.x for p in points)
+
+
+def _place_beside(work, source_obj) -> float:
+    """결과를 원본과 겹치지 않게 +X 로 옮긴다. 옮긴 거리를 돌려준다.
+
+    작업본은 원본과 같은 자리에서 깔고 구워야(슈링크랩·베이크·링 가이드가 월드 좌표) 하므로 맨 마지막에 옮긴다."""
+    bpy.context.view_layer.update()   # bound_box 는 캐시다 — 메시를 갈아 끼운 뒤에는 갱신해야 한다
+    lo, hi = _world_x_range(source_obj)
+    width = max(hi - lo, 1e-3)
+    shift = width * (1.0 + RESULT_GAP_RATIO)
+    world = work.matrix_world.copy()
+    world.translation.x += shift
+    work.matrix_world = world
+    return shift
 
 
 def _set_hidden(obj, hidden: bool) -> None:
@@ -356,14 +425,25 @@ def _set_hidden(obj, hidden: bool) -> None:
 
 @contextmanager
 def _visible(obj):
-    """보존본을 잠시 드러낸다 — 슈링크랩 타깃과 베이크 소스는 숨겨져 있으면 쓰이지 않는다."""
+    """베이크 소스를 잠시 드러낸다 — 슈링크랩 타깃과 베이크 소스는 숨겨져 있으면 쓰이지 않는다.
+
+    끝나면 원래 보임 상태로 되돌린다(보이던 원본은 보이는 채로, 옛 방식의 숨긴 보존본은 숨긴 채로)."""
     render = obj.hide_render
+    try:
+        hidden = obj.hide_get()
+    except RuntimeError:
+        hidden = False
+    viewport = obj.hide_viewport
     obj.hide_render = False
     _set_hidden(obj, False)
     try:
         yield obj
     finally:
-        _set_hidden(obj, True)
+        try:
+            obj.hide_set(hidden)
+        except RuntimeError:
+            pass
+        obj.hide_viewport = viewport
         obj.hide_render = render
 
 
@@ -822,6 +902,27 @@ def _local_size(obj) -> float:
     if not coords:
         return 0.0
     return max(max(c[a] for c in coords) - min(c[a] for c in coords) for a in range(3))
+
+
+def mirror_mismatch(obj, ratio: float = RAY_RATIO, samples: int = MIRROR_SAMPLES) -> float:
+    """정점을 로컬 X 로 뒤집은 점이 원본 표면에서 베이크 광선 거리(모델 크기 x ratio)보다 먼 비율 (0~1).
+
+    0 에 가까우면 좌우 대칭이라 반쪽 + 미러로 깔아도 음의 쪽이 원본에 붙는다."""
+    from mathutils.bvhtree import BVHTree
+    vertices = obj.data.vertices
+    if not vertices:
+        return 0.0
+    # 메시 데이터로 직접 만든다 — 옛 방식의 숨긴 보존본은 depsgraph 에서 평가되지 않는다
+    tree = BVHTree.FromPolygons([v.co for v in vertices], [tuple(p.vertices) for p in obj.data.polygons])
+    limit = _local_size(obj) * ratio
+    step = max(1, len(vertices) // samples)
+    far = total = 0
+    for index in range(0, len(vertices), step):
+        co = vertices[index].co
+        hit = tree.find_nearest(Vector((-co.x, co.y, co.z)))
+        total += 1
+        far += hit[0] is None or hit[3] > limit
+    return far / max(total, 1)
 
 
 def _centered_on_axis(obj, axis: str = 'X', ratio: float = SYMMETRY_CENTER_RATIO) -> bool:
@@ -1724,26 +1825,34 @@ def _restore_render(scene, saved: dict) -> None:
 
 
 def find_retopo_target(collection):
-    """컬렉션에서 리토폴로지할 메시. 보존본 표식이 있으면 건너뛴다. 없으면 None."""
+    """컬렉션에서 리토폴로지할 원본 메시. 없으면 None.
+
+    옛 방식(v0.38 이전) 파일은 원본이 `_원본` 보존본으로 숨겨져 있고 보이는 메시가 지난 결과다 — 보존본을 고른다."""
     if collection is None:
         return None
-    for obj in collection.objects:
-        if obj.type == 'MESH' and not obj.get(SOURCE_KEY):
-            return obj
+    meshes = [obj for obj in collection.objects if obj.type == 'MESH' and not obj.get(RETOPO_OF_KEY)]
+    legacy = next((obj for obj in meshes if obj.get(SOURCE_KEY)), None)
+    return legacy or next(iter(meshes), None)
+
+
+def find_retopo_result(collection):
+    """원본 컬렉션의 리토폴로지 결과 컬렉션. 없으면 None — 공유 토큰으로 먼저 찾고, 없으면 원본 이름으로 찾는다."""
+    if collection is None:
+        return None
+    token = collection.get(RETOPO_LINK_KEY)
+    if token:
+        for coll in bpy.data.collections:
+            if coll is not collection and coll.get(RETOPO_OF_KEY) and coll.get(RETOPO_LINK_KEY) == token:
+                return coll
+    for coll in bpy.data.collections:
+        if coll.get(RETOPO_OF_KEY) == collection.name:
+            return coll
     return None
 
 
-def find_retopo_source(collection):
-    """컬렉션에 보존된 리토폴로지 원본(`_원본`). 없으면 None — 있으면 다시 리토폴로지할 수 있다."""
-    if collection is None:
-        return None
-    for obj in collection.objects:
-        if obj.type == 'MESH' and obj.get(SOURCE_KEY):
-            return obj
-    return None
-
-
-def has_retopo_source(collection) -> bool:
-    """이미 리토폴로지가 끝난 컬렉션인지 — 보존본 표식이 붙은 오브젝트가 있으면 그렇다."""
-    return bool(collection is not None
-                and any(obj.get(SOURCE_KEY) for obj in collection.objects))
+def has_retopo_result(collection) -> bool:
+    """리토폴로지 결과가 이미 있는지 — 결과 컬렉션에 결과 메시가 있거나, 옛 방식의 보존본이 있으면 그렇다."""
+    result = find_retopo_result(collection)
+    if result is not None and any(obj.get(RETOPO_OF_KEY) for obj in result.objects):
+        return True
+    return bool(collection is not None and any(obj.get(SOURCE_KEY) for obj in collection.objects))

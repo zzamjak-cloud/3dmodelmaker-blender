@@ -1,0 +1,4 @@
+# 유닛 테스트용 로컬 Python 의존성 (Blender 번들 Python 에는 이미 들어 있다)
+# python -m pip install -r tests/requirements.txt
+numpy
+pillow

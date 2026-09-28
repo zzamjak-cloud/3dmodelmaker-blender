@@ -206,7 +206,9 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
 
 def _apply_saved(scene=None):
     """저장된 익스포트 폴더를 복원하고, 멈춘 잡 상태를 정리한다."""
-    from .core import jobs, persist
+    import logging
+
+    from .core import genmeta, jobs, persist
     scenes = [scene] if scene else bpy.data.scenes
     for sc in scenes:
         if getattr(sc, "lp3d", None):
@@ -214,6 +216,11 @@ def _apply_saved(scene=None):
             # 파일을 다시 열거나 Dev Reload를 하면 세션 객체는 사라지는데
             # 항목은 RUNNING으로 남아 실행 버튼이 잠긴다 — 대기로 되돌린다
             jobs.reset_stale(sc.lp3d)
+            # 결과만 담은 자동 저장 .blend 처럼 큐가 따라오지 않은 파일 — 결과에 새긴 생성 정보로 항목을 되살린다
+            try:
+                genmeta.restore_jobs(sc)
+            except Exception:
+                logging.getLogger(__name__).exception("생성 정보로 큐 항목 복원 실패")
 
 
 @persistent

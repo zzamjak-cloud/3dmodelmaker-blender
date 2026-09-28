@@ -137,14 +137,17 @@ def synthetic():
     check("링 접합 보고", "절단 링" in job.log and "접합" in job.log)
     # 대칭이면 반대쪽 팔 가이드는 양의 쪽으로 미러돼 하나로 합쳐진다
     check("대칭 반쪽에서 좌우 가이드가 하나로 합쳐짐", "링 1개 접합" in job.status, job.status)
-    result = quadretopo.find_retopo_target(coll)
+    result = next(o for o in quadretopo.find_retopo_result(coll).objects if o.type == 'MESH')
+    check("원본은 그대로 대상", quadretopo.find_retopo_target(coll) == body)
     tolerance = 0.02
+    shift = result.matrix_world.translation.x - body.matrix_world.translation.x
     for x in (1.5, -1.5):
-        counts = [ring_plane_vertices(result, x + d, tolerance) for d in (-0.06, 0.0, 0.06)]
+        counts = [ring_plane_vertices(result, x + d, tolerance) for d in (-0.06, 0.0, 0.06)]   # 로컬 좌표
         print(f"INFO x={x} 근처 평면 정점 수 {counts}")
     check("가이드는 결과 뒤에도 남음", len(ring_guides.ring_guides(coll)) == 2)
-    check("가이드 소스가 보존본으로 바뀜", bool(ring_guides.section_source(coll).get(quadretopo.SOURCE_KEY)))
-    check("다시 검사(보존본 기준)", bpy.ops.lp3d.ring_guide_check() == {'FINISHED'})
+    check("결과가 +X 로 비켜 있음", shift > 0.0, round(shift, 3))
+    check("가이드 소스는 원본", ring_guides.section_source(coll) == body)
+    check("다시 검사(원본 기준)", bpy.ops.lp3d.ring_guide_check() == {'FINISHED'})
     render(result, "00_합성")
     check("전체 삭제 연산자", bpy.ops.lp3d.ring_guide_clear() == {'FINISHED'} and not ring_guides.ring_guides(coll))
     scene.lp3d.retopo_faces = previous_faces
@@ -193,9 +196,9 @@ def character():
     print(f"INFO 캐릭터 결과: {job.status}")
     print("INFO 로그:\n  " + job.log.replace("\n", "\n  "))
     check("캐릭터 리토폴로지 완료", job.status.startswith("리토폴로지 완료"), job.status)
-    result = quadretopo.find_retopo_target(coll)
-    stash = quadretopo.find_retopo_source(coll)
-    if result is not None and stash is not None:
+    result_coll = quadretopo.find_retopo_result(coll)
+    result = next((o for o in result_coll.objects if o.type == 'MESH'), None) if result_coll else None
+    if result is not None:
         print(f"INFO 대칭 오차 {quadretopo.symmetry_error(result):.6f}")
         render(result, "02_리토폴로지")
     scene.lp3d.retopo_faces = previous_faces

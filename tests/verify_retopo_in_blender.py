@@ -136,6 +136,26 @@ def visible_backface_ratio(obj, rays: int = 4000, seed: int = 3) -> float:
     return back / max(hits, 1)
 
 
+def dark_face_ratio(obj, image, threshold: float = 0.03) -> dict:
+    """좌우 절반별로 면 UV 중심의 베이크 픽셀이 거의 검정인 면의 비율."""
+    width, height = image.size
+    pixels = list(image.pixels)
+    mesh = obj.data
+    uv = mesh.uv_layers.active.data
+    counts = {"+X": [0, 0], "-X": [0, 0]}
+    for poly in mesh.polygons:
+        side = "+X" if poly.center.x >= 0 else "-X"
+        loops = list(poly.loop_indices)
+        u = sum(uv[i].uv.x for i in loops) / len(loops)
+        v = sum(uv[i].uv.y for i in loops) / len(loops)
+        x = min(width - 1, max(0, int(u * width)))
+        y = min(height - 1, max(0, int(v * height)))
+        index = (y * width + x) * 4
+        counts[side][0] += 1
+        counts[side][1] += sum(pixels[index:index + 3]) / 3 < threshold
+    return {side: dark / max(total, 1) for side, (total, dark) in counts.items()}
+
+
 def mirror_ratio(obj, tolerance: float = 0.004) -> float:
     """정점마다 x 를 뒤집은 자리에서 tolerance x 모델 크기 안에 정점이 있는 비율."""
     from mathutils import Vector
@@ -227,8 +247,13 @@ def check_operator():
     print(f"INFO 연산자 결과: {job.status}")
     check("연산자 완료 보고", job.status.startswith("리토폴로지 완료"), True, "true")
     check("로그 기록", "리토폴로지 완료" in job.log, True, "true")
-    check("보존본 생성", quadretopo.has_retopo_source(coll), True, "true")
-    # 다시 리토폴로지 — 옵션을 바꿔 다시 누르면 보존본에서 새로 깔고, 보존본이 겹으로 늘지 않는다
+    source = coll.objects.get("OpTest")
+    source_faces = len(source.data.polygons) if source else -1
+    result_coll = quadretopo.find_retopo_result(coll)
+    check("결과 컬렉션 생성", result_coll is not None, True, "true")
+    check("원본은 그대로 (이름·면수·보임)",
+          bool(source and not source.get(quadretopo.SOURCE_KEY) and not source.hide_get()), True, "true")
+    # 다시 리토폴로지 — 옵션을 바꿔 다시 누르면 원본에서 새로 깔고, 결과가 겹으로 늘지 않는다
     previous_faces = props.retopo_faces   # 씬 옵션은 JSON 으로 영속화되므로 검사 뒤 되돌린다
     props.retopo_faces = 3000
     check("다시 리토폴로지 활성", bpy.ops.lp3d.job_retopo.poll(), True, "true")
@@ -236,12 +261,31 @@ def check_operator():
     scheduler.pump()
     print(f"INFO 다시 리토폴로지: {job.status}")
     check("다시 리토폴로지 완료", job.status.startswith("리토폴로지 완료"), True, "true")
-    stashes = [o for o in coll.objects if o.get(quadretopo.SOURCE_KEY)]
-    results = [o for o in coll.objects if o.type == 'MESH' and not o.get(quadretopo.SOURCE_KEY)]
-    check("보존본은 하나", len(stashes), 1)
+    originals = [o for o in coll.objects if o.type == 'MESH']
+    results = [o for o in result_coll.objects if o.type == 'MESH'] if result_coll else []
+    check("원본 컬렉션 메시는 원본 하나", len(originals), 1)
+    check("원본 면수 불변", len(source.data.polygons) if source else -2, source_faces)
     check("결과 메시는 하나", len(results), 1)
-    check("결과가 원래 이름 유지", results[0].name if results else "", "OpTest")
+    check("결과 이름", results[0].name if results else "", "OpTest" + quadretopo.RESULT_SUFFIX)
     check("다시 깐 면수가 새 목표를 따름 (4500 이하)", len(results[0].data.polygons) if results else 99999, 4500, "le")
+    if results and source:
+        bpy.context.view_layer.update()
+        gap = quadretopo._world_x_range(results[0])[0] - quadretopo._world_x_range(source)[1]
+        check("결과가 원본과 X 로 겹치지 않음", round(gap, 4), 0.0, "ge")
+    # 원본 컬렉션 이름을 바꾸고, 결과 컬렉션을 뷰 레이어에서 제외한 채 다시 깔아도 같은 결과 컬렉션을 갈아 끼운다
+    coll.name = "LP3D_OpTest_이름변경"
+    job.collection_name = coll.name
+    layer = next(l for l in bpy.context.view_layer.layer_collection.children if l.collection == result_coll)
+    layer.exclude = True
+    bpy.ops.lp3d.job_retopo()
+    scheduler.pump()
+    print(f"INFO 이름 변경·제외 뒤: {job.status}")
+    check("이름 변경·제외 뒤 리토폴로지 완료", job.status.startswith("리토폴로지 완료"), True, "true")
+    retopo_colls = [c for c in bpy.data.collections if c.get(quadretopo.RETOPO_OF_KEY)]
+    check("결과 컬렉션은 여전히 하나", len(retopo_colls), 1)
+    check("결과 메시도 하나", len([o for o in result_coll.objects if o.type == 'MESH']), 1)
+    check("원본 컬렉션에 작업본이 남지 않음", len([o for o in coll.objects if o.type == 'MESH']), 1)
+    layer.exclude = False
     props.retopo_faces = previous_faces
 
 
@@ -291,8 +335,13 @@ def main():
     check("UV 레이어 존재", len(obj.data.uv_layers), 1, "ge")
     # ③' 좌우 대칭 — x 를 뒤집은 자리에 정점이 있는 비율. 슈링크랩이 비대칭 원본에 붙이므로 1.0 은 못 되지만
     # 원본(0.6~0.7)보다 뚜렷이 높아야 대칭 와이어가 걸린 것이다(실측: 0.86~0.99)
-    stash = bpy.data.objects.get(result["source_name"])
-    if result["method"] == "QUADRIFLOW":
+    stash = source   # 원본은 그대로 남는다 — 대칭·틈 비교 기준
+    mismatch = quadretopo.mirror_mismatch(source)
+    symmetric = mismatch <= quadretopo.MIRROR_MISMATCH_MAX
+    print(f"INFO 원본 비대칭 {mismatch:.3f} → {'대칭 유지' if symmetric else '대칭 끔'}")
+    check("비대칭 원본이면 대칭을 끈 사유를 남김",
+          symmetric or any("좌우 비대칭" in note for note in result["notes"]), True, "true")
+    if result["method"] == "QUADRIFLOW" and symmetric:
         source_mirror = mirror_ratio(stash)
         print(f"INFO 대칭 정점 비율: 원본 {source_mirror:.3f} → 결과 {mirror_ratio(obj):.3f}")
         # 원본이 이미 대칭(0.9+)이면 더 높아질 여지가 없으므로 0.9 를 상한으로 둔다
@@ -312,14 +361,24 @@ def main():
                  if any(v > 0.01 for v in list(bpy.data.images[name].pixels[:4096]))]
     check("베이크 결과가 비어 있지 않음", len(non_black), 1, "ge")
     print(f"INFO 이미지: {result['images']} · 내용 있는 이미지 {non_black}")
-    # ⑤ 원본이 숨겨진 채 남아 있음
-    check("원본 보존본 존재", stash is not None and stash.name.endswith(quadretopo.SOURCE_SUFFIX),
+    # ④' 좌우 절반별 검은 면 — 반쪽 + 미러가 비대칭 원본에서 음의 쪽을 원본 밖에 두면 베이크가 빗나가 검게 구워진다
+    # (실측 2026-09-29, 근육질 좀비: 대칭 강제 시 음의 쪽 55%, 대칭 끔 0.2%)
+    base = next((bpy.data.images[n] for n in result["images"] if n.endswith("베이스컬러")), None)
+    if base is not None:
+        for side, dark in dark_face_ratio(obj, base).items():
+            check(f"{side} 절반 검은 면 비율 (5% 이하)", round(dark, 3), 0.05, "le")
+    # ⑤ 원본은 손대지 않고, 결과는 별도 컬렉션에 +X 로 비켜 있음
+    check("원본 오브젝트 유지", source.name in bpy.data.objects and source.name == "캐릭터", True, "true")
+    check("원본 보임", not source.hide_get(), True, "true")
+    check("결과 이름", obj.name, "캐릭터" + quadretopo.RESULT_SUFFIX)
+    check("결과가 별도 컬렉션", result["collection"] != coll.name and obj.name in bpy.data.collections[result["collection"]].objects,
           True, "true")
-    check("보존본 숨김", bool(stash and stash.hide_render and stash.hide_get()), True, "true")
-    check("보존본 표식", bool(stash and stash.get(quadretopo.SOURCE_KEY)), True, "true")
-    check("결과가 원래 이름을 이어받음", obj.name, "캐릭터")
+    bpy.context.view_layer.update()
+    check("결과가 원본과 X 로 겹치지 않음",
+          round(quadretopo._world_x_range(obj)[0] - quadretopo._world_x_range(source)[1], 4), 0.0, "ge")
 
     after = render_views([obj], "02_리토폴로지")
+    after += render_views([source, obj], "03_나란히")   # 원본과 결과가 겹치지 않고 나란히 놓였는지 눈으로 본다
     print("RENDER 원본:", *before, sep="\n  ")
     print("RENDER 결과:", *after, sep="\n  ")
     print(f"\n결과: {'모두 통과' if not failures else f'실패 {len(failures)}건: {failures}'}")

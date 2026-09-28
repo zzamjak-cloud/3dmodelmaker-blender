@@ -27,9 +27,9 @@ def _standalone_job(context):
 
 
 def _retopo_source(context):
-    """선택 항목의 결과 컬렉션에서 리토폴로지할 메시. 조건이 안 맞으면 None.
+    """선택 항목의 결과 컬렉션에서 리토폴로지할 원본 메시. 조건이 안 맞으면 None.
 
-    이미 리토폴로지한 컬렉션이면 지난 결과 메시를 돌려준다 — 보존된 원본으로 다시 깐다."""
+    리토폴로지 결과는 별도 컬렉션에 복제본으로 생기므로 원본은 언제나 그대로다 — 몇 번이든 다시 깐다."""
     from ..lowpoly import quadretopo
     job = _standalone_job(context)
     if job is None or job.state != 'DONE' or not job.collection_name:
@@ -486,9 +486,9 @@ class LP3D_OT_mark_asset(bpy.types.Operator):
 class LP3D_OT_job_retopo(bpy.types.Operator):
     bl_idname = "lp3d.job_retopo"
     bl_label = "리토폴로지 시작"
-    bl_description = ("완성된 캐릭터 메시에 쿼드 와이어를 다시 깔고, 원본 텍스처를 "
-                      "새 UV 로 구워 옮긴다. 원본은 '_원본' 이름으로 숨겨 남고, 나중에 목표 면수·대칭을 "
-                      "바꿔 다시 누르면 그 원본에서 새로 깐다")
+    bl_description = ("완성된 캐릭터 메시를 복제해 쿼드 와이어를 깔고, 원본 텍스처를 새 UV 로 구워 옮긴다. "
+                      "원본은 그대로 두고 결과는 '_리토폴로지' 컬렉션에 원본 옆(+X)으로 놓는다. 목표 면수·대칭을 "
+                      "바꿔 다시 누르면 지난 결과를 지우고 원본에서 새로 깐다")
 
     @classmethod
     def poll(cls, context):
@@ -509,8 +509,6 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
         target_faces, symmetry = int(props.retopo_faces), bool(props.retopo_symmetry)
         scene_name, uid = context.scene.name, job.uid
         collection_name, source_name = job.collection_name, source.name
-        stash = quadretopo.find_retopo_source(bpy.data.collections.get(collection_name))
-        stash_name = stash.name if stash else ""
         key = f"{uid}:retopo"
 
         def _job():
@@ -537,12 +535,11 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
                     obj, collection,
                     target_faces=target_faces, symmetry=symmetry,
                     texture_size=int(prefs.shapegen_texture_size),
-                    normal_map=True, progress=_say,
-                    stash=bpy.data.objects.get(stash_name) if stash_name else None,
-                    ring_guides=guides)
+                    normal_map=True, progress=_say, ring_guides=guides)
                 notes = result['notes']
                 rings = f" · 링 {result['rings']}개 접합" if guides else ""
-                line = (f"리토폴로지 완료: {result['method']} · 면 {result['faces']} "
+                line = (f"리토폴로지 완료: {result['obj'].name} ({result['collection']}) · {result['method']} · "
+                        f"면 {result['faces']} "
                         f"(쿼드 {result['quads']}){rings} · 텍스처 {len(result['images'])}장 · "
                         f"{result['seconds']}s")
             except Exception as e:
@@ -560,6 +557,39 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
         _say("대기 중")
         self.report({'INFO'}, "리토폴로지를 시작했습니다")
         return {'FINISHED'}
+
+
+class LP3D_OT_adopt_mesh(bpy.types.Operator):
+    bl_idname = "lp3d.adopt_mesh"
+    bl_label = "선택 메시를 결과로 등록"
+    bl_description = ("생성 큐에 항목이 없는 메시(생성 정보를 남기기 전 버전에서 저장한 파일 등)를 완료된 캐릭터 "
+                      "결과 항목으로 등록한다 — 등록하면 리토폴로지·익스포트를 다시 쓸 수 있다")
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and untracked_collection(context) is not None
+
+    def execute(self, context):
+        from ..core import genmeta
+        props = context.scene.lp3d
+        try:
+            job = genmeta.adopt(props, context.active_object)
+        except Exception as e:
+            self.report({'ERROR'}, f"등록 실패: {e}")
+            return {'CANCELLED'}
+        props.job_index = next(i for i, j in enumerate(props.jobs) if j.uid == job.uid)
+        self.report({'INFO'}, f"결과 항목으로 등록됨: {job.collection_name}")
+        return {'FINISHED'}
+
+
+def untracked_collection(context):
+    """활성 메시가 든 컬렉션이 어느 큐 항목의 결과도 아니면 그 컬렉션. 아니면 None."""
+    from ..core import genmeta
+    coll = genmeta.adoptable_collection(context.active_object)
+    if coll is None:
+        return None
+    tracked = {job.collection_name for job in context.scene.lp3d.jobs if job.collection_name}
+    return None if coll.name in tracked else coll
 
 
 class LP3D_OT_dev_reload(bpy.types.Operator):
@@ -608,7 +638,7 @@ _CLASSES = (
     LP3D_OT_job_retry, LP3D_OT_job_cancel,
     LP3D_OT_queue_start, LP3D_OT_queue_stop,
     LP3D_OT_variation,
-    LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_job_retopo, LP3D_OT_dev_reload,
+    LP3D_OT_export, LP3D_OT_mark_asset, LP3D_OT_job_retopo, LP3D_OT_adopt_mesh, LP3D_OT_dev_reload,
 )
 
 

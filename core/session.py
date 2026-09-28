@@ -12,7 +12,7 @@ _log = logging.getLogger(__name__)
 from .. import preferences
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
-from . import (errors, executor, jobs, library, models, multiview, naming,
+from . import (errors, executor, genmeta, jobs, library, models, multiview, naming,
                prompts, runner, scheduler, shapegen, snapshots, styles, texgen)
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
@@ -604,6 +604,8 @@ class GenerationSession:
                 job.collection_name = self.collection_name
                 job.code = self.last_code or ""
                 job.entry_id = self._archive(job.code)
+                # 생성 정보를 결과 자체에 새긴다 — 큐는 씬 값이라 결과만 담은 .blend 에는 따라가지 않는다
+                genmeta.stamp(job, self.collection_name)
         # 상태줄은 한 줄뿐이라 원인을 다 담을 수 없다 — 상세는 로그 패널에 남긴다
         log_text = self._model_log(include_requested=False) + f"\n세션 종료: {status}"
         if detail:
@@ -666,9 +668,11 @@ class GenerationSession:
         self._relocate(moved)
         self._result_folder = folder
         visible, hidden = self._save_collections()
-        autosave.write_blend(folder, self.collection_name, visible, hidden)
         if job:
             job.log = "\n".join((job.log + f"\n결과 저장: {folder}").strip().splitlines()[-30:])
+            # 재료를 옮긴 뒤의 경로로 다시 새긴다 — 이 .blend 를 열면 이 정보로 큐 항목이 되살아난다
+            genmeta.stamp(job, self.collection_name)
+        autosave.write_blend(folder, self.collection_name, visible, hidden)
 
     def _relocate(self, moved: dict):
         """옮긴 재료를 가리키던 잡 경로·이미지 경로를 새 자리로 바꾼다 (다음 실행·.blend가 깨지지 않게)."""

@@ -105,16 +105,21 @@ def _guide_collection(guide):
 
 def _section_mesh(source):
     """source 로컬 좌표의 복셀 프록시 단면 메시. 클릭마다 수백 번 자르므로 원본별로 한 번만 만든다."""
-    from ..lowpoly import quadretopo
+    from ..lowpoly import quadretopo, solid_fill
     key = (source.data.session_uid, len(source.data.vertices), len(source.data.polygons))
     cached = _proxy_cache.get(source.name)
     if cached is not None and cached[0] == key:
         return cached[1]
     # 리토폴로지가 QuadriFlow 에 넣는 메시와 같은 절차로 굽는다 — 셰이프 서버 메시는 복셀 리메시만으로는 구멍투성이라
-    # (Remesh 모디파이어는 실측에서 형상 대부분이 사라졌다) 매니폴드 수리로 구멍까지 메워야 단면이 닫힌다
+    # (Remesh 모디파이어는 실측에서 형상 대부분이 사라졌다) 매니폴드 수리로 구멍까지 메워야 단면이 닫힌다.
+    # 속 빈 이중 껍질을 그대로 리메시하면 껍질이 얇은 곳마다 몸속으로 뚫려 단면에 안쪽 껍질 둘레가 섞인다 —
+    # 리토폴로지처럼 먼저 속을 채운다(실측 2026-09-29, 덩치큰 좀비 둘레 비율: 팔뚝 0.44·0.39 → 0.96·0.94,
+    # 위팔 0.05 → 0.93, 목 0.57 → 0.99, 프록시 부피 0.053 → 0.161m³)
     proxy = quadretopo._duplicate(source, "LP3D_RingProxy", bpy.context.scene.collection)
     try:
         quadretopo._set_hidden(proxy, False)
+        size = quadretopo._local_size(proxy)
+        solid_fill.fill_interior(proxy, size / quadretopo.SOLID_PITCH_DIV, size / quadretopo.SOLID_CLOSE_DIV)
         quadretopo._voxel_remesh(proxy, PROXY_FACES, wanted=PROXY_FACES)
         quadretopo.remove_fragments(proxy)
         quadretopo.make_manifold(proxy)

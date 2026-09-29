@@ -176,8 +176,8 @@ class ShapeWorker:
         return (f"면 {len(f):,} 정점 {len(_uniq):,} 열린엣지 {int((counts == 1).sum()):,} "
                 f"부피비 {volume / box:+.4f}")
 
-    def _textured_glb(self, mesh, cfg: dict) -> bytes:
-        """공식 o_voxel.postprocess.to_glb 로 PBR 텍스처까지 구운 GLB 바이트.
+    def _textured_glb(self, mesh, cfg: dict):
+        """공식 o_voxel.postprocess.to_glb 로 PBR 텍스처까지 구운 GLB 바이트. 진단(variants)이면 {설정: GLB 바이트}.
 
         to_glb 는 정리·듀얼컨투어 리메시·데시메이트·UV 언랩·PBR 굽기를 한 번에 한다(cumesh·flex_gemm, MIT).
         내부에서 UV 래스터화에만 nvdiffrast 를 쓰는데, 이미지에 우리 토치 구현(uv_raster)을 그 이름으로 얹어 뒀다."""
@@ -206,37 +206,39 @@ class ShapeWorker:
         )
         print("내보내기 결과:", self._mesh_stats(glb.vertices, glb.faces), flush=True)
         if cfg.get("variants"):
+            # 진단 — 같은 디코드 결과를 리메시 전 구멍 메우기 한도만 바꿔 내보내 GLB 로 모두 돌려준다.
+            # 리메시는 원본 등위면 둘레를 띠로 감싸므로 등위면이 찢긴 곳마다 바깥·안쪽 껍질을 잇는 터널이 생기고,
+            # 그 터널로 몸속 빈 공간이 검게 보인다(실측 2026-09-29, 덩치큰 좀비: 셔츠 찢김·어깨·목). to_glb 는
+            # 둘레 3e-2 까지만 메운다 — 더 큰 찢김을 먼저 메우면 터널이 사라지는지 본다.
             import cumesh
-            filled = {}
-            for limit in (0.15, 10.0):
-                clean = cumesh.CuMesh()
-                clean.init(mesh.vertices, mesh.faces)
-                clean.fill_holes(max_hole_perimeter=limit)
-                clean.repair_non_manifold_edges()
-                clean.fill_holes(max_hole_perimeter=limit)
-                filled[limit] = clean.read()
-                print(f"입력 구멍 메우기 {limit}:",
-                      self._mesh_stats(filled[limit][0].cpu().numpy(), filled[limit][1].cpu().numpy()),
-                      flush=True)
-            for label, kw, src in (("E 메우기10 + 리메시", dict(remesh=True, remesh_band=1, remesh_project=0), filled[10.0]),
-                                   ("F 메우기0.15 + 리메시", dict(remesh=True, remesh_band=1, remesh_project=0), filled[0.15]),
-                                   ("G 메우기10 + 리메시 project0.9", dict(remesh=True, remesh_band=1, remesh_project=0.9), filled[10.0])):
+            results = {"A_현재": glb.export(file_type="glb")}
+            for label, limit in (("B_메우기0.08", 0.08), ("C_메우기0.15", 0.15), ("D_메우기0.4", 0.4)):
                 try:
+                    clean = cumesh.CuMesh()
+                    clean.init(mesh.vertices, mesh.faces)
+                    clean.fill_holes(max_hole_perimeter=limit)
+                    clean.repair_non_manifold_edges()
+                    clean.fill_holes(max_hole_perimeter=limit)
+                    src = clean.read()
+                    print(f"입력 구멍 메우기 {limit}:",
+                          self._mesh_stats(src[0].cpu().numpy(), src[1].cpu().numpy()), flush=True)
                     other = o_voxel.postprocess.to_glb(
                         vertices=src[0], faces=src[1], attr_volume=mesh.attrs,
                         coords=mesh.coords, attr_layout=mesh.layout, voxel_size=mesh.voxel_size,
                         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
                         decimation_target=int(target),
                         texture_size=int(cfg.get("texture_size") or DEFAULT_TEXTURE_SIZE),
-                        **kw)
+                        remesh=True, remesh_band=1, remesh_project=0, verbose=False)
                     print(f"변형 {label}:", self._mesh_stats(other.vertices, other.faces), flush=True)
+                    results[label] = other.export(file_type="glb")
                 except Exception as e:
                     print(f"변형 {label} 실패: {type(e).__name__} {e}", flush=True)
+            return results
         # to_glb 는 trimesh.Trimesh 를 돌려주고 glTF 축 변환과 UV V 뒤집기까지 이미 끝내 둔다
         return glb.export(file_type="glb")
 
     @modal.method()
-    def generate(self, params: dict) -> bytes:
+    def generate(self, params: dict):
         import sys
         sys.path.insert(0, "/root")
         import numpy as np
@@ -297,6 +299,29 @@ class ShapeWorker:
         mesh = sc._postprocess_mesh(mesh, params)             # 파편 제거(부품 보존 시 생략) · 퇴화 면 · 목표 면수
         mesh = trimesh.Trimesh(vertices=sc.to_gltf_frame(mesh.vertices), faces=mesh.faces, process=False)
         return sc.export_glb(mesh)
+
+
+@app.local_entrypoint()
+def diagnose(image: str, out: str, seed: int = 7, face_count: int = 24000):
+    """내보내기 설정 비교 진단 — 배포된 앱을 건드리지 않는 임시 앱으로 돈다.
+
+      modal run scripts/trellis3d/modal_app.py::diagnose --image 정면원화.png --out 결과폴더
+
+    애드온과 같은 요청(정면 1장·1024 캐스케이드·12스텝·guidance 7.5·PBR)으로 한 번 디코드하고, 리메시 전
+    구멍 메우기 한도별 GLB 를 out 폴더에 쓴다."""
+    import base64
+    with open(image, "rb") as f:
+        front = base64.b64encode(f.read()).decode()
+    params = {"front": front, "octree_resolution": 1024, "num_inference_steps": 12, "guidance_scale": 7.5,
+              "face_count": int(face_count), "seed": int(seed), "texture": True, "texture_size": 2048,
+              "type": "glb", "variants": True}
+    results = ShapeWorker().generate.remote(params)
+    os.makedirs(out, exist_ok=True)
+    for label, data in results.items():
+        path = os.path.join(out, f"{label}.glb")
+        with open(path, "wb") as f:
+            f.write(data)
+        print("저장:", path, f"{len(data):,} bytes")
 
 
 # ---- 웹 계층: 가벼운 CPU 컨테이너. /status 는 생성 중에도 즉시 응답한다 ----

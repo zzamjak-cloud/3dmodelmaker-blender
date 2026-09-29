@@ -136,6 +136,39 @@ def visible_backface_ratio(obj, rays: int = 4000, seed: int = 3) -> float:
     return back / max(hits, 1)
 
 
+def hidden_face_ratio(obj) -> float:
+    """어느 방향에서도 바깥이 보이지 않는 면의 비율 — 몸속 빈 공간의 벽까지 깔린 내부 면이다.
+
+    면 중심에서 노멀 쪽 반구로 14 방향(축 6 · 대각 8 중 노멀과 같은 쪽) 광선을 쏴 모두 자기 메시에 막히면 숨은 면이다.
+    (실측 2026-09-29, 덩치큰 좀비: 속 채우기가 몸속을 못 채우면 리토폴로지가 몸속 벽까지 깔았다)"""
+    import itertools
+
+    import bmesh
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    tree = BVHTree.FromBMesh(bm)
+    size = max(obj.dimensions) or 1.0
+    directions = [Vector(d) for d in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))]
+    directions += [Vector(d).normalized() for d in itertools.product((1, -1), repeat=3)]
+    hidden = 0
+    for face in bm.faces:
+        center = face.calc_center_median() + face.normal * size * 1e-4
+        blocked = True
+        for d in directions:
+            if d.dot(face.normal) <= 0.05:
+                continue
+            if tree.ray_cast(center, d, size * 4)[0] is None:
+                blocked = False
+                break
+        hidden += blocked
+    total = len(bm.faces)
+    bm.free()
+    return hidden / max(total, 1)
+
+
 def dark_face_ratio(obj, image, threshold: float = 0.03) -> dict:
     """좌우 절반별로 면 UV 중심의 베이크 픽셀이 거의 검정인 면의 비율."""
     width, height = image.size
@@ -321,6 +354,10 @@ def main():
     # 얼룩). 실측(2026-09-28, 좀비 4종): 속 채우기 전 30~64%, 뒤 0.1~4.7%
     back = visible_backface_ratio(obj)
     print(f"INFO 보이는 뒷면 비율: 원본 {source_back:.3f} → 결과 {back:.3f}")
+    hidden = hidden_face_ratio(obj)
+    # 속 채우기가 몸속을 못 채우면 몸속 벽까지 깔려 이 비율이 0.66~0.70 까지 오른다. 몸속이 차면 0.26~0.35 —
+    # 0.26 은 손가락 사이·겨드랑이처럼 14 방향이 다 막히는 오목한 곳이라 지표의 바닥값이다 (실측 2026-09-29, 4종)
+    check("숨은(내부) 면 비율 (45% 이하)", round(hidden, 3), 0.45, "le")
     check("보이는 뒷면 비율 (10% 이하)", round(back, 3), 0.1, "le")
 
     # ① 면수가 목표의 0.7~1.5배
@@ -348,7 +385,9 @@ def main():
         check("좌우 대칭 정점 비율 (min(0.9, 원본+0.1) 이상)", round(mirror_ratio(obj), 3),
               round(min(0.9, source_mirror + 0.1), 3), "ge")
     # ③'' 좁은 틈(겨드랑이 높이) 보존 — 원본과 결과의 x 축 광선 교차 수 일치 비율. 모델마다 자세가 달라 참고값
-    print(f"INFO 좁은 틈 보존(광선 교차 일치): {gap_match(stash, obj):.3f}")
+    # 참고값 — 원본은 이중 껍질이라 교차 수가 결과(단일 표면)의 두 배쯤 된다. 몸속 벽까지 깔던 예전 결과가 우연히
+    # 더 잘 맞았다. 팔·다리가 붙었는지는 렌더로 본다
+    print(f"INFO 좁은 틈 보존(광선 교차 일치, 참고): {gap_match(stash, obj):.3f}")
     # ④ 베이크 이미지가 새 머티리얼에 연결 (NORMAL_MAP 노드 포함)
     material = obj.data.materials[0] if obj.data.materials else None
     tree = material.node_tree if material and material.use_nodes else None

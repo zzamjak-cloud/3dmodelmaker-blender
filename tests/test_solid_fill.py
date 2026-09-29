@@ -67,30 +67,65 @@ class SolidifyTest(unittest.TestCase):
         # 윗면에 2x2 칸 구멍 — 속 빈 껍질이 바깥과 이어진 셰이프 서버 메시의 찢김 입구
         wall = box_shell()
         wall[9:11, 9:11, 15] = False
-        self.assertFalse(sf.solidify(wall, close=0)[10, 10, 10], "닫지 않으면 속이 바깥이다")
+        # 닫힘이 없어도 속 칸은 구멍 한 방향으로만 바깥이 보이므로 채워진다
+        self.assertTrue(sf.solidify(wall, close=0)[10, 10, 10])
         solid = sf.solidify(wall, close=2)
         self.assertTrue(solid[10, 10, 10])
-        # 속은 차고, 찢김 자리 벽 칸만 얕게 오목하게 남는다(침식이 입구 위 오목한 곳을 되판다)
         self.assertGreaterEqual(int(solid.sum()), 12 ** 3 - 4)
         self.assertTrue(solid[9:11, 9:11, 14].all(), "입구 바로 밑은 막혀 있다")
 
-    def test_wide_gap_between_parts_stays_open(self):
-        # 겨드랑이처럼 막으면 안 되는 넓은 틈 — 닫힘 반폭의 두 배보다 넓으면 남는다
-        # 격자에는 닫힘 칸 수 + PAD 만큼 여백이 있어야 한다 (plan_grid 가 보장한다)
-        wall = np.zeros((34, 16, 16), bool)
-        wall[4:12, 4:12, 4:12] = True
-        wall[20:28, 4:12, 4:12] = True
-        solid = sf.solidify(wall, close=2)
-        self.assertFalse(solid[16, 8, 8])
-        self.assertEqual(int(solid.sum()), 2 * 8 ** 3)
+    def test_wide_tear_does_not_leave_body_hollow(self):
+        # 닫힘보다 훨씬 넓은 찢김(윗면 6x6) — 흘려 넣기는 속까지 바깥으로 보지만 속 칸은 위쪽으로만 뚫려 있다
+        wall = box_shell()
+        wall[7:13, 7:13, 15] = False
+        solid = sf.solidify(wall, close=1)
+        self.assertTrue(solid[10, 10, 10])
+        self.assertTrue(solid[5, 5, 5], "찢김에서 먼 구석까지 찬다")
 
-    def test_thin_flap_survives_erosion(self):
-        # 찢어진 천 자락(한 칸 두께 판)은 닫힘의 침식으로 사라지면 안 된다
+    def test_narrow_through_tunnel_in_body_is_filled(self):
+        # 몸 앞뒤로 마주 난 찢김 사이 굴 — 굴 속 칸은 앞뒤 두 방향으로만 트여 몸속으로 본다
+        wall = box_shell()
+        wall[8:12, 4, 8:12] = False           # 앞 찢김
+        wall[8:12, 15, 8:12] = False          # 마주 보는 뒤 찢김
+        solid = sf.solidify(wall, close=0)
+        self.assertTrue(solid[10, 10, 10])
+        self.assertTrue(solid[5, 5, 5])
+
+    def test_pocket_open_downward_wide_stays_open(self):
+        # 다리 사이(반바지 자락 아래)처럼 앞뒤는 가려도 아래로 넓게 트인 공간은 대각 방향으로도 바깥이 보여 남는다
+        wall = np.zeros((40, 30, 40), bool)
+        wall[5:35, 5:25, 25:35] = True        # 엉덩이·반바지
+        wall[5:13, 5:25, 5:25] = True         # 왼 다리
+        wall[27:35, 5:25, 5:25] = True        # 오른 다리
+        wall[13:27, 5, 12:25] = True          # 앞 자락
+        wall[13:27, 24, 12:25] = True         # 뒤 자락
+        solid = sf.solidify(wall, close=0)
+        self.assertFalse(solid[20, 15, 15], "다리 사이는 채우지 않는다")
+
+    def test_two_aligned_tears_leave_no_sealed_void(self):
+        # 앞(-Y)·위(+Z) 찢김에 시선이 둘 다 걸친 칸 — 한 번만 판정하면 그 칸만 남아 몸속 밀폐 방울이 된다
+        wall = box_shell()
+        wall[8:12, 4, 8:12] = False
+        wall[8:12, 8:12, 15] = False
+        solid = sf.solidify(wall, close=0)
+        sealed = ~solid & ~sf.exterior(~solid)
+        self.assertEqual(int(sealed.sum()), 0)
+        self.assertTrue(solid[10, 10, 10])
+
+    def test_five_sided_pocket_is_filled(self):
+        # 한 방향으로만 트인 오목부(벌린 입·턱 밑)는 채워진다 — 리토폴로지는 그 자리를 막힌 면으로 깐다
         wall = np.zeros((20, 20, 20), bool)
-        wall[5:15, 5:15, 10] = True
-        solid = sf.solidify(wall, close=2)
-        self.assertTrue(solid[5:15, 5:15, 10].all())
+        wall[4:16, 4:16, 4:16] = True
+        wall[8:12, 4:12, 8:12] = False     # -Y 쪽으로만 열린 주머니
+        solid = sf.solidify(wall, close=0)
+        self.assertTrue(solid[10, 8, 10])
 
+    def test_escape_directions_counts_open_directions(self):
+        wall = box_shell()
+        counts = sf.escape_directions(wall)
+        self.assertEqual(int(counts[10, 10, 10]), 0)
+        self.assertGreaterEqual(int(counts[0, 0, 0]), 7)
+        self.assertEqual(int(counts[4, 4, 4]), 0, "막힌 칸은 0")
 
 class BoundaryQuadsTest(unittest.TestCase):
     def test_single_cell_is_closed_outward_cube(self):

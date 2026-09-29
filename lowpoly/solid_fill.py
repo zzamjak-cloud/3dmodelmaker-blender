@@ -15,6 +15,10 @@ PAD = 2                  # 격자 가장자리 여백(칸, 닫힘 칸 수에 더
 SAMPLE_STEP = 0.5        # 삼각형 샘플 간격 = 복셀 한 변 x 이 비율 — 벽에 틈이 새지 않게 촘촘히 찍는다
 MAX_CELLS = 12_000_000   # 격자 칸 수 상한 — 넘으면 복셀을 키운다 (bool 12MB, 흘려 넣기 int32 48MB)
 CHUNK_POINTS = 4_000_000  # 한 번에 좌표로 바꾸는 샘플 점 수 상한 (메모리)
+MIN_ESCAPE_DIRECTIONS = 3  # 26 방향(축·면 대각·꼭짓점 대각) 중 바깥이 보이는 방향이 이보다 적은 빈칸은 속으로 채운다.
+                         # 큰 찢김(셔츠 찢김 5cm)으로 몸속이 바깥과 이어져도 몸속 칸은 찢김 너머 0~1 방향만 트이고,
+                         # 다리 사이(반바지 자락 아래)·팔과 몸 사이는 아래·앞뒤로 넓게 트여 6 방향 이상이다(실측 2026-09-29,
+                         # 덩치큰 좀비). 6 축만 세면 앞뒤가 자락에 가린 다리 사이를 몸속과 구별하지 못해 네모난 덩어리로 메웠다
 MAX_STEPS = 128          # 삼각형 한 변을 나누는 칸 수 상한 — 넘는 삼각형은 네 조각으로 쪼갠다(샘플 수가 제곱으로 늘어난다)
 
 
@@ -118,7 +122,53 @@ def solidify(wall, close: int) -> np.ndarray:
     filled = ~exterior(~grown)
     if close:
         filled = ~_dilate(~filled, close)
-    return ~exterior(~(filled | wall))
+    # 닫힘보다 넓은 찢김으로 몸속이 바깥과 이어지면 흘려 넣기가 몸속까지 바깥으로 본다(실측 2026-09-29, 덩치큰 좀비:
+    # 닫힘 1~3cm 모두 몸통·팔 속이 비어 리토폴로지가 몸속 벽까지 깔았고, 5cm 는 팔과 몸 사이까지 메웠다).
+    # 흘려 넣기와 별개로 여러 방향에서 바깥이 보이는지로 몸속을 가려 채운다
+    return fill_enclosed(~exterior(~(filled | wall)))
+
+
+DIRECTIONS = tuple(d for d in __import__("itertools").product((-1, 0, 1), repeat=3) if d != (0, 0, 0))
+
+
+def escape_directions(blocked) -> np.ndarray:
+    """막히지 않은 칸마다 26 방향 중 격자 밖까지 막힌 칸 없이 뚫린 방향 수 (0~26, 막힌 칸은 0).
+
+    방향마다 주축을 따라 한 장씩 훑으며 '다음 칸이 막혔나'를 옮겨 온다 — 칸 수에 비례하는 선형 시간이다."""
+    count = np.zeros(blocked.shape, np.uint8)
+    for d in DIRECTIONS:
+        a = next(i for i in range(3) if d[i] != 0)
+        b, c = [i for i in range(3) if i != a]
+        grid = np.moveaxis(blocked, a, 0)
+        hit = np.empty_like(grid)
+        db, dc = d[b], d[c]
+        rows, cols = grid.shape[1], grid.shape[2]
+        # 다음 장의 (j+db, i+dc) 칸을 현재 장의 (j, i) 로 가져오는 슬라이스 — 격자 밖은 막히지 않은 것으로 둔다
+        dst = (slice(max(0, -db), rows - max(0, db)), slice(max(0, -dc), cols - max(0, dc)))
+        src = (slice(max(0, db), rows - max(0, -db)), slice(max(0, dc), cols - max(0, -dc)))
+        order = range(grid.shape[0] - 1, -1, -1) if d[a] > 0 else range(grid.shape[0])
+        prev = None
+        for k in order:
+            cur = grid[k].copy()
+            if prev is not None:
+                cur[dst] |= prev[src]
+            hit[k] = cur
+            prev = cur
+        count += ~np.moveaxis(hit, 0, a)
+    count[blocked] = 0
+    return count
+
+
+def fill_enclosed(solid, min_escapes: int = MIN_ESCAPE_DIRECTIONS) -> np.ndarray:
+    """바깥이 보이는 방향이 min_escapes 보다 적은 빈칸을 채운 덩어리.
+
+    대각 광선이 계단 모양 벽의 꼭짓점 틈으로 새지 않도록 판정은 한 칸 두껍게 한 덩어리에서 하고, 채울 칸을 한 칸 되
+    넓혀 벽에 붙은 띠까지 채운다. 끝으로 바깥과 이어지지 않은 빈칸(갇힌 방울)을 모두 채운다.
+    서로 마주 보는 찢김(앞·뒤) 사이 관통 굴처럼 여러 방향으로 트인 몸속은 남는다."""
+    thick = _dilate(solid, 1)
+    enclosed = ~thick & (escape_directions(thick) < min_escapes)
+    enclosed = _dilate(enclosed, 1) & ~solid
+    return ~exterior(~(solid | enclosed))
 
 
 def boundary_quads(solid, lo, pitch: float):

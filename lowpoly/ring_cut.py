@@ -40,7 +40,9 @@ GAP_CLOSE_RATIO = 2.6  # 열린 체인의 끝점 거리가 평균 엣지의 이 
 ARC_JOIN_RATIO = 3.5   # 같은 쪽 열린 호 조각의 끝점이 이 배수 안이면 한 호로 이어 붙인다 (대칭면 모서리 구멍은 엣지 2~3개 폭)
 MIRRORED_ALONG_RATIO = 0.5  # 미러한 가이드가 반대쪽 가이드와 축 방향으로 반지름의 이 비율 안이면 같은 링이다
 STRADDLE_RATIO = 0.5       # 링 중심이 대칭면에서 반지름의 이 비율 안이면 대칭면을 가로지르는 링(목·허리)으로 보고 미러하지 않는다
-MIN_RING_GAP_RATIO = 3.0  # 이웃 링과의 축 방향 간격이 (띠 반폭 합)의 이 배수보다 좁으면 접합이 서로 간섭한다고 경고한다
+MIN_RING_GAP_RATIO = 1.6  # 이웃 링과의 축 방향 간격이 (띠 반폭 합 = 추정 엣지 길이)의 이 배수보다 좁으면 접합이 서로 간섭한다
+# 3DRemesher 실측(좀비 12링, 간격 0.157): 추정 엣지의 1.76배(목표 2,000)는 모두 접합, 1.36배(목표 1,200)는 이웃 두 링이 열렸다
+MIN_RING_EDGES = 3     # 링 둘레가 추정 엣지 길이의 이 배수보다 짧으면 링이 뭉개진다. QuadriFlow 실제 엣지는 추정의 절반 정도라 링 정점 6개쯤이다
 SMALL_CYCLE_MAX = 8    # 링에 붙은 부속 사이클이 이 정점 수 이하면 QuadriFlow 구멍으로 보고 링에서 떼어낸다
 
 
@@ -135,6 +137,35 @@ def crowded_pairs(cuts: tuple[RingCut, ...]) -> tuple[tuple[str, str, float], ..
             if lateral < max(a.radius, b.radius) and along < (a.half_width + b.half_width) * MIN_RING_GAP_RATIO:
                 pairs.append((a.name, b.name, along))
     return tuple(pairs)
+
+
+def guide_quad_floor(cuts: tuple[RingCut, ...], area: float) -> tuple[int, str]:
+    """링을 모두 담으려면 필요한 최소 목표 면수와 그 근거.
+
+    추정 엣지 길이 e ≈ sqrt(면적 / 목표) 에서 링 둘레가 e 의 MIN_RING_EDGES 배 이상, 이웃 링 간격이 띠 폭 합(= e)의
+    MIN_RING_GAP_RATIO 배 이상이어야 접합이 서로 간섭하지 않는다."""
+    if not cuts or area <= 0.0:
+        return 0, ""
+    limit = float("inf")
+    reason = ""
+    for cut in cuts:
+        length = _perimeter(cut.points)
+        if length / MIN_RING_EDGES < limit:
+            limit, reason = length / MIN_RING_EDGES, f"'{cut.name}' 둘레 {length:.3g}"
+    for a_index, a in enumerate(cuts):
+        for b in cuts[a_index + 1:]:
+            offset = tuple(a.center[k] - b.center[k] for k in range(3))
+            along = abs(sum(offset[k] * b.normal[k] for k in range(3)))
+            lateral = sqrt(max(0.0, sum(o * o for o in offset) - along * along))
+            if lateral >= max(a.radius, b.radius) or along <= 0.0:
+                continue
+            if along / MIN_RING_GAP_RATIO < limit:
+                limit, reason = along / MIN_RING_GAP_RATIO, f"'{a.name}'·'{b.name}' 간격 {along:.3g}"
+    return int(area / (limit * limit)) + 1, reason
+
+
+def _perimeter(points) -> float:
+    return sum(_distance(points[i], points[(i + 1) % len(points)]) for i in range(len(points)))
 
 
 def _same_ring(a: RingCut, b: RingCut, loose: bool = False) -> bool:

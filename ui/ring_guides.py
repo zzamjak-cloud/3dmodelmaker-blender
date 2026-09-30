@@ -1,4 +1,4 @@
-# 링 가이드 — 표면을 클릭해 팔·다리·목 단면 링을 만들고, 리토폴로지가 그 위치를 절단 링으로 쓴다
+# 링 가이드 — 표면을 클릭하거나 뷰에 직선을 그어 팔·다리·목 단면 링을 만들고, 리토폴로지가 그 위치를 절단 링으로 쓴다
 #
 # 손으로 원을 그리면 크기·기울기가 맞지 않아 절단 링이 조각으로 잡히거나 발등·가슴을 함께 지난다.
 # 클릭 점을 지나는 평면들 중 단면 둘레가 짧고 안정적인 방향을 축으로 골라(lowpoly/ring_geometry.py)
@@ -17,13 +17,14 @@ from mathutils import Vector
 
 GUIDE_PREFIX = "LP3D_Ring"
 PROXY_FACES = 32000          # 단면용 복셀 프록시 면수 — 리토폴로지 입력 사다리의 복셀 밀도와 같다
+KNIFE_CLEARANCE_EDGES = 2.0  # 붙은 단면을 옮길 때 이웃 부위와 떨어져야 하는 거리 — 추정 출력 엣지 길이의 배수
 LIST_LIMIT = 8               # 패널은 리드로우마다 그려지므로 목록을 이 개수까지만 보여 준다
 
 _OVERLAY_REGIONS = {'UI', 'TOOLS', 'HEADER', 'TOOL_HEADER', 'ASSET_SHELF', 'ASSET_SHELF_HEADER'}
 
 _refreshing = False
 _pending_refresh = set()
-_proxy_cache = {}            # 원본 이름 → (메시 키, SectionMesh)
+_proxy_cache = {}            # 원본 이름 → (메시 키, SectionMesh, 바깥 표면적)
 
 
 def _geometry():
@@ -64,6 +65,18 @@ class LP3DRingGuideProps(bpy.types.PropertyGroup):
     )
     ratio: FloatProperty(name="둘레 비율", default=0.0)
     status: StringProperty(name="상태", default="")
+    # 선 긋기 가이드의 드래그 범위 — 두 끝 광선 옆면(점, 안쪽 법선). 오프셋·재검사 때도 같은 범위로 자른다
+    clipped: BoolProperty(name="드래그 범위로 자름", default=False)
+    clip_origin_a: FloatVectorProperty(size=3, subtype='XYZ')
+    clip_side_a: FloatVectorProperty(size=3, subtype='XYZ')
+    clip_origin_b: FloatVectorProperty(size=3, subtype='XYZ')
+    clip_side_b: FloatVectorProperty(size=3, subtype='XYZ')
+
+
+def _bounds(ring):
+    if not ring.clipped:
+        return ()
+    return ((tuple(ring.clip_origin_a), tuple(ring.clip_side_a)), (tuple(ring.clip_origin_b), tuple(ring.clip_side_b)))
 
 
 def is_guide(obj) -> bool:
@@ -119,7 +132,7 @@ def _section_mesh(source):
     try:
         quadretopo._set_hidden(proxy, False)
         size = quadretopo._local_size(proxy)
-        solid_fill.fill_interior(proxy, size / quadretopo.SOLID_PITCH_DIV, size / quadretopo.SOLID_CLOSE_DIV)
+        filled = solid_fill.fill_interior(proxy, size / quadretopo.SOLID_PITCH_DIV, size / quadretopo.SOLID_CLOSE_DIV)
         quadretopo._voxel_remesh(proxy, PROXY_FACES, wanted=PROXY_FACES)
         quadretopo.remove_fragments(proxy)
         quadretopo.make_manifold(proxy)
@@ -127,12 +140,38 @@ def _section_mesh(source):
         mesh.calc_loop_triangles()
         vertices = [tuple(v.co) for v in mesh.vertices]
         triangles = [tuple(t.vertices) for t in mesh.loop_triangles]
+        # 리토폴로지가 띠 폭(엣지 길이)을 잡는 면적과 같은 값 — 패널의 최소 면수가 실행 때와 어긋나지 않게
+        area = filled.get("outer_area") or sum(polygon.area for polygon in mesh.polygons)
     finally:
         quadretopo._discard(proxy)
     geometry = _geometry()
     section = geometry.SectionMesh(geometry.MeshData(vertices, triangles))
-    _proxy_cache[source.name] = (key, section)
+    _proxy_cache[source.name] = (key, section, area)
     return section
+
+
+def _cached_area(source):
+    """이미 구운 프록시의 바깥 표면적. 패널은 리드로우마다 그려지므로 프록시를 새로 굽지 않는다."""
+    cached = _proxy_cache.get(source.name) if source is not None else None
+    if cached is None or cached[0] != (source.data.session_uid, len(source.data.vertices), len(source.data.polygons)):
+        return None
+    return cached[2]
+
+
+def quad_floor(collection, scene) -> tuple:
+    """컬렉션의 링 가이드를 모두 담는 데 필요한 최소 목표 면수와 근거. 리토폴로지가 같은 기준으로 자동 상향한다."""
+    from ..lowpoly import ring_cut
+    guides = ring_guides(collection)
+    source = section_source(collection) if guides else None
+    area = _cached_area(source)
+    if not area:
+        return 0, ""
+    edge = math.sqrt(area / max(1, int(scene.lp3d.retopo_faces)))
+    to_source = source.matrix_world.inverted()
+    loops = [(guide.name, [tuple(to_source @ (guide.matrix_world @ Vector(p.co[:3])))
+                           for p in guide.data.splines[0].points])
+             for guide in guides if guide.data.splines]
+    return ring_cut.guide_quad_floor(ring_cut.ring_cuts(loops, edge), area)
 
 
 def _local_scale(source) -> float:
@@ -151,7 +190,6 @@ def half_width_for(source, scene) -> float:
 
 def create_ring_guide(collection, source, hit_world, normal_world):
     """월드 좌표 클릭 지점·법선으로 링 가이드 커브를 만든다. 실패하면 (None, 사유)."""
-    global _refreshing
     geometry = _geometry()
     section = _section_mesh(source)
     to_local = source.matrix_world.inverted()
@@ -160,6 +198,51 @@ def create_ring_guide(collection, source, hit_world, normal_world):
     estimate = geometry.estimate_ring(section, hit, normal, _local_scale(source))
     if estimate is None:
         return None, "클릭 지점 주변에서 닫힌 단면을 찾지 못했습니다"
+    return _new_guide(collection, source, section, estimate.center, estimate.axis, hit, estimate.radius), ""
+
+
+def create_knife_guide(collection, source, ray_a, ray_b, hits_world):
+    """선 양 끝의 월드 뷰 광선 (시점, 방향) 둘과 선을 따라 맞은 월드 표면 점들로 링 가이드를 만든다.
+
+    축을 추정하지 않고 두 광선이 이루는 평면을 그대로 절단면으로 쓰므로 기울기는 사용자가 그은 대로다.
+    아핀 변환은 평면을 평면으로 보내므로 광선을 원본 로컬로 옮겨 로컬에서 자른다. 실패하면 (None, 사유)."""
+    geometry = _geometry()
+    to_local = source.matrix_world.inverted()
+    rotate = to_local.to_3x3()
+    local_rays = [(tuple(to_local @ Vector(origin)), tuple((rotate @ Vector(direction)).normalized()))
+                  for origin, direction in (ray_a, ray_b)]
+    plane = geometry.knife_plane(*local_rays[0], *local_rays[1])
+    if plane is None:
+        return None, "선이 너무 짧습니다"
+    if not hits_world:
+        return None, "선이 메시를 지나지 않습니다"
+    section = _section_mesh(source)
+    hits = [tuple(to_local @ Vector(hit)) for hit in hits_world]
+    bounds = geometry.knife_bounds(*local_rays[0], *local_rays[1], plane[1])
+    found = geometry.knife_ring(section, plane[0], plane[1], hits, bounds)
+    if found is None:
+        return None, "선이 지나는 곳에 닫힌 단면이 없습니다. 팔·다리를 가로질러 그어 주세요"
+    loop, hit = found
+    center = tuple(sum(p[i] for p in loop) / len(loop) for i in range(3))
+    radius = max(math.dist(p, center) for p in loop)
+    guide = _new_guide(collection, source, section, center, plane[1], hit, radius, bounds)
+    # 틈이 출력 엣지 둘 이상은 돼야 QuadriFlow 가 틈을 건너 이웃 부위와 잇지 않는다
+    area = _cached_area(source) or sum(polygon.area for polygon in source.data.polygons)
+    clearance = KNIFE_CLEARANCE_EDGES * math.sqrt(area / max(1, int(bpy.context.scene.lp3d.retopo_faces)))
+    shift = geometry.unfused_offset(section, center, plane[1], hit, radius, bounds, clearance)
+    if shift is None:
+        return guide, ("이 자리의 단면이 이웃 부위와 붙어 있어 리토폴로지에서 링이 열릴 수 있습니다 "
+                       "— 두 부위가 떨어진 곳에 다시 그어 주세요")
+    if shift:
+        # 드래그 범위로 잘라 만든 링은 리토폴로지 입력 표면에 없다 — 두 부위가 떨어지는 가장 가까운 높이로 옮긴다
+        guide.lp3d_ring_guide.offset = shift   # update 콜백이 타이머로 다시 자르지만 바로 결과를 보이도록 직접 자른다
+        refresh_ring_guide(guide, source=source, section=section)
+        return guide, f"단면이 이웃 부위와 붙어 있어 축을 따라 {abs(shift):.3f} 옮겼습니다"
+    return guide, ""
+
+
+def _new_guide(collection, source, section, center, axis, hit, radius, bounds=()):
+    global _refreshing
     curve = bpy.data.curves.new(GUIDE_PREFIX, 'CURVE')
     curve.dimensions = '3D'
     guide = bpy.data.objects.new(GUIDE_PREFIX, curve)
@@ -171,15 +254,18 @@ def create_ring_guide(collection, source, hit_world, normal_world):
     _refreshing = True   # offset 대입도 update 콜백을 부르므로 초기화 동안은 막는다
     try:
         ring.is_ring = True
-        ring.center = estimate.center
-        ring.axis = estimate.axis
+        ring.center = center
+        ring.axis = axis
         ring.hit = hit
-        ring.radius = estimate.radius
+        ring.radius = radius
         ring.offset = 0.0
+        ring.clipped = bool(bounds)
+        if bounds:
+            (ring.clip_origin_a, ring.clip_side_a), (ring.clip_origin_b, ring.clip_side_b) = bounds
     finally:
         _refreshing = False
     refresh_ring_guide(guide, source=source, section=section)
-    return guide, ""
+    return guide
 
 
 def refresh_ring_guide(guide, *, source=None, section=None) -> bool:
@@ -194,7 +280,7 @@ def refresh_ring_guide(guide, *, source=None, section=None) -> bool:
     axis = tuple(ring.axis)
     center = tuple(ring.center[i] + axis[i] * ring.offset for i in range(3))
     hit = tuple(ring.hit[i] + axis[i] * ring.offset for i in range(3))
-    loop = geometry.slice_ring(section, center, axis, hit, ring.radius)
+    loop = geometry.slice_ring(section, center, axis, hit, ring.radius, _bounds(ring))
     if loop is None:
         ring.status = "이 위치에는 닫힌 단면이 없습니다"
         ring.ratio = 0.0
@@ -203,7 +289,7 @@ def refresh_ring_guide(guide, *, source=None, section=None) -> bool:
     guide.matrix_world = source.matrix_world.copy()
     _write_points(guide.data, geometry.resample_loop(loop))
     ring.ratio = geometry.rim_ratio(section, center, axis, hit, ring.radius,
-                                     half_width_for(source, bpy.context.scene))
+                                     half_width_for(source, bpy.context.scene), _bounds(ring))
     ring.status = "사용 가능" if ring.ratio >= geometry.RIM_OK_RATIO else "단면 급변: 위치를 옮겨 주세요"
     return True
 
@@ -278,12 +364,55 @@ def _raycast(context, event, target):
     return tuple(target.matrix_world @ location), tuple(normal_world)
 
 
+def detach_guide(guide) -> None:
+    """모달 도중 취소용. 데이터 블록을 바로 해제하면 이어지는 뎁스그래프 재구성이 해제된 커브를 따라가 Blender 가
+    종료된 적이 있어(3DRemesher 실측 크래시), 씬에서만 떼고 사용자 0 인 블록은 저장·재열기 때 정리되게 둔다."""
+    for collection in tuple(guide.users_collection):
+        collection.objects.unlink(guide)
+
+
+def _push_undo(message: str) -> None:
+    """모달 세션 전체가 언도 한 단계로 묶이면 끝낸 뒤 Ctrl+Z 한 번에 링이 모두 사라지므로 링마다 단계를 남긴다."""
+    try:
+        bpy.ops.ed.undo_push(message=message)
+    except RuntimeError:
+        pass
+
+
+def _is_undo_key(event) -> bool:
+    return (event.type == 'Z' and (event.ctrl or event.oskey) and not event.shift) or event.type == 'BACK_SPACE'
+
+
+def _undo_last(operator) -> None:
+    """이 세션에서 만든 마지막 링만 지운다. 모달 중 전역 언도가 끼어들면 원본까지 되돌아갈 수 있어 키를 여기서 삼킨다."""
+    while operator._created:
+        guide = bpy.data.objects.get(operator._created.pop())
+        if guide is not None and guide.users_collection:
+            detach_guide(guide)
+            _push_undo("링 가이드 취소")
+            operator.report({'INFO'}, "마지막 링 가이드를 취소했습니다")
+            break
+    try:
+        operator._area.tag_redraw()
+    except (AttributeError, ReferenceError):
+        pass
+
+
+def _modal_targets(operator):
+    """모달 중 리토폴로지를 돌리면 보존본이 새로 생기고 대상 이름이 바뀌므로 입력마다 (컬렉션, 대상, 단면 원본)을 다시 찾는다."""
+    collection = bpy.data.collections.get(operator._collection_name)
+    target = bpy.data.objects.get(operator._target_name)
+    source = section_source(collection) if collection is not None else None
+    target = _retopo_target(collection) or target if collection is not None else target
+    return collection, target, source
+
+
 class LP3D_OT_ring_guide_add(bpy.types.Operator):
     bl_idname = "lp3d.ring_guide_add"
     bl_label = "클릭으로 링 가이드 추가"
     bl_description = ("메시 표면을 클릭한 자리에 축에 수직인 단면 링 가이드를 만든다. 리토폴로지가 그 위치에 "
                       "나선 대신 링 루프를 깐다. Ctrl+Z 로 마지막 링을 취소하고 우클릭이나 ESC 로 끝낸다")
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_options = {'REGISTER'}   # 링마다 언도 단계를 직접 남긴다
 
     @classmethod
     def poll(cls, context):
@@ -326,25 +455,15 @@ class LP3D_OT_ring_guide_add(bpy.types.Operator):
         if event.type in {'RIGHTMOUSE', 'ESC'}:
             self._finish()
             return {'FINISHED'}
-        undo_key = (event.type == 'Z' and (event.ctrl or event.oskey)) or event.type == 'BACK_SPACE'
+        undo_key = _is_undo_key(event)
         if undo_key and event.value == 'PRESS':
-            # 모달 중 전역 언도가 끼어들면 원본까지 되돌아갈 수 있어 여기서 삼키고, 이 세션의 마지막 링만 지운다
-            while self._created:
-                guide = bpy.data.objects.get(self._created.pop())
-                if guide is not None:
-                    remove_guide(guide)
-                    self.report({'INFO'}, "마지막 링 가이드를 취소했습니다")
-                    break
+            _undo_last(self)
             self._update_header()
             return {'RUNNING_MODAL'}
         if undo_key:
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            collection = bpy.data.collections.get(self._collection_name)
-            target = bpy.data.objects.get(self._target_name)
-            # 모달 중 리토폴로지를 돌리면 보존본이 새로 생기고 대상 이름이 바뀌므로 클릭마다 다시 찾는다
-            source = section_source(collection) if collection is not None else None
-            target = _retopo_target(collection) or target
+            collection, target, source = _modal_targets(self)
             if collection is None or target is None or source is None:
                 self._finish()
                 return {'CANCELLED'}
@@ -356,12 +475,196 @@ class LP3D_OT_ring_guide_add(bpy.types.Operator):
                 self.report({'WARNING'}, reason)
             else:
                 self._created.append(guide.name)
+                _push_undo("링 가이드 추가")
                 ring = guide.lp3d_ring_guide
                 self.report({'INFO'}, f"{guide.name}: 반지름 {ring.radius:.3f}, 둘레 비율 {ring.ratio:.2f} "
                                       f"— {ring.status}")
             self._update_header()
             return {'RUNNING_MODAL'}
         return {'PASS_THROUGH'}
+
+
+KNIFE_SAMPLES = 48          # 선을 따라 이만큼 레이를 쏘아 가로지른 부위를 고른다
+KNIFE_MIN_PIXELS = 8.0      # 이보다 짧은 드래그는 클릭 실수로 보고 버린다
+KNIFE_COLOR = (1.0, 0.8, 0.1, 1.0)
+
+
+def _draw_knife_line(operator):
+    try:
+        _draw_knife_stroke(operator)
+    except ReferenceError:
+        pass   # 파일을 새로 열어 오퍼레이터가 해제된 뒤 남은 호출
+
+
+def _draw_knife_stroke(operator):
+    region = bpy.context.region
+    if operator._start is None or operator._end is None or region is None \
+            or region.as_pointer() != operator._region_pointer:
+        return
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+
+    shader = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
+    batch = batch_for_shader(shader, 'LINES', {"pos": [operator._start, operator._end]})
+    gpu.state.blend_set('ALPHA')
+    shader.uniform_float("viewportSize", (region.width, region.height))
+    shader.uniform_float("lineWidth", 2.0)
+    shader.uniform_float("color", KNIFE_COLOR)
+    batch.draw(shader)
+    gpu.state.blend_set('NONE')
+
+
+def _world_ray(region, rv3d, coord):
+    return (tuple(view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)),
+            tuple(view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)))
+
+
+class LP3D_OT_ring_guide_knife(bpy.types.Operator):
+    bl_idname = "lp3d.ring_guide_knife"
+    bl_label = "선으로 링 가이드 추가"
+    bl_description = ("Knife 처럼 뷰에서 팔·다리를 가로지르는 직선을 그으면, 그 선과 보는 방향이 이루는 평면으로 "
+                      "단면 링 가이드를 만든다. 축 자동 추정이 어긋나는 자리에서 기울기를 직접 정한다. "
+                      "Ctrl+Z 로 마지막 링을 취소하고 우클릭이나 ESC 로 끝낸다")
+    bl_options = {'REGISTER'}   # 링마다 언도 단계를 직접 남긴다
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and _job_collection(context)[1] is not None
+
+    def invoke(self, context, event):
+        if context.area is None or context.area.type != 'VIEW_3D':
+            self.report({'ERROR'}, "3D 뷰포트에서 실행해야 합니다")
+            return {'CANCELLED'}
+        collection, target = _job_collection(context)
+        source = section_source(collection)
+        self._collection_name = collection.name
+        self._target_name = target.name
+        self._area = context.area
+        self._created = []
+        self._region = None
+        self._region_pointer = 0
+        self._start = None
+        self._end = None
+        context.window.cursor_modal_set('WAIT')
+        try:
+            _section_mesh(source)   # 첫 선이 멈추지 않도록 프록시를 미리 굽는다
+        finally:
+            context.window.cursor_modal_restore()
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(_draw_knife_line, (self,), 'WINDOW', 'POST_PIXEL')
+        context.window_manager.modal_handler_add(self)
+        self._update_header()
+        return {'RUNNING_MODAL'}
+
+    def _update_header(self):
+        try:
+            self._area.header_text_set(
+                f"링 가이드 {len(self._created)}개 추가 — 드래그: 가로지르는 선, Ctrl: 15° 스냅, "
+                "Ctrl+Z/Backspace: 마지막 취소, 우클릭/ESC: 종료")
+        except (AttributeError, ReferenceError):
+            pass
+
+    def _redraw(self):
+        try:
+            self._area.tag_redraw()
+        except (AttributeError, ReferenceError):
+            pass
+
+    def _finish(self):
+        if self._handle is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
+            self._handle = None
+        try:
+            self._area.header_text_set(None)
+        except (AttributeError, ReferenceError):
+            pass
+        self._redraw()
+
+    def cancel(self, _context):
+        # 파일 열기·영역 닫기처럼 모달 밖에서 끝날 때도 그리기 핸들러를 떼어야 한다
+        self._finish()
+
+    def _mouse(self, event, snap: bool):
+        """선을 시작한 영역 기준 좌표. 드래그가 영역 밖으로 나가도 같은 영역의 광선으로 계산하려고 창 좌표에서 직접 뺀다."""
+        point = (event.mouse_x - self._region.x, event.mouse_y - self._region.y)
+        if not snap or self._start is None:
+            return point
+        dx, dy = point[0] - self._start[0], point[1] - self._start[1]
+        length = math.hypot(dx, dy)
+        step = math.radians(15.0)
+        angle = round(math.atan2(dy, dx) / step) * step
+        return (self._start[0] + length * math.cos(angle), self._start[1] + length * math.sin(angle))
+
+    def modal(self, context, event):
+        if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+            if self._start is not None:   # 긋던 선만 버리고 도구는 유지한다
+                self._start = self._end = None
+                self._redraw()
+                return {'RUNNING_MODAL'}
+            self._finish()
+            return {'FINISHED'}
+        undo_key = _is_undo_key(event)
+        if undo_key and event.value == 'PRESS':
+            _undo_last(self)
+            self._update_header()
+            return {'RUNNING_MODAL'}
+        if undo_key:
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            found = _viewport_under_mouse(context, event)
+            if found is None or found[1] is None:
+                return {'PASS_THROUGH'}   # 사이드바 버튼 클릭은 그대로 넘긴다
+            self._region, self._rv3d, coord = found
+            self._region_pointer = self._region.as_pointer()
+            self._start = self._end = coord
+            self._redraw()
+            return {'RUNNING_MODAL'}
+        if self._start is not None and event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE', 'LEFT_CTRL', 'RIGHT_CTRL'}:
+            self._end = self._mouse(event, event.ctrl)
+            self._redraw()
+            return {'RUNNING_MODAL'}
+        if self._start is not None and event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            self._end = self._mouse(event, event.ctrl)
+            start, end = self._start, self._end
+            self._start = self._end = None
+            self._redraw()
+            if math.hypot(end[0] - start[0], end[1] - start[1]) < KNIFE_MIN_PIXELS:
+                return {'RUNNING_MODAL'}
+            collection, target, source = _modal_targets(self)
+            if collection is None or target is None or source is None:
+                self._finish()
+                return {'CANCELLED'}
+            self._cut(collection, target, source, start, end)
+            self._update_header()
+            return {'RUNNING_MODAL'}
+        return {'PASS_THROUGH'}
+
+    def _cut(self, collection, target, source, start, end):
+        try:
+            region, rv3d = self._region, self._rv3d
+            ray_a = _world_ray(region, rv3d, start)
+            ray_b = _world_ray(region, rv3d, end)
+            samples = [_world_ray(region, rv3d, (start[0] + (end[0] - start[0]) * k / KNIFE_SAMPLES,
+                                                 start[1] + (end[1] - start[1]) * k / KNIFE_SAMPLES))
+                       for k in range(KNIFE_SAMPLES + 1)]
+        except ReferenceError:
+            return   # 드래그 도중 영역이 닫혔다
+        inverse = target.matrix_world.inverted()
+        hits = []
+        for origin, direction in samples:
+            hit, location, _normal, _index = target.ray_cast(
+                inverse @ Vector(origin), (inverse.to_3x3() @ Vector(direction)).normalized())
+            if hit:
+                hits.append(tuple(target.matrix_world @ location))
+        guide, reason = create_knife_guide(collection, source, ray_a, ray_b, hits)
+        if guide is None:
+            self.report({'WARNING'}, reason)
+            return
+        self._created.append(guide.name)
+        _push_undo("링 가이드 추가")
+        ring = guide.lp3d_ring_guide
+        self.report({'WARNING'} if reason else {'INFO'},
+                    f"{guide.name}: 반지름 {ring.radius:.3f}, 둘레 비율 {ring.ratio:.2f} — {ring.status}"
+                    + (f" · {reason}" if reason else ""))
 
 
 class LP3D_OT_ring_guide_check(bpy.types.Operator):
@@ -427,13 +730,24 @@ def draw_ring_guides(layout, context, collection) -> None:
     box = layout.box()
     box.label(text="링 가이드 (팔·다리·목 나선 방지)", icon='CURVE_NCIRCLE')
     row = box.row(align=True)
-    row.operator("lp3d.ring_guide_add", icon='ADD')
+    row.operator("lp3d.ring_guide_add", text="클릭", icon='ADD')
+    row.operator("lp3d.ring_guide_knife", text="선 긋기", icon='IPO_LINEAR')
     row.operator("lp3d.ring_guide_check", text="", icon='FILE_REFRESH')
     row.operator("lp3d.ring_guide_clear", text="", icon='TRASH')
     guides = ring_guides(collection)
     if not guides:
-        box.label(text="좌클릭 추가 · Ctrl+Z 마지막 취소 · 우클릭 종료")
+        box.label(text="클릭: 축 자동 · 선 긋기: 그은 선이 절단면")
+        box.label(text="Ctrl+Z 마지막 취소 · 우클릭 종료")
         return
+    floor, reason = quad_floor(collection, context.scene)
+    if floor:
+        low = context.scene.lp3d.retopo_faces < floor
+        box.label(text=f"가이드 기준 최소 면수: {floor:,}", icon='ERROR' if low else 'CHECKMARK')
+        if low:
+            from ..lowpoly.quadretopo import MAX_TARGET_FACES
+            box.label(text=f"실행하면 {min(floor, MAX_TARGET_FACES):,} 로 올려서 깝니다")
+        if reason:
+            box.label(text=f"근거: {reason}")
     active = context.active_object
     if is_guide(active) and active in guides:
         ring = active.lp3d_ring_guide
@@ -455,7 +769,7 @@ def draw_ring_guides(layout, context, collection) -> None:
 
 _CLASSES = (
     LP3DRingGuideProps,
-    LP3D_OT_ring_guide_add, LP3D_OT_ring_guide_check,
+    LP3D_OT_ring_guide_add, LP3D_OT_ring_guide_knife, LP3D_OT_ring_guide_check,
     LP3D_OT_ring_guide_remove, LP3D_OT_ring_guide_clear,
 )
 

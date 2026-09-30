@@ -22,6 +22,7 @@ RingCut = _cut.RingCut
 _chains = _cut._chains
 bridge_steps = _cut.bridge_steps
 crowded_pairs = _cut.crowded_pairs
+guide_quad_floor = _cut.guide_quad_floor
 mirror_cuts = _cut.mirror_cuts
 ring_cuts = _cut.ring_cuts
 
@@ -56,6 +57,20 @@ class RingCutTests(unittest.TestCase):
         near = RingCut("near", (0.0, 0.0, 1.25), (0.0, 0.0, 1.0), 0.2, 0.02, ())
         far = RingCut("far", (0.0, 0.0, 1.60), (0.0, 0.0, 1.0), 0.2, 0.02, ())
         self.assertEqual([(a, b) for a, b, _gap in crowded_pairs((low, near, far))], [("low", "near")])
+
+    def test_quad_floor_follows_the_tightest_ring_perimeter_or_gap(self):
+        # 둘레 0.6 링은 엣지 0.2 이하, 간격 0.08 인 두 링은 엣지 0.05 이하를 요구한다 — 좁은 쪽이 하한을 정한다
+        thin = RingCut("thin", (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 0.1, 0.02, tuple(_ring(64, 0.6 / (2 * math.pi), 0.0)))
+        floor, reason = guide_quad_floor((thin,), 4.0)
+        self.assertAlmostEqual(floor, 4.0 / (0.6 / 3) ** 2, delta=2)
+        self.assertIn("thin", reason)
+        a = RingCut("a", (0.0, 0.0, 1.0), (0.0, 0.0, 1.0), 0.2, 0.02, tuple(_ring(64, 0.2, 1.0)))
+        b = RingCut("b", (0.0, 0.0, 1.08), (0.0, 0.0, 1.0), 0.2, 0.02, tuple(_ring(64, 0.2, 1.08)))
+        side = RingCut("side", (1.0, 0.0, 1.04), (0.0, 0.0, 1.0), 0.2, 0.02, tuple((x + 1.0, y, z) for x, y, z in _ring(64, 0.2, 1.04)))
+        floor, reason = guide_quad_floor((a, b, side), 4.0)
+        self.assertAlmostEqual(floor, 4.0 / (0.08 / 1.6) ** 2, delta=2)
+        self.assertIn("'a'·'b'", reason)
+        self.assertEqual(guide_quad_floor((), 4.0), (0, ""))
 
     def test_bridge_uses_exactly_the_unavoidable_triangles_for_closed_rings(self):
         a = _ring(19, 1.0, 0.0)

@@ -24,7 +24,7 @@ import bmesh
 import bpy
 from mathutils import Vector
 
-from . import ring_cut, solid_fill
+from . import ring_cut, ring_geometry, solid_fill
 from .names import safe_id_name
 
 SOURCE_SUFFIX = '_원본'
@@ -92,6 +92,10 @@ WELD_RATIO = 1e-4              # 이 비율(모델 크기 기준)보다 짧은 �
                                # — 형상에는 무의미하고, 남겨 두면 종횡비 수백짜리 퇴화 면이 된다
 QF_TIMEOUT = 25.0              # 시도 하나의 기본 제한 시간(초) — 성공은 8~12초라 이보다 길면 정지로 본다
 QF_TIMEOUT_PER_QUAD = 1.0 / 400  # 목표 쿼드 하나당 늘려 주는 시간(초)
+MAX_TARGET_FACES = 60000       # 링 가이드 때문에 목표 면수를 올릴 상한 — 패널 목표 면수의 최댓값과 같다
+MAX_TARGET_RAISES = 2          # 링 접합이 실패하면 가이드를 빼기 전에 목표 면수를 이 횟수까지 올려 다시 깐다
+TARGET_RAISE_FACTOR = 1.5
+FIT_RESAMPLE = 64              # 입력 표면에 맞춘 링 폴리라인 점 수 — 띠 면 거리 계산 비용을 묶어 둔다
 SCORE_OUTPUTS = 2              # 링 접합 점수를 매겨 볼 QuadriFlow 출력 수 — 3개를 다 보면 실패 가이드가 있는 오거가 47초 → 198초
 QF_ATTEMPTS = 3                # 한 밀도에서 시드를 바꿔 볼 횟수. 실측(2026-09-20): 같은 입력에서 시드 1·2 는 정지,
                                # 시드 3 은 9초 성공 — 비결정적이라 여러 시드를 차례로 본다
@@ -186,6 +190,20 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
         # 대칭 반쪽은 +X 로 미러·중복 제거한 링을, 닫힌 전체 폴백은 사용자가 둔 그대로의 링을 자른다
         requested, full_requested = _requested_cuts(work, ring_guides, target_faces, symmetry, notes,
                                                     area=surface_area)
+        floor, floor_reason = ring_cut.guide_quad_floor(
+            full_requested, surface_area or sum(polygon.area for polygon in work.data.polygons))
+        if target_faces < floor:
+            # 링 둘레·간격에 비해 면이 성기면 이웃 링의 접합이 서로 간섭해 열리므로 가능한 최소 면수로 올린다
+            raised = min(floor, MAX_TARGET_FACES)
+            notes.append(f"링 가이드 {len(full_requested)}개를 담으려면 목표 면수가 {floor:,} 이상이어야 해"
+                         f"({floor_reason}) {target_faces:,} 대신 {raised:,} 로 깔았습니다")
+            say(f"링 가이드 기준으로 목표 면수 {target_faces:,} → {raised:,}")
+            target_faces = raised
+            requested, full_requested = _recut(work, ring_guides, target_faces, symmetry, surface_area,
+                                               requested, full_requested)
+        base_target = target_faces
+        target_raises = 0
+        raise_base = None   # (올리기 전 목표, 그때 실패 수, 그때 실패한 접합)
         max_retries = len(full_requested)   # 실패한 가이드를 하나씩은 빼므로 가이드 수만큼이면 충분하다
         for first, second, gap in ring_cut.crowded_pairs(requested):
             notes.append(f"링 가이드 '{first}' 와 '{second}' 의 간격({gap:.3g})이 좁아 접합이 서로 간섭할 수 있습니다 "
@@ -229,14 +247,39 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
                       if not seam.bridged or (not seam.closed and outcome != "HALF")]
             if not failed:
                 break
+            if raise_base is not None and len(failed) >= raise_base[1]:
+                # 면을 늘려도 실패가 줄지 않았다 — 링 밀도 문제가 아니므로(단면·틈 문제) 올리기 전 목표로 되돌리고
+                # 그때 실패한 가이드만 뺀다. 실측(2026-10-01 갱스터 16링): 2,000 → 3,000 → 4,500 에서 실패 1 → 5 → 7개
+                notes.append(f"목표 면수를 {target_faces:,} 까지 올려도 링 접합 실패가 줄지 않아 "
+                             f"{raise_base[0]:,} 로 되돌렸습니다")
+                target_faces, failed = raise_base[0], raise_base[2]
+                requested, full_requested = _recut(work, ring_guides, target_faces, symmetry, surface_area,
+                                                   requested, full_requested)
+                target_raises, raise_base = MAX_TARGET_RAISES, None
+            elif target_raises < MAX_TARGET_RAISES and target_faces < MAX_TARGET_FACES:
+                # 가이드를 빼기 전에 면을 늘려 다시 깐다 — 링이 촘촘하면 접합 양쪽 링이 서로 간섭해 열린다
+                if raise_base is None:
+                    raise_base = (target_faces, len(failed), failed)
+                raised = min(int(target_faces * TARGET_RAISE_FACTOR), MAX_TARGET_FACES)
+                names = ", ".join(f"'{seam.name}'({seam.note or '링이 닫히지 않음'})" for seam in failed)
+                notes.append(f"링 가이드 {names} 접합이 목표 {target_faces:,} 에서 실패해 {raised:,} 로 올려 다시 깔았습니다")
+                say(f"링 접합 실패 — 목표 면수 {target_faces:,} → {raised:,} 로 다시")
+                target_faces = raised
+                requested, full_requested = _recut(work, ring_guides, target_faces, symmetry, surface_area,
+                                                   requested, full_requested)
+                target_raises += 1
+                attempt -= 1
+                outcome, seams = None, ()
+                continue
             if retries >= max_retries:
                 raise RuntimeError(f"링 가이드 '{failed[0].name}' 의 절단 링을 접합하지 못했습니다 "
                                    f"({failed[0].note or '링이 닫히지 않음'})")
             # 접합 못 한 가이드는 빼고 같은 밀도를 다시 돈다 — 나머지 가이드의 링은 살린다
             for seam in failed:
                 notes.append(f"링 가이드 '{seam.name}' 접합 실패({seam.note or '링이 닫히지 않음'}, "
-                             f"양쪽 {seam.ring_sizes[0]}·{seam.ring_sizes[1]}정점) — 빼고 다시 깔았습니다. "
-                             "단면이 일정한 위치로 옮겨 주세요")
+                             f"양쪽 {seam.ring_sizes[0]}·{seam.ring_sizes[1]}정점) — "
+                             + (f"목표를 {target_faces:,} 까지 올려도 실패해 " if target_faces > base_target else "")
+                             + "빼고 다시 깔았습니다. 단면이 일정한 위치로 옮겨 주세요")
             names = {seam.name for seam in failed}
             requested = tuple(cut for cut in requested if cut.name not in names)
             full_requested = tuple(cut for cut in full_requested if cut.name not in names)
@@ -835,6 +878,7 @@ def _cut_bands(holder, requested_cuts: tuple, scale: float, say, notes: list, pl
     if not requested_cuts:
         return ()
     say(f"링 가이드 {len(requested_cuts)}개 위치에 절단 띠 생성")
+    requested_cuts = _fit_cuts(holder, requested_cuts, notes)
     original = holder.data.copy()
     # 미세 엣지는 뒤의 make_manifold 가 늘려 준다 — 병합·삼각화는 구멍 메우기 면과 엉켜 비매니폴드를 만든다
     cuts, skipped = ring_cut.cut_bands(holder.data, requested_cuts, scale, 0.0, triangulate=False)
@@ -855,6 +899,45 @@ def _cut_bands(holder, requested_cuts: tuple, scale: float, say, notes: list, pl
         cuts = ()
     bpy.data.meshes.remove(original)
     return cuts
+
+
+def _fit_cuts(holder, cuts: tuple, notes: list) -> tuple:
+    """QuadriFlow 입력 표면에서 각 가이드 자리에 실제로 닫힌 링이 있는지 보고, 없으면 축을 따라 가장 가까운 자리로 옮긴다.
+
+    가이드는 복셀 프록시에서 잘랐어도 입력은 데시메이트까지 거쳐 표면이 조금 다르다 — 링 폴리라인도 입력 단면으로
+    바꿔 띠 면을 고를 때 띠가 끊기지 않게 한다. 맞는 자리가 없으면 원래 가이드를 그대로 쓴다."""
+    mesh = holder.data
+    mesh.calc_loop_triangles()
+    section = ring_geometry.SectionMesh(ring_geometry.MeshData(
+        [tuple(v.co) for v in mesh.vertices], [tuple(t.vertices) for t in mesh.loop_triangles]))
+    fitted = []
+    for cut in cuts:
+        found = ring_geometry.fit_section(section, cut.center, cut.normal, cut.radius, cut.half_width,
+                                          ring_geometry.perimeter(cut.points, True))
+        if found is None:
+            fitted.append(cut)
+            continue
+        shift, loop = found
+        points = ring_geometry.resample_loop(loop, FIT_RESAMPLE)
+        center = tuple(sum(p[i] for p in points) / len(points) for i in range(3))
+        radius = max(math.dist(p, center) for p in points)
+        fitted.append(ring_cut.RingCut(cut.name, center, cut.normal, radius, cut.half_width, points))
+        if shift:
+            note = (f"링 가이드 '{cut.name}' 자리의 표면 단면이 이웃 부위와 합쳐져 있어 축을 따라 "
+                    f"{abs(shift):.3g} 옮겨 잘랐습니다")
+            if note not in notes:
+                notes.append(note)
+    return tuple(fitted)
+
+
+def _recut(work, ring_guides, target_faces: int, symmetry: bool, area, requested: tuple, full_requested: tuple) -> tuple:
+    """목표 면수를 바꾼 뒤 띠 폭을 다시 잡은 절단 링. 이미 뺀 가이드는 빼 둔 채로 둔다 — 띠 폭이 줄면 같은 자리 링
+    둘이 더는 합쳐지지 않으므로 앞에서 남은 이름만 이어 쓴다."""
+    kept_half = {cut.name for cut in requested}
+    kept_full = {cut.name for cut in full_requested}
+    half, full = _requested_cuts(work, ring_guides, target_faces, symmetry, None, area=area)
+    return (tuple(cut for cut in half if cut.name in kept_half),
+            tuple(cut for cut in full if cut.name in kept_full))
 
 
 def _requested_cuts(work, ring_guides, target_faces: int, symmetry: bool, notes=None, area=None) -> tuple:

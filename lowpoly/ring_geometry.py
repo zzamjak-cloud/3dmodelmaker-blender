@@ -387,29 +387,201 @@ def _hemisphere_directions(pole, count: int):
     return directions
 
 
-def slice_ring(mesh, center, axis, hit, radius: float = 0.0):
-    """center 를 지나 axis 에 수직인 단면 중 hit 에 가장 가까운 닫힌 루프. 없으면 None. mesh 는 MeshData 나 SectionMesh."""
+def slice_ring(mesh, center, axis, hit, radius: float = 0.0, bounds=()):
+    """center 를 지나 axis 에 수직인 단면 중 hit 에 가장 가까운 닫힌 루프. 없으면 None. mesh 는 MeshData 나 SectionMesh.
+
+    bounds 가 있으면 루프를 그 반공간들로 잘라 낸다(선 긋기 가이드의 드래그 범위)."""
     del radius  # 예전 절단 반경 인자 — 전체 면을 자르므로 쓰지 않는다
     loop = nearest_loop(section_loops(mesh, center, axis), hit)
     if loop is None or not loop[1]:
         return None
-    return tuple(loop[0])
+    return clip_loop(loop[0], bounds) if bounds else tuple(loop[0])
 
 
-def rim_ratio(mesh, center, axis, hit, radius: float, half_width: float) -> float:
+def rim_ratio(mesh, center, axis, hit, radius: float, half_width: float, bounds=()) -> float:
     """center ± half_width 두 단면 둘레의 min/max. 발등·가슴을 함께 지나면 낮아진다."""
     mesh = mesh if isinstance(mesh, SectionMesh) else SectionMesh(mesh)
     lengths = []
     for sign in (-1.0, 1.0):
         shifted_center = tuple(center[i] + axis[i] * half_width * sign for i in range(3))
         shifted_hit = tuple(hit[i] + axis[i] * half_width * sign for i in range(3))
-        loop = slice_ring(mesh, shifted_center, axis, shifted_hit, radius)
+        loop = slice_ring(mesh, shifted_center, axis, shifted_hit, radius, bounds)
         if loop is None:
             return 0.0
         lengths.append(perimeter(loop, True))
     if max(lengths) <= 0.0:
         return 0.0
     return min(lengths) / max(lengths)
+
+
+def knife_plane(origin_a, direction_a, origin_b, direction_b):
+    """화면에 그은 선 양 끝의 두 뷰 광선을 모두 담는 평면 (점, 단위 법선). 선이 너무 짧으면 None.
+
+    원근 뷰는 두 광선의 시점이 같고 직교 뷰는 방향이 같아, B 광선 위 한 점과 A 광선으로 한 식에 둘 다 풀린다."""
+    toward_b = tuple(origin_b[i] + direction_b[i] - origin_a[i] for i in range(3))
+    normal = _cross(direction_a, toward_b)
+    if sqrt(_dot(normal, normal)) < 1.0e-9:
+        return None
+    return tuple(origin_a), _unit(normal)
+
+
+def knife_bounds(origin_a, direction_a, origin_b, direction_b, normal):
+    """두 끝 광선 사이(드래그 범위)를 나타내는 반공간 둘 [(점, 안쪽 법선)].
+
+    각 끝 광선과 절단 평면 법선을 담는 옆면으로 자르며, 반대쪽 광선 위 한 점이 있는 쪽을 안쪽으로 본다.
+    옆면 법선은 절단 평면 법선과 수직이라 축 오프셋으로 평면을 옮겨도 그대로 쓸 수 있다."""
+    bounds = []
+    for (origin, direction), (other_origin, other_direction) in (
+            ((origin_a, direction_a), (origin_b, direction_b)), ((origin_b, direction_b), (origin_a, direction_a))):
+        side = _cross(direction, normal)
+        if sqrt(_dot(side, side)) < 1.0e-12:
+            return []
+        side = _unit(side)
+        inside = tuple(other_origin[i] + other_direction[i] - origin[i] for i in range(3))
+        if _dot(side, inside) < 0.0:
+            side = tuple(-s for s in side)
+        bounds.append((tuple(origin), side))
+    return bounds
+
+
+def clip_loop(points, bounds):
+    """닫힌 폴리곤을 반공간들로 잘라 낸 닫힌 폴리곤 (서덜랜드-호지먼). 잘린 자리는 옆면 위 직선이 된다.
+    남는 점이 3개 미만이면 None."""
+    result = list(points)
+    for origin, side in bounds:
+        if len(result) < 3:
+            return None
+        distances = [_dot(side, tuple(p[i] - origin[i] for i in range(3))) for p in result]
+        clipped = []
+        for index, point in enumerate(result):
+            following = (index + 1) % len(result)
+            d0, d1 = distances[index], distances[following]
+            if d0 >= 0.0:
+                clipped.append(point)
+            if (d0 >= 0.0) != (d1 >= 0.0):
+                t = d0 / (d0 - d1)
+                nxt = result[following]
+                clipped.append(tuple(point[i] + (nxt[i] - point[i]) * t for i in range(3)))
+        result = clipped
+    return tuple(result) if len(result) >= 3 else None
+
+
+def knife_ring(mesh, point, normal, hits, bounds=()):
+    """절단 평면의 단면 루프 중 선을 따라 쏜 레이 히트가 가장 많이 가리키는 루프. (루프 점, 대표 히트) 또는 None.
+
+    평면은 선 밖으로도 무한히 뻗어 반대쪽 다리·몸통까지 자르므로, 사용자가 실제로 그어 가로지른 부위를 히트로 고른다.
+    붙은 두 허벅지처럼 이웃 부위와 한 루프로 이어진 단면은 bounds(드래그 범위) 밖을 잘라 낸다.
+    가장 많이 가리킨 루프가 열려 있으면 링이 될 수 없어 None 이다."""
+    section = mesh if isinstance(mesh, SectionMesh) else SectionMesh(mesh)
+    loops = section_loops(section, point, normal)
+    if not loops or not hits:
+        return None
+    votes: dict = {}
+    for hit in hits:
+        distances = [min(_distance(p, hit) for p in loop[0]) for loop in loops]
+        index = min(range(len(loops)), key=distances.__getitem__)
+        votes.setdefault(index, []).append((distances[index], tuple(hit)))
+    index = max(votes, key=lambda k: len(votes[k]))
+    if not loops[index][1]:
+        return None
+    loop = clip_loop(loops[index][0], bounds) if bounds else tuple(loops[index][0])
+    if loop is None:
+        return None
+    return loop, min(votes[index])[1]
+
+
+FIT_MAX_SHIFT_RATIO = 1.0   # 가이드 자리에 쓸 링이 없으면 축을 따라 링 반지름의 이 배수까지 옮겨 본다
+FIT_STEPS = 10              # 한쪽 방향으로 옮겨 보는 단계 수
+FIT_PERIMETER_RATIO = 1.6   # 표면 단면 둘레가 가이드 둘레의 이 배수를 넘거나 이 역수보다 짧으면 같은 링이 아니다(이웃 부위와 합쳐짐)
+FIT_LATERAL_RATIO = 0.5     # 표면 단면 중심이 가이드 중심에서 반지름의 이 비율보다 옆으로 벗어나면 다른 부위의 루프다
+UNFUSED_MAX_SHIFT_RATIO = 2.0  # 선 긋기 가이드가 붙은 단면이면 반지름의 이 배수까지 옮겨 떨어진 자리를 찾는다
+UNFUSED_STEPS = 20
+CLEARANCE_SAMPLES = 48      # 루프 사이 거리를 잴 때 다시 찍는 점 수
+UNFUSED_SLACK_RATIO = 0.05  # 단면 정점이 드래그 범위 밖으로 반지름의 이 비율까지만 나가면 이웃 부위와 떨어진 단면이다
+
+
+def _shifts(max_shift: float, steps: int):
+    """0, +1, -1, +2, -2 … 단계 순서의 축 방향 이동량 — 가장 가까운 자리부터 본다."""
+    yield 0.0
+    for step in range(1, steps + 1):
+        for sign in (1.0, -1.0):
+            yield sign * max_shift * step / steps
+
+
+def fit_section(mesh, center, normal, radius: float, half_width: float, guide_length: float):
+    """center 평면과 ±half_width 평면 셋 모두에 가이드와 같은 링으로 보이는 닫힌 루프가 있는 가장 가까운 축 방향 자리.
+    (이동량, 가운데 루프) 또는 None.
+
+    원본에서 겹친 셸(몸통을 관통한 팔, 붙은 두 허벅지)은 복셀로 합치면 그 평면의 단면이 이웃 부위와 합쳐져 한 부위만
+    감싸는 링이 없다(3DRemesher 실측 좀비 어깨: 원본 둘레 1.16, 복셀 3.0~3.4). 둘레·중심이 가이드와 맞고 양쪽 띠
+    가장자리 둘레가 비슷한 자리를 축을 따라 찾는다."""
+    section = mesh if isinstance(mesh, SectionMesh) else SectionMesh(mesh)
+    for shift in _shifts(radius * FIT_MAX_SHIFT_RATIO, FIT_STEPS):
+        loops = []
+        for offset in (0.0, -half_width, half_width):
+            plane = tuple(center[i] + normal[i] * (shift + offset) for i in range(3))
+            best, best_distance = None, float("inf")
+            for points, closed, *_rest in section_loops(section, plane, normal):
+                if not closed or len(points) < 3:
+                    continue
+                length = perimeter(points, True)
+                if not guide_length / FIT_PERIMETER_RATIO <= length <= guide_length * FIT_PERIMETER_RATIO:
+                    continue
+                distance = _distance(_arc_centroid(points), plane)
+                if distance < radius * FIT_LATERAL_RATIO and distance < best_distance:
+                    best, best_distance = (points, length), distance
+            if best is None:
+                break
+            loops.append(best)
+        if len(loops) < 3:
+            continue
+        rims = [length for _points, length in loops[1:]]
+        if min(rims) < max(rims) * RIM_OK_RATIO:
+            continue
+        return shift, tuple(loops[0][0])
+    return None
+
+
+def unfused_offset(mesh, center, axis, hit, radius: float, bounds, clearance: float = 0.0):
+    """드래그 범위(bounds)로 자른 단면이 이웃 부위와 붙어 있으면, 떨어진 가장 가까운 축 방향 이동량. 지금 자리가 이미
+    떨어져 있으면 0.0, 못 찾으면 None.
+
+    붙은 두 허벅지는 드래그 범위로 잘라 한쪽만 감싸는 가이드를 만들 수 있어도, 리토폴로지 입력 표면에는 그런 링이
+    없어 접합이 열린다(실측 2026-10-01 갱스터: 잘린 둘레 0.83 · 전체 1.54, 두 허벅지 모두 '링이 열림'). 막 떨어진
+    높이도 틈이 출력 엣지 하나 남짓이면 QuadriFlow 가 틈을 건너 두 다리를 이어 링이 다시 열리므로(같은 모델, 틈 0.044 ·
+    엣지 0.034), 옮긴 자리와 그 앞뒤 clearance/2 평면 모두에서 다른 루프와 clearance 이상 떨어져야 한다."""
+    section = mesh if isinstance(mesh, SectionMesh) else SectionMesh(mesh)
+    if _separated(section, center, axis, hit, radius, bounds, 0.0, 0.0):
+        return 0.0
+    for shift in _shifts(radius * UNFUSED_MAX_SHIFT_RATIO, UNFUSED_STEPS):
+        if shift and all(_separated(section, center, axis, hit, radius, bounds, shift + offset, clearance)
+                         for offset in (0.0, -clearance * 0.5, clearance * 0.5)):
+            return shift
+    return None
+
+
+def _separated(section, center, axis, hit, radius: float, bounds, shift: float, clearance: float) -> bool:
+    """shift 평면의 hit 쪽 닫힌 루프가 드래그 범위 안에 들고 다른 닫힌 루프와 clearance 이상 떨어져 있는가."""
+    plane = tuple(center[i] + axis[i] * shift for i in range(3))
+    moved_hit = tuple(hit[i] + axis[i] * shift for i in range(3))
+    loops = section_loops(section, plane, axis)
+    loop = nearest_loop(loops, moved_hit)
+    if loop is None or not loop[1]:
+        return False
+    slack = radius * UNFUSED_SLACK_RATIO
+    if not all(_dot(side, tuple(p[i] - origin[i] for i in range(3))) >= -slack
+               for p in loop[0] for origin, side in bounds):
+        return False
+    if clearance <= 0.0:
+        return True
+    mine = resample_loop(loop[0], CLEARANCE_SAMPLES)
+    for other in loops:
+        if other is loop or not other[1]:
+            continue
+        theirs = resample_loop(other[0], CLEARANCE_SAMPLES)
+        if min(_distance(a, b) for a in mine for b in theirs) < clearance:
+            return False
+    return True
 
 
 def resample_loop(points, count: int = RESAMPLE_COUNT) -> tuple[Vector3, ...]:

@@ -118,6 +118,33 @@ def synthetic():
     ring.offset = 0.0
     ring_guides.refresh_ring_guide(guide)
 
+    # 선 긋기: 정면 직교 뷰에서 팔을 비스듬히(x 1.1→1.3) 가로지른 선 — 절단면은 그은 기울기를 그대로 따른다
+    ends = ((1.1, -10.0, -0.5), (1.3, -10.0, 0.5))
+    rays = [(end, (0.0, 1.0, 0.0)) for end in ends]
+    samples = [front_hit(body, 1.1 + 0.2 * t / 8, -0.5 + t / 8) for t in range(9)]
+    hits = [hit[0] for hit in samples if hit is not None]
+    knife, reason = ring_guides.create_knife_guide(coll, body, rays[0], rays[1], hits)
+    check("선 긋기 가이드 생성", knife is not None, reason)
+    tilt = math.degrees(math.atan2(abs(knife.lp3d_ring_guide.axis[2]), abs(knife.lp3d_ring_guide.axis[0])))
+    check("선 긋기 축이 그은 기울기(약 11°)", abs(tilt - math.degrees(math.atan(0.2))) < 1.0, round(tilt, 2))
+    check("선 긋기 둘레 비율 사용 가능", knife.lp3d_ring_guide.ratio > 0.8,
+          f"{knife.lp3d_ring_guide.ratio:.2f} {knife.lp3d_ring_guide.status}")
+    check("선 긋기 연산자 활성", bpy.ops.lp3d.ring_guide_knife.poll())
+    miss, reason = ring_guides.create_knife_guide(coll, body, rays[0], rays[1], [])
+    check("선이 메시를 안 지나면 거절", miss is None, reason)
+    ring_guides.remove_guide(knife)
+    # 팔 위쪽(z 0.1)에서 멈춘 선은 드래그 범위 밖을 잘라 낸다 — 붙은 두 허벅지에서 반대쪽 다리를 넘지 않게 하는 경로
+    short = [((1.5, -10.0, -0.5), (0.0, 1.0, 0.0)), ((1.5, -10.0, 0.1), (0.0, 1.0, 0.0))]
+    hits = [hit[0] for hit in (front_hit(body, 1.5, -0.25 + 0.05 * t) for t in range(6)) if hit is not None]
+    part, reason = ring_guides.create_knife_guide(coll, body, short[0], short[1], hits)
+    check("범위 제한 가이드 생성", part is not None and part.lp3d_ring_guide.clipped, reason)
+    top = max(p.co.z for p in part.data.splines[0].points)
+    check("드래그 끝 너머를 자름", abs(top - 0.1) < 0.02, round(top, 3))
+    ring_guides.refresh_ring_guide(part)
+    top = max(p.co.z for p in part.data.splines[0].points)
+    check("다시 잘라도 범위 유지", abs(top - 0.1) < 0.02, round(top, 3))
+    ring_guides.remove_guide(part)
+
     extra, reason = ring_guides.create_ring_guide(coll, body, (-1.5, 0.0, 0.3), (0.0, 0.0, 1.0))
     check("반대쪽 팔 가이드 생성", extra is not None, reason)
     check("가이드 2개", len(ring_guides.ring_guides(coll)), 2)

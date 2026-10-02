@@ -204,32 +204,41 @@ def create_ring_guide(collection, source, hit_world, normal_world):
 def create_knife_guide(collection, source, ray_a, ray_b, hits_world):
     """선 양 끝의 월드 뷰 광선 (시점, 방향) 둘과 선을 따라 맞은 월드 표면 점들로 링 가이드를 만든다.
 
-    축을 추정하지 않고 두 광선이 이루는 평면을 그대로 절단면으로 쓰므로 기울기는 사용자가 그은 대로다.
+    축을 추정하지 않고 두 광선이 이루는 평면을 절단면으로 쓰므로 화면에 그은 기울기는 그대로다. 다만 광선은
+    보는 방향에 가장 가까운 월드 축으로 나란히 세운다 — 원근 시점 탓에 화면에서 보이지 않게 기우는 것을 막는다.
     아핀 변환은 평면을 평면으로 보내므로 광선을 원본 로컬로 옮겨 로컬에서 자른다. 실패하면 (None, 사유)."""
     geometry = _geometry()
     to_local = source.matrix_world.inverted()
     rotate = to_local.to_3x3()
     local_rays = [(tuple(to_local @ Vector(origin)), tuple((rotate @ Vector(direction)).normalized()))
                   for origin, direction in (ray_a, ray_b)]
-    plane = geometry.knife_plane(*local_rays[0], *local_rays[1])
-    if plane is None:
-        return None, "선이 너무 짧습니다"
     if not hits_world:
         return None, "선이 메시를 지나지 않습니다"
     section = _section_mesh(source)
     hits = [tuple(to_local @ Vector(hit)) for hit in hits_world]
+    # 원근·비스듬한 뷰의 평면은 시점 쪽으로 기운다 — 축 정렬 직교 뷰에서 그은 것처럼 깊이 방향을 월드 축에 맞춘다
+    axes = [tuple((rotate @ Vector(axis)).normalized()) for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
+    aligned = geometry.knife_rays_along_axis(*local_rays[0], *local_rays[1], hits[len(hits) // 2], axes)
+    plane = geometry.knife_plane(*aligned[0], *aligned[1])
+    if plane is not None:
+        local_rays = aligned
+    else:
+        plane = geometry.knife_plane(*local_rays[0], *local_rays[1])   # 선이 깊이 축과 나란하면 뷰 평면 그대로
+    if plane is None:
+        return None, "선이 너무 짧습니다"
     bounds = geometry.knife_bounds(*local_rays[0], *local_rays[1], plane[1])
     found = geometry.knife_ring(section, plane[0], plane[1], hits, bounds)
     if found is None:
         return None, "선이 지나는 곳에 닫힌 단면이 없습니다. 팔·다리를 가로질러 그어 주세요"
     loop, hit = found
+    normal = plane[1]
     center = tuple(sum(p[i] for p in loop) / len(loop) for i in range(3))
     radius = max(math.dist(p, center) for p in loop)
-    guide = _new_guide(collection, source, section, center, plane[1], hit, radius, bounds)
-    # 틈이 출력 엣지 둘 이상은 돼야 QuadriFlow 가 틈을 건너 이웃 부위와 잇지 않는다
+    guide = _new_guide(collection, source, section, center, normal, hit, radius, bounds)
+    # 틈이 추정 출력 엣지 둘 이상은 돼야 리토폴로지 입력 준비(속 채우기 닫힘·복셀)가 틈을 메우지 않는다
     area = _cached_area(source) or sum(polygon.area for polygon in source.data.polygons)
     clearance = KNIFE_CLEARANCE_EDGES * math.sqrt(area / max(1, int(bpy.context.scene.lp3d.retopo_faces)))
-    shift = geometry.unfused_offset(section, center, plane[1], hit, radius, bounds, clearance)
+    shift = geometry.unfused_offset(section, center, normal, hit, radius, bounds, clearance)
     if shift is None:
         return guide, ("이 자리의 단면이 이웃 부위와 붙어 있어 리토폴로지에서 링이 열릴 수 있습니다 "
                        "— 두 부위가 떨어진 곳에 다시 그어 주세요")

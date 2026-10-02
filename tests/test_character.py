@@ -28,6 +28,7 @@ def _load_pkg(module_name: str):
 
 prompts = _load_pkg("prompts")
 multiview = _load_pkg("multiview")
+styles = _load_pkg("styles")
 
 
 class TestSystemPrompt(unittest.TestCase):
@@ -115,6 +116,12 @@ class TestTurnaroundSheet(unittest.TestCase):
     def test_style_note_applies_to_turnaround(self):
         p = multiview.build_image_prompt("기사", sheet="TURNAROUND", style_note="스타일: 복셀\n")
         self.assertIn("스타일: 복셀", p)
+
+    def test_character_front_note_is_not_lowpoly(self):
+        # 캐릭터 정면 원화는 스타일과 무관하게 고품질 문구 — 로우폴리 기본 문구가 섞이면 안 된다
+        p = multiview.build_image_prompt("기사", sheet="FRONT", style_note=styles.CHARACTER_IMAGE_NOTE)
+        self.assertIn("고품질 캐릭터 컨셉 원화", p)
+        self.assertNotIn("로우폴리", p)
 
 
 class TestComparePrompt(unittest.TestCase):

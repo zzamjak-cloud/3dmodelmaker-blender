@@ -436,7 +436,8 @@ class GenerationSession:
     def _run_multiview(self):
         multiview.generate(self.request, self.workdir, self.prefs.timeout,
                            self._on_multiview, ref_image=self.ref_image,
-                           style_note=styles.image_note(self.style),
+                           style_note=(styles.CHARACTER_IMAGE_NOTE if self.system_mode == 'CHARACTER'
+                                       else styles.image_note(self.style)),
                            job_key=self.uid, sheet=self._sheet_kind())
 
     def _on_multiview(self, path, error=None):

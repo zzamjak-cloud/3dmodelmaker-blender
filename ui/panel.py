@@ -153,7 +153,9 @@ class LP3D_PT_main(bpy.types.Panel):
         if getattr(job, "parent_uid", ""):
             return
         col = layout.column(align=True)
-        col.prop(job, "style", text="스타일")
+        if job.creation_mode != 'CHARACTER':
+            # 캐릭터는 셰이프 서버가 항상 최고 품질로 만든다 — 스타일은 결과에 영향을 주지 않는다
+            col.prop(job, "style", text="스타일")
         if job.creation_mode == 'SCENE':
             col.prop(job, "scene_size", text="규모")
         elif job.creation_mode == 'CHARACTER':

@@ -82,6 +82,11 @@ def image_note(style_id) -> str:
     return style_def(style_id)["image_note"]
 
 
+# 캐릭터 정면 원화는 셰이프 서버 입력이라 로우폴리 화풍이 오히려 해롭다 — 스타일과 무관하게 항상 이 문구를 쓴다
+CHARACTER_IMAGE_NOTE = ("스타일: 고품질 캐릭터 컨셉 원화. 형태·재질·색이 또렷하고 디테일이 풍부하며, "
+                        "면을 단순화하거나 각지게 그리지 않는다. 흰 배경.\n")
+
+
 def tri_scale(style_id) -> float:
     """트라이 예산 배수 — 스타일마다 형태에 필요한 밀도가 다르다."""
     return float(style_def(style_id)["tri_scale"])

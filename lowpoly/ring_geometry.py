@@ -490,6 +490,34 @@ def knife_ring(mesh, point, normal, hits, bounds=()):
     return loop, min(votes[index])[1]
 
 
+def knife_depth_axis(direction, axes):
+    """axes(단위 벡터들) 중 보는 방향 direction 과 가장 나란한 축 — 부호는 direction 쪽."""
+    best = max(axes, key=lambda axis: abs(_dot(axis, direction)))
+    return tuple(best) if _dot(best, direction) >= 0.0 else tuple(-x for x in best)
+
+
+def knife_rays_along_axis(origin_a, direction_a, origin_b, direction_b, anchor, axes):
+    """두 뷰 광선을, 가로지른 표면 점 anchor 의 깊이에서 보는 방향에 가장 가까운 축(axes 중)으로 나란히 세운
+    광선 둘 [(점, 방향)]. 축 정렬 직교 뷰에서 같은 선을 그은 것과 같다.
+
+    원근 뷰의 절단 평면은 시점을 지나므로 화면에서 수평으로 그어도 카메라 고도각과 부위의 좌우 위치만큼 기운다
+    (실측 2026-10-03 메카닉: 선 긋기 가이드 10개가 모두 수직에서 3~17°). 기운 링은 경계 앵커라 주변 와이어를
+    같이 기울이고 멀어지며 되돌아와 와이어가 링 쪽으로 쏠린 듯 보인다. 그 기울기는 화면에서 보이지 않으므로
+    사용자의 의도가 아니다 — 화면의 선(현)은 그대로 두고 깊이 방향만 축으로 맞춘다. 단면 기하로 관 축을 추정하는
+    방식(면 법선 공분산·둘레 최소화·표면 법선 평균)은 각진 메카닉 부위에서 셋 다 뷰 평면보다 더 기울었다(같은 날 실측)."""
+    view = _unit(tuple(direction_a[i] + direction_b[i] for i in range(3)))
+    depth = knife_depth_axis(view, axes)
+    rays = []
+    for origin, direction in ((origin_a, direction_a), (origin_b, direction_b)):
+        # 두 광선을 anchor 를 지나는 깊이 평면과 만나는 점으로 — 같은 깊이에 두어야 화면의 수평선이 월드에서도 수평이다
+        slope = _dot(direction, depth)
+        if abs(slope) < 1.0e-9:
+            return [(tuple(origin_a), tuple(direction_a)), (tuple(origin_b), tuple(direction_b))]
+        t = _dot(tuple(anchor[i] - origin[i] for i in range(3)), depth) / slope
+        rays.append((tuple(origin[i] + direction[i] * t for i in range(3)), depth))
+    return rays
+
+
 FIT_MAX_SHIFT_RATIO = 1.0   # 가이드 자리에 쓸 링이 없으면 축을 따라 링 반지름의 이 배수까지 옮겨 본다
 FIT_STEPS = 10              # 한쪽 방향으로 옮겨 보는 단계 수
 FIT_PERIMETER_RATIO = 1.6   # 표면 단면 둘레가 가이드 둘레의 이 배수를 넘거나 이 역수보다 짧으면 같은 링이 아니다(이웃 부위와 합쳐짐)
@@ -548,8 +576,8 @@ def unfused_offset(mesh, center, axis, hit, radius: float, bounds, clearance: fl
 
     붙은 두 허벅지는 드래그 범위로 잘라 한쪽만 감싸는 가이드를 만들 수 있어도, 리토폴로지 입력 표면에는 그런 링이
     없어 접합이 열린다(실측 2026-10-01 갱스터: 잘린 둘레 0.83 · 전체 1.54, 두 허벅지 모두 '링이 열림'). 막 떨어진
-    높이도 틈이 출력 엣지 하나 남짓이면 QuadriFlow 가 틈을 건너 두 다리를 이어 링이 다시 열리므로(같은 모델, 틈 0.044 ·
-    엣지 0.034), 옮긴 자리와 그 앞뒤 clearance/2 평면 모두에서 다른 루프와 clearance 이상 떨어져야 한다."""
+    높이도 틈이 좁으면 리토폴로지 입력 준비가 다시 메워 링이 열리므로(같은 모델: 원본 틈 1.6cm 는 속 채우기 닫힘 1cm 와
+    복셀 1.4cm 에서 붙고, 복셀 12.8만 면으로 촘촘히 해도 붙었다. 틈 0.044 · 엣지 0.034 자리도 열림), 옮긴 자리와 그 앞뒤 clearance/2 평면 모두에서 다른 루프와 clearance 이상 떨어져야 한다."""
     section = mesh if isinstance(mesh, SectionMesh) else SectionMesh(mesh)
     if _separated(section, center, axis, hit, radius, bounds, 0.0, 0.0):
         return 0.0

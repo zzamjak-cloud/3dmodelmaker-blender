@@ -28,6 +28,7 @@ slice_ring = _geometry.slice_ring
 knife_plane = _geometry.knife_plane
 knife_ring = _geometry.knife_ring
 knife_bounds = _geometry.knife_bounds
+knife_rays_along_axis = _geometry.knife_rays_along_axis
 fit_section = _geometry.fit_section
 unfused_offset = _geometry.unfused_offset
 
@@ -173,6 +174,32 @@ class RingGeometryTests(unittest.TestCase):
         self.assertIn(hit, hits)
         for p in loop:  # 루프는 사용자가 정한 기울어진 평면 위에 있다
             self.assertAlmostEqual(sum((p[i] - point[i]) * normal[i] for i in range(3)), 0.0, places=6)
+
+    def test_knife_rays_along_axis_removes_the_perspective_tilt_but_keeps_the_drawn_line(self):
+        # 위에서 내려다보는 원근 시점으로 수직 관 앞면에 수평선을 그으면 시점을 지나는 평면은 고도각만큼 기운다 —
+        # 광선을 보는 방향에 가장 가까운 축(Y)으로 세우면 평면이 수평이 되고 그은 선의 양 끝은 그대로다
+        tube = _tube(lambda z: 0.2, [z * 0.1 for z in range(21)])
+        eye = (0.6, -4.0, 2.2)
+        targets = ((-0.15, -0.13, 1.0), (0.15, -0.13, 1.0))
+        rays = [(eye, _normalized(tuple(t[i] - eye[i] for i in range(3)))) for t in targets]
+        _point, tilted = knife_plane(*rays[0], *rays[1])
+        self.assertLess(abs(tilted[2]), 0.97)   # 시점 평면은 15° 넘게 기운다
+        axes = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        aligned = knife_rays_along_axis(*rays[0], *rays[1], targets[0], axes)
+        for (point, direction), target in zip(aligned, targets):
+            self.assertEqual(direction, (0.0, 1.0, 0.0))
+            for i in range(3):
+                self.assertAlmostEqual(point[i], target[i], places=9)
+        point, normal = knife_plane(*aligned[0], *aligned[1])
+        self.assertAlmostEqual(abs(normal[2]), 1.0, places=9)
+        bounds = knife_bounds(*aligned[0], *aligned[1], normal)
+        loop, _hit = knife_ring(tube, point, normal, [targets[0], (0.0, -0.2, 1.0), targets[1]], bounds)
+        for p in loop:
+            self.assertAlmostEqual(p[2], 1.0, places=6)
+        self.assertAlmostEqual(max(p[0] for p in loop), 0.15, places=6)   # 드래그 범위는 그은 선의 양 끝
+        # 선이 깊이 축과 나란하면(옆에서 본 관을 앞뒤로 그음) 평면을 만들 수 없어 None — 호출 쪽이 뷰 평면으로 돌아간다
+        along = knife_rays_along_axis((0.0, -4.0, 1.0), (0.0, 1.0, 0.0), (0.0, -4.0, 1.0), (0.0, 1.0, 0.0), (0.0, -0.2, 1.0), axes)
+        self.assertIsNone(knife_plane(*along[0], *along[1]))
 
     def test_knife_ring_rejects_a_line_that_only_grazes_an_open_section(self):
         plane = MeshData(((-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (1.0, 1.0, 0.0), (-1.0, 1.0, 0.0)), ((0, 1, 2), (0, 2, 3)))

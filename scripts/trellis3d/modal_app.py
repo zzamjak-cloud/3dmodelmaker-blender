@@ -23,6 +23,7 @@ app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 CORE = Path(__file__).with_name("server_core.py")
 RASTER = Path(__file__).with_name("uv_raster.py")
+SOLID = Path(__file__).with_name("solid_remesh.py")
 
 # ---- GPU 이미지: CUDA 12.4 devel + torch 2.6.0 + TRELLIS.2 셰이프 의존성(커스텀 CUDA 확장 3종 소스 빌드) ----
 gpu_image = (
@@ -77,6 +78,7 @@ gpu_image = (
         "TOKENIZERS_PARALLELISM": "false",
     })
     .add_local_file(CORE, "/root/server_core.py")
+    .add_local_file(SOLID, "/root/solid_remesh.py")
     .add_local_file(RASTER, "/opt/stubs/uv_raster.py")
 )
 
@@ -89,8 +91,11 @@ SHAPE_MODELS = [
 TEXTURE_MODELS = SHAPE_MODELS + ["tex_slat_flow_model_1024", "tex_slat_decoder"]
 # 요청에 face_count 가 없을 때 서버가 적용하는 면수 상한 — 애드온은 이 뒤에 복셀 리메시(90분할)·QuadriFlow 로 12k 까지 내린다
 SERVER_FACE_CAP = int(os.environ.get("LP3D_SHAPE_FACE_CAP", "400000"))
-# PBR 경로 기본값 — to_glb 의 데시메이트 목표(정점 수)와 텍스처 한 변
-DEFAULT_DECIMATION = int(os.environ.get("LP3D_DECIMATION", "60000"))
+# PBR 경로 기본값 — 요청에 face_count 가 없을 때의 데시메이트 목표(삼각형 수)와 텍스처 한 변.
+# 속 채움 리메시는 한 겹이라 전부 보이는 면이다 — 애드온(core/shapegen.SHAPE_FACE_COUNT)도 같은 값을 명시해 보낸다
+DEFAULT_DECIMATION = int(os.environ.get("LP3D_DECIMATION", "200000"))
+# 속 채움 결과가 이보다 적은 면이면 리메시가 망가진 것으로 보고 공식 이중 껍질 경로로 돌아간다
+SOLID_MIN_FACES = 2000
 DEFAULT_TEXTURE_SIZE = int(os.environ.get("LP3D_TEXTURE_SIZE", "2048"))
 
 
@@ -177,63 +182,60 @@ class ShapeWorker:
                 f"부피비 {volume / box:+.4f}")
 
     def _textured_glb(self, mesh, cfg: dict):
-        """공식 o_voxel.postprocess.to_glb 로 PBR 텍스처까지 구운 GLB 바이트. 진단(variants)이면 {설정: GLB 바이트}.
+        """PBR 텍스처까지 구운 GLB 바이트. 진단(variants)이면 {설정: GLB 바이트}.
 
-        to_glb 는 정리·듀얼컨투어 리메시·데시메이트·UV 언랩·PBR 굽기를 한 번에 한다(cumesh·flex_gemm, MIT).
-        내부에서 UV 래스터화에만 nvdiffrast 를 쓰는데, 이미지에 우리 토치 구현(uv_raster)을 그 이름으로 얹어 뒀다."""
-        import cumesh
+        기본은 **속 채움 리메시**(solid_remesh.to_glb_solid) — 원본 등위면을 광선 탈출 판정의 부호 있는 거리장으로
+        듀얼 컨투어링해 속이 찬 한 겹을 만들고, 그 위에서 데시메이트·UV 언랩·PBR 굽기를 한다. 공식 경로
+        (o_voxel.postprocess.to_glb, remesh=True)는 UDF 띠를 등위면으로 써 바깥·안쪽 두 겹의 속 빈 껍질을 내보내는데,
+        얇은 부위에서 데시메이트가 두 겹을 서로 뚫어 누더기를 만들고 등위면 찢김마다 두 겹을 잇는 터널이 남았다
+        (실측 2026-10-02, 메카닉 캐릭터 정강이·관절). 속 채움이 실패하거나 면이 너무 적으면 공식 경로로 돌아간다."""
+        import sys
+        sys.path.insert(0, "/root")
         import o_voxel
+        import solid_remesh
         target = cfg["face_count"] if cfg["face_count"] > 0 else DEFAULT_DECIMATION
+        texture_size = int(cfg.get("texture_size") or DEFAULT_TEXTURE_SIZE)
         vertices, faces = mesh.vertices, mesh.faces
+        common = dict(attr_volume=mesh.attrs, coords=mesh.coords, aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+                      decimation_target=int(target), texture_size=texture_size)
         if cfg.get("variants"):   # 700만 면 통계는 몇 초 걸린다 — 진단 요청에서만 낸다
             print("원본 등위면:", self._mesh_stats(vertices.cpu().numpy(), faces.cpu().numpy()), flush=True)
-        glb = o_voxel.postprocess.to_glb(
-            vertices=vertices,
-            faces=faces,
-            attr_volume=mesh.attrs,
-            coords=mesh.coords,
-            attr_layout=mesh.layout,
-            voxel_size=mesh.voxel_size,
-            aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-            decimation_target=int(target),
-            texture_size=int(cfg.get("texture_size") or DEFAULT_TEXTURE_SIZE),
-            # 공식 데모와 같은 설정으로 되돌렸다(2026-09-19). remesh=False 는 속이 찬 단일 표면을 주지만
-            # 원본 등위면의 찢김(7.47M면에 열린 엣지 46,046)이 그대로 드러나고, 그걸 메우면 입·눈처럼
-            # 뚫려 있어야 할 곳까지 막히고 메운 면의 방향이 어긋난다(사용자 실측 보고). 듀얼 컨투어링
-            # 리메시는 그 찢김을 감싸 워터타이트하고 방향이 일관된 표면을 준다 — 대신 안쪽 면이 함께 남는다.
-            remesh=True, remesh_band=1, remesh_project=0,
-            verbose=False,   # xatlas 진행 막대가 로그를 덮어 진단 출력이 묻힌다
-        )
-        print("내보내기 결과:", self._mesh_stats(glb.vertices, glb.faces), flush=True)
+
+        def official():
+            glb = o_voxel.postprocess.to_glb(
+                vertices=vertices, faces=faces, attr_layout=mesh.layout, voxel_size=mesh.voxel_size,
+                # 공식 데모 설정 — remesh=False 는 원본 등위면의 찢김이 그대로 드러나고, 메우면 입·눈까지 막힌다
+                remesh=True, remesh_band=1, remesh_project=0,
+                verbose=False,   # xatlas 진행 막대가 로그를 덮어 진단 출력이 묻힌다
+                **common)
+            print("공식 내보내기:", self._mesh_stats(glb.vertices, glb.faces), flush=True)
+            return glb
+
+        def solid():
+            import time
+            t0 = time.time()
+            glb = solid_remesh.to_glb_solid(vertices=vertices, faces=faces, attr_layout=mesh.layout,
+                                            voxel_size=mesh.voxel_size, verbose=bool(cfg.get("variants")), **common)
+            print(f"속 채움 내보내기({time.time() - t0:.1f}s):", self._mesh_stats(glb.vertices, glb.faces), flush=True)
+            if len(glb.faces) < SOLID_MIN_FACES:
+                raise RuntimeError(f"속 채움 결과 면이 너무 적다: {len(glb.faces)}")
+            return glb
+
         if cfg.get("variants"):
-            # 진단 — 같은 디코드 결과를 리메시 전 구멍 메우기 한도만 바꿔 내보내 GLB 로 모두 돌려준다.
-            # 리메시는 원본 등위면 둘레를 띠로 감싸므로 등위면이 찢긴 곳마다 바깥·안쪽 껍질을 잇는 터널이 생기고,
-            # 그 터널로 몸속 빈 공간이 검게 보인다(실측 2026-09-29, 덩치큰 좀비: 셔츠 찢김·어깨·목). to_glb 는
-            # 둘레 3e-2 까지만 메운다 — 더 큰 찢김을 먼저 메우면 터널이 사라지는지 본다.
-            import cumesh
-            results = {"A_현재": glb.export(file_type="glb")}
-            for label, limit in (("B_메우기0.08", 0.08), ("C_메우기0.15", 0.15), ("D_메우기0.4", 0.4)):
+            # 진단 — 같은 디코드 결과를 두 경로로 내보내 GLB 로 모두 돌려준다
+            results = {}
+            for label, fn in (("A_공식_이중껍질", official), ("B_속채움", solid)):
                 try:
-                    clean = cumesh.CuMesh()
-                    clean.init(mesh.vertices, mesh.faces)
-                    clean.fill_holes(max_hole_perimeter=limit)
-                    clean.repair_non_manifold_edges()
-                    clean.fill_holes(max_hole_perimeter=limit)
-                    src = clean.read()
-                    print(f"입력 구멍 메우기 {limit}:",
-                          self._mesh_stats(src[0].cpu().numpy(), src[1].cpu().numpy()), flush=True)
-                    other = o_voxel.postprocess.to_glb(
-                        vertices=src[0], faces=src[1], attr_volume=mesh.attrs,
-                        coords=mesh.coords, attr_layout=mesh.layout, voxel_size=mesh.voxel_size,
-                        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-                        decimation_target=int(target),
-                        texture_size=int(cfg.get("texture_size") or DEFAULT_TEXTURE_SIZE),
-                        remesh=True, remesh_band=1, remesh_project=0, verbose=False)
-                    print(f"변형 {label}:", self._mesh_stats(other.vertices, other.faces), flush=True)
-                    results[label] = other.export(file_type="glb")
+                    results[label] = fn().export(file_type="glb")
                 except Exception as e:
                     print(f"변형 {label} 실패: {type(e).__name__} {e}", flush=True)
             return results
+        try:
+            glb = solid()
+        except Exception as e:
+            print(f"속 채움 리메시 실패 — 공식 경로로 돌아간다: {type(e).__name__} {e}", flush=True)
+            self.torch.cuda.empty_cache()
+            glb = official()
         # to_glb 는 trimesh.Trimesh 를 돌려주고 glTF 축 변환과 UV V 뒤집기까지 이미 끝내 둔다
         return glb.export(file_type="glb")
 
@@ -302,13 +304,13 @@ class ShapeWorker:
 
 
 @app.local_entrypoint()
-def diagnose(image: str, out: str, seed: int = 7, face_count: int = 24000):
-    """내보내기 설정 비교 진단 — 배포된 앱을 건드리지 않는 임시 앱으로 돈다.
+def diagnose(image: str, out: str, seed: int = 7, face_count: int = DEFAULT_DECIMATION):
+    """내보내기 경로 비교 진단 — 배포된 앱을 건드리지 않는 임시 앱으로 돈다.
 
       modal run scripts/trellis3d/modal_app.py::diagnose --image 정면원화.png --out 결과폴더
 
-    애드온과 같은 요청(정면 1장·1024 캐스케이드·12스텝·guidance 7.5·PBR)으로 한 번 디코드하고, 리메시 전
-    구멍 메우기 한도별 GLB 를 out 폴더에 쓴다."""
+    애드온과 같은 요청(정면 1장·1024 캐스케이드·12스텝·guidance 7.5·PBR)으로 한 번 디코드하고, 공식 이중 껍질
+    경로(A)와 속 채움 경로(B)의 GLB 를 out 폴더에 쓴다."""
     import base64
     with open(image, "rb") as f:
         front = base64.b64encode(f.read()).decode()

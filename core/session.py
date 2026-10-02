@@ -506,12 +506,11 @@ class GenerationSession:
                              phase='GEN')
         self._set_status("이미지→3D 셰이프 생성중 (셰이프 서버)...",
                          f"셰이프 생성 시작: 정면 1장 → {shapegen.server_url()}", phase='GEN')
-        # 서버가 리메시·언랩·텍스처까지 끝내 준다 — 목표 면수를 그대로 넘긴다
+        # 서버가 속 채움 리메시·언랩·텍스처까지 끝내 준다 — 면수는 환경설정 없이 항상 최대 품질(SHAPE_FACE_COUNT)
         self._submit_ai(lambda: shapegen.generate(
             views, self.shape_path, max(self.prefs.timeout, 1500), self._on_shape,
             job_key=self.uid,
-            # 절반 가까이가 보이지 않는 안쪽 겹이므로 목표의 두 배를 요청한다 (CRUST_FACE_FACTOR 주석 참고)
-            face_count=int(getattr(self.prefs, "shapegen_faces", 12000)) * shapegen.CRUST_FACE_FACTOR,
+            face_count=shapegen.SHAPE_FACE_COUNT,
             multiview=False, texture=True,
             texture_size=int(getattr(self.prefs, "shapegen_texture_size", 2048))))
 

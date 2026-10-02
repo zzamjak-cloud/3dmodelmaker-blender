@@ -34,6 +34,8 @@ def main():
     ap.add_argument("--steps", type=int, default=12)
     ap.add_argument("--guidance", type=float, default=7.5)
     ap.add_argument("--face-count", type=int, default=0)
+    ap.add_argument("--texture", action="store_true", help="PBR 텍스처까지 굽는 애드온 경로(속 채움 리메시)로 요청")
+    ap.add_argument("--texture-size", type=int, default=2048)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--timeout", type=int, default=1500)
     a = ap.parse_args()
@@ -49,7 +51,8 @@ def main():
     print(f"/status {status}  ({time.monotonic()-t0:.1f}s)", flush=True)
 
     body = {"octree_resolution": a.octree, "num_inference_steps": a.steps, "guidance_scale": a.guidance,
-            "face_count": a.face_count, "seed": a.seed, "texture": False, "type": "glb"}
+            "face_count": a.face_count, "seed": a.seed, "texture": bool(a.texture),
+            "texture_size": a.texture_size, "type": "glb"}
     for key, path in zip(VIEW_KEYS, a.views):
         body[key] = base64.b64encode(open(path, "rb").read()).decode("ascii")
     print(f"뷰 {len(a.views)}장 전송, octree={a.octree} steps={a.steps}", flush=True)

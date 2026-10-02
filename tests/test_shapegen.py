@@ -46,6 +46,13 @@ class TestBuildBody(unittest.TestCase):
         self.views = {n: _png(os.path.join(self.dir, n + ".png"))
                       for n in ("front", "back", "left", "top", "quarter")}
 
+    def test_fixed_face_count_is_high_quality_and_sent_as_is(self):
+        # 환경설정 없이 항상 최대 품질 — 서버는 속 채운 한 겹을 보내므로 겹 수 보정(예전 CRUST_FACE_FACTOR)이 없다
+        self.assertGreaterEqual(shapegen.SHAPE_FACE_COUNT, 100000)
+        self.assertFalse(hasattr(shapegen, "CRUST_FACE_FACTOR"))
+        body = shapegen.build_body(self.views, face_count=shapegen.SHAPE_FACE_COUNT)
+        self.assertEqual(body["face_count"], shapegen.SHAPE_FACE_COUNT)
+
     def test_body_sends_only_front_by_default(self):
         # TRELLIS.2 는 이미지 1장 전용 — 여러 뷰를 넣으면 서로 뭉개진다(실측 2026-09-19)
         body = shapegen.build_body(self.views, octree=192, steps=20, face_count=30000, seed=3)

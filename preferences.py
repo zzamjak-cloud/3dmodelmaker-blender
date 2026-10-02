@@ -132,13 +132,6 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default="", subtype='PASSWORD',
         update=_persist_cb,
     )
-    shapegen_faces: IntProperty(
-        name="셰이프 목표 면수",
-        description="보이는 바깥 겹의 목표 삼각형 수. 서버 내보내기는 바깥·안쪽 두 겹을 만들므로 서버에는 "
-                    "이 값의 두 배를 요청하고, 가져온 메시(두 겹 모두)는 이 값의 약 두 배가 된다",
-        default=12000, min=2000, max=100000,
-        update=_persist_cb,
-    )
     shapegen_texture_size: IntProperty(
         name="PBR 텍스처 크기",
         description="서버가 굽는 PBR 텍스처(베이스컬러·메탈릭·러프니스) 한 변(px)",
@@ -251,9 +244,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         if self.use_shapegen:
             box.prop(self, "shapegen_url")
             box.prop(self, "shapegen_token")
-            row = box.row(align=True)
-            row.prop(self, "shapegen_faces")
-            row.prop(self, "shapegen_texture_size")
+            box.prop(self, "shapegen_texture_size")
             box.prop(self, "character_height")
         else:
             box.label(text="서버 없이 코드 모델링으로 만듭니다 (품질 낮음)", icon='INFO')
@@ -306,7 +297,6 @@ class _Defaults:
     use_shapegen = True
     shapegen_url = "http://127.0.0.1:8081"
     shapegen_token = ""
-    shapegen_faces = 12000
     shapegen_texture_size = 2048
     character_height = 1.8
     scene_tri_budget = 0

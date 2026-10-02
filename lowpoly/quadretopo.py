@@ -105,6 +105,8 @@ SLIVER_ASPECT = 8.0            # 이 종횡비를 넘는 면 주변만 골라 �
                                # 짧은 엣지를 늘리지 못한다(실측 2026-09-21: 최대 종횡비 22.2 → 7.6)
 SLIVER_ROUNDS = 20             # 슬리버 완화 반복 상한. 남는 몇 개는 형상이 실제로 접힌 곳이다
 SYMMETRY_CENTER_RATIO = 0.05   # 메시가 X=0 에서 이 비율(폭 기준)보다 치우쳐 있으면 대칭을 끈다
+CENTER_PAIR_RATIO = 0.5        # 좌우 분할 용접: 두 반쪽의 중앙선 루프 중심이 루프 반경의 이 비율 안이어야 같은 루프다
+MIRROR_MISMATCH_KEY = 'lp3d_mirror_mismatch'   # 원본에 남기는 비대칭도 — 패널 안내용
 MIRROR_MISMATCH_MAX = 0.03     # 원본을 X 로 뒤집은 정점 중 베이크 광선 거리 밖으로 벗어나는 비율이 이보다 크면 대칭을 끈다.
                                # 대칭은 양의 반쪽만 원본에 맞춰 미러하므로, 자세가 좌우로 다른 모델은 음의 쪽이 원본에서
                                # 떨어져 베이크 광선이 빗나가 검게 구워진다. 실측(2026-09-29, 원본 비율 → 대칭 시 음의 쪽
@@ -174,22 +176,30 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
 
         # 치우친 모델에서 반쪽을 잘라 미러하면 형상이 통째로 어긋난다 — 그럴 때는 대칭을 포기한다
         symmetry_note = ""
-        if symmetry and not _centered_on_axis(work, 'X'):
+        mismatch = None
+        centered = _centered_on_axis(work, 'X')
+        # 좌우 분할: 대칭을 쓸 수 없거나 껐어도 중앙선(X=0) 와이어는 남긴다 — 양쪽 반쪽을 따로 깔아 중앙에서 용접한다
+        split = False
+        if symmetry and not centered:
             say("모델이 X=0 에 정렬돼 있지 않아 대칭을 끕니다")
             symmetry = False
         elif symmetry:
             mismatch = mirror_mismatch(stash)
+            stash[MIRROR_MISMATCH_KEY] = mismatch   # 패널이 토글 옆에 비대칭 안내를 띄운다
             if mismatch > MIRROR_MISMATCH_MAX:
-                # 음의 쪽을 미러로 만들면 원본에서 떨어져 텍스처가 검게 구워진다 — 좌우를 따로 깐다
+                # 음의 쪽을 미러로 만들면 원본에서 떨어져 텍스처가 검게 구워진다 — 좌우를 따로 깔되 중앙선은 지킨다
                 symmetry = False
-                symmetry_note = (f"원본이 좌우 비대칭이라(뒤집은 정점 {mismatch:.0%} 가 원본에서 벗어남) X 대칭을 끄고 "
-                                 "좌우를 따로 깔았습니다 — 대칭으로 깔면 음의 쪽 텍스처가 검게 구워집니다")
-                say("원본이 좌우 비대칭이라 대칭을 끕니다")
+                split = True
+                symmetry_note = (f"원본이 좌우 비대칭이라(뒤집은 정점 {mismatch:.0%} 가 원본에서 벗어남) X 대칭 대신 "
+                                 "좌우를 따로 깔고 중앙선(X=0) 와이어만 맞췄습니다 — 대칭으로 깔면 음의 쪽 텍스처가 검게 구워집니다")
+                say("원본이 좌우 비대칭이라 대칭 대신 좌우 분할로 깝니다")
+        elif centered:
+            split = True
 
         notes = [symmetry_note] if symmetry_note else []
         # 대칭 반쪽은 +X 로 미러·중복 제거한 링을, 닫힌 전체 폴백은 사용자가 둔 그대로의 링을 자른다
         requested, full_requested = _requested_cuts(work, ring_guides, target_faces, symmetry, notes,
-                                                    area=surface_area)
+                                                    area=surface_area, split=split)
         floor, floor_reason = ring_cut.guide_quad_floor(
             full_requested, surface_area or sum(polygon.area for polygon in work.data.polygons))
         if target_faces < floor:
@@ -200,7 +210,7 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             say(f"링 가이드 기준으로 목표 면수 {target_faces:,} → {raised:,}")
             target_faces = raised
             requested, full_requested = _recut(work, ring_guides, target_faces, symmetry, surface_area,
-                                               requested, full_requested)
+                                               requested, full_requested, split)
         base_target = target_faces
         target_raises = 0
         raise_base = None   # (올리기 전 목표, 그때 실패 수, 그때 실패한 접합)
@@ -210,7 +220,7 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
                          "— 더 벌리거나 목표 면수를 올려 주세요")
         outcome = None
         seams = ()
-        ladder = QF_HALF_LADDER if symmetry else QF_INPUT_LADDER
+        ladder = QF_HALF_LADDER if symmetry or split else QF_INPUT_LADDER
         attempt, retries, fresh = 0, 0, True
         while attempt < len(ladder):
             density, triangles = ladder[attempt]
@@ -231,20 +241,24 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             say(f"쿼드 리토폴로지 시도 {attempt}/{len(ladder)}")
             # 같은 형상도 입력이 거칠수록 QuadriFlow 성공률이 크게 오른다(실측 2026-09-20:
             # 3.6만면 전패, 1.3만면 5시드 중 1승, 5천면 전승) — 실패하면 한 단계 낮춰 다시 굽는다
-            outcome, cuts = _quadriflow(work, target_faces, symmetry, say,
-                                        allow_full=attempt == len(ladder),
-                                        requested_cuts=requested, full_cuts=full_requested, notes=notes)
+            outcome, cuts, stitched = _quadriflow(work, target_faces, symmetry, say,
+                                                  allow_full=attempt == len(ladder),
+                                                  requested_cuts=requested, full_cuts=full_requested, notes=notes,
+                                                  split=split)
             if outcome is None or not cuts:
                 seams = ()
                 if outcome is not None:
                     break
                 continue
-            say(f"절단 링 {len(cuts)}개 접합")
-            plane = ('X',) if outcome == "HALF" else ()
-            seams = ring_cut.stitch_bands(work.data, cuts, plane, _stitch_plane_tolerance(work) if plane else 0.0)
-            # 반쪽 출력은 대칭면을 가로지르는 링(목)이 열린 호로 남는 것이 정상이다 — 미러가 닫는다
+            if stitched is None:
+                say(f"절단 링 {len(cuts)}개 접합")
+                plane = ('X',) if outcome == "HALF" else ()
+                seams = ring_cut.stitch_bands(work.data, cuts, plane, _stitch_plane_tolerance(work) if plane else 0.0)
+            else:
+                seams = stitched   # 좌우 분할은 반쪽마다 용접 전에 접합을 끝냈다
+            # 반쪽 출력은 대칭면을 가로지르는 링(목)이 열린 호로 남는 것이 정상이다 — 미러(또는 중앙 용접)가 닫는다
             failed = [seam for seam in seams
-                      if not seam.bridged or (not seam.closed and outcome != "HALF")]
+                      if not seam.bridged or (not seam.closed and outcome not in ("HALF", "SPLIT"))]
             if not failed:
                 break
             if raise_base is not None and len(failed) >= raise_base[1]:
@@ -254,7 +268,7 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
                              f"{raise_base[0]:,} 로 되돌렸습니다")
                 target_faces, failed = raise_base[0], raise_base[2]
                 requested, full_requested = _recut(work, ring_guides, target_faces, symmetry, surface_area,
-                                                   requested, full_requested)
+                                                   requested, full_requested, split)
                 target_raises, raise_base = MAX_TARGET_RAISES, None
             elif target_raises < MAX_TARGET_RAISES and target_faces < MAX_TARGET_FACES:
                 # 가이드를 빼기 전에 면을 늘려 다시 깐다 — 링이 촘촘하면 접합 양쪽 링이 서로 간섭해 열린다
@@ -266,7 +280,7 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
                 say(f"링 접합 실패 — 목표 면수 {target_faces:,} → {raised:,} 로 다시")
                 target_faces = raised
                 requested, full_requested = _recut(work, ring_guides, target_faces, symmetry, surface_area,
-                                                   requested, full_requested)
+                                                   requested, full_requested, split)
                 target_raises += 1
                 attempt -= 1
                 outcome, seams = None, ()
@@ -298,7 +312,8 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             remove_fragments(work)
             _decimate(work, triangles)
             if make_manifold(work):
-                outcome, _cuts = _quadriflow(work, target_faces, symmetry, say, allow_full=True, notes=notes)
+                outcome, _cuts, _stitched = _quadriflow(work, target_faces, symmetry, say, allow_full=True,
+                                                        notes=notes, split=split)
                 if outcome is not None:
                     notes.append("링 가이드를 넣은 시도가 모든 밀도에서 실패해 링 없이 깔았습니다 "
                                  "— 가이드를 단면이 일정한 위치로 옮겨 주세요")
@@ -309,10 +324,14 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
         plane_axes = ()
         if outcome is not None:
             method = "QUADRIFLOW"
-            # 반쪽을 깐 결과는 대칭면이 열려 있다 — 투영까지 끝낸 뒤 미러로 닫는다
+            # 반쪽을 깐 결과는 대칭면이 열려 있다 — 투영까지 끝낸 뒤 미러로 닫는다.
+            # 좌우 분할은 닫혀 있지만 용접한 중앙선 정점을 투영이 평면에서 떼지 않게 같은 고정을 쓴다
             plane_axes = ('X',) if outcome == "HALF" else ()
+            pin_axes = ('X',) if outcome in ("HALF", "SPLIT") else ()
             bpy.data.meshes.remove(snapshot)
             say("출력 정리")
+            # 좌우 분할은 중앙선이 닫혀 있고 용접이 남긴 세 변 구멍이 평면 위에 있다 — 평면 루프를 열어 두는 반쪽 수리가
+            # 아니라 전부 메운다(실측 메카닉: 평면 위 3엣지 구멍 3개 · 6엣지 1개가 남았다)
             _repair_output(work, plane_axes)
         else:
             say("QuadriFlow 실패 — 데시메이트로 전환")
@@ -323,11 +342,12 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             _voxel_remesh(work, target_faces)
             _decimate(work, target_faces)
             method = "DECIMATE"
+            pin_axes = ()
 
         with _visible(stash):
             say("표면 맞춤")
             with _outer_surface(stash, filled.get("outer")) as surface:
-                _shrinkwrap(work, surface, plane_axes)
+                _shrinkwrap(work, surface, pin_axes, clamp_negative=bool(plane_axes))
                 if plane_axes:
                     say("대칭면 미러 용접")
                     # 구멍 메우기가 대칭면 옆에 남긴 웹의 내부 정점이 평면 위에 있으면 미러가 거울상과 용접해
@@ -354,6 +374,9 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             "tris": len(work.data.loop_triangles),
             "method": method,
             "symmetry_error": round(symmetry_error(work), 6) if symmetry else None,
+            "symmetry": symmetry,          # 실제로 미러 대칭으로 깔았는지
+            "split": split and outcome == "SPLIT",   # 좌우를 따로 깔고 중앙선만 맞췄는지
+            "mirror_mismatch": mismatch,
             "images": sorted(image.name for image in images.values()),
             "source_name": source_obj.name,
             "seconds": round(time.perf_counter() - started, 1),
@@ -757,7 +780,7 @@ def _voxel_remesh(obj, target_faces: int, wanted: float = 0.0) -> None:
 
 
 def _quadriflow(obj, target_faces: int, symmetry: bool, say=lambda _text: None, allow_full: bool = True,
-                requested_cuts: tuple = (), full_cuts=None, notes=None):
+                requested_cuts: tuple = (), full_cuts=None, notes=None, split: bool = False):
     """자식 Blender 프로세스에서 QuadriFlow 를 돌려 결과 메시로 바꾼다.
 
     대칭이면 **양의 반쪽(X>=0)만 잘라** 경계를 보존한 채 깔고 "HALF" 를 돌려준다 — 호출자가 미러로 용접한다.
@@ -775,31 +798,39 @@ def _quadriflow(obj, target_faces: int, symmetry: bool, say=lambda _text: None, 
 
     requested_cuts 가 있으면 QuadriFlow 에 보내기 직전(매니폴드 수리 뒤) 그 위치에 띠를 지우고 경계 보존으로
     깐다. full_cuts 는 닫힌 전체 경로가 쓸 미러 전 절단 링이다(없으면 requested_cuts).
-    (결과 종류, 실제로 자른 절단 링) 을 돌려준다 — 쓸 수 없는 가이드의 사유는 notes 에 쌓는다."""
+    split 이면 **양쪽 반쪽을 각각** 깔아 중앙선(X=0)에서 용접하고 "SPLIT" 을 돌려준다 — 비대칭 모델에도 중앙선 와이어가 남는다.
+    (결과 종류, 실제로 자른 절단 링, 접합 보고) 를 돌려준다 — 접합 보고는 좌우 분할만 채우고(반쪽마다 용접 전에 접합)
+    나머지는 None 이라 호출자가 접합한다. 쓸 수 없는 가이드의 사유는 notes 에 쌓는다."""
     scale = _local_size(obj)
     notes = notes if notes is not None else []
     with tempfile.TemporaryDirectory(prefix="lp3d_qf_") as work_dir:
-        if symmetry:
+        if symmetry or split:
+            label = "좌우 분할" if split else "대칭 반쪽"
             # 마지막 단에서는 링을 넣은 반쪽이 실패하면 링 없이 반쪽을 한 번 더 본다 — 닫힌 전체로 떨어지면
-            # 대칭이 깨지므로 사용자가 요청한 대칭을 링보다 우선한다
+            # 대칭(중앙선)이 깨지므로 사용자가 요청한 대칭을 링보다 우선한다
             variants = (requested_cuts, ()) if requested_cuts and allow_full else (requested_cuts,)
             for variant in variants:
                 if variant is not requested_cuts:
-                    say("링을 넣은 대칭 반쪽 실패 — 링 없이 대칭 반쪽 재시도")
-                outcome = _half_attempt(obj, target_faces, scale, work_dir, variant, say, notes)
+                    say(f"링을 넣은 {label} 실패 — 링 없이 {label} 재시도")
+                if split:
+                    outcome = _split_attempt(obj, target_faces, scale, work_dir, variant, say, notes)
+                else:
+                    outcome = _half_attempt(obj, target_faces, scale, work_dir, variant, say, notes)
                 if outcome is False:
                     break   # 반쪽 자체를 만들 수 없다
                 if outcome is not None:
                     if variant is not requested_cuts:
-                        notes.append("링을 넣은 대칭 반쪽이 모든 시드에서 실패해 링 없이 대칭으로 깔았습니다")
-                    return "HALF", outcome
+                        notes.append(f"링을 넣은 {label}이 모든 시드에서 실패해 링 없이 {label}로 깔았습니다")
+                    if split:
+                        return "SPLIT", outcome[0], outcome[1]
+                    return "HALF", outcome, None
             else:
                 if not allow_full:
-                    say("대칭 반쪽 실패 — 다음 밀도로")
-                    return None, ()  # 전체 메시 시도는 마지막 단에서만 — 정지하면 시드마다 수십 초를 버린다
-                say("대칭 반쪽 실패 — 닫힌 전체로 다시 시도")
-        if symmetry and not allow_full:
-            return None, ()
+                    say(f"{label} 실패 — 다음 밀도로")
+                    return None, (), None  # 전체 메시 시도는 마지막 단에서만 — 정지하면 시드마다 수십 초를 버린다
+                say(f"{label} 실패 — 닫힌 전체로 다시 시도")
+        if (symmetry or split) and not allow_full:
+            return None, (), None
         # 띠는 복사본에 자른다 — 실패해도 작업본은 다음 밀도가 스냅샷에서 다시 굽는다
         full = obj.data.copy()
         holder = bpy.data.objects.new(full.name, full)
@@ -818,17 +849,30 @@ def _quadriflow(obj, target_faces: int, symmetry: bool, say=lambda _text: None, 
                                 attempts=2 if symmetry else QF_ATTEMPTS,
                                 score=(lambda m: _stitch_score(m, cuts, (), 0.0)) if cuts else None, perfect=len(cuts))
         if mesh is None:
-            return None, ()
+            return None, (), None
         _swap_mesh(obj, mesh)
-        return "FULL", cuts
+        return "FULL", cuts, None
 
 
 def _half_attempt(obj, target_faces: int, scale: float, work_dir: str, requested_cuts: tuple, say, notes: list):
     """양의 반쪽(X>=0)을 잘라 링 띠를 내고 경계 보존 QuadriFlow 로 깐다. 성공하면 작업본 메시를 바꾸고 실제로 자른
     절단 링(없으면 빈 튜플)을, 시드가 모두 실패하면 None 을, 반쪽을 만들 수 없으면 False 를 돌려준다."""
-    half = _clip_positive(obj.data, ('X',), scale)
+    result = _half_quadriflow(obj.data, target_faces, scale, work_dir, requested_cuts, say, notes)
+    if result is False:
+        return False
+    mesh, cuts = result
+    if mesh is None:
+        return None
+    _swap_mesh(obj, mesh)
+    return cuts
+
+
+def _half_quadriflow(source, target_faces: int, scale: float, work_dir: str, requested_cuts: tuple, say, notes: list):
+    """source 메시의 양의 반쪽(X>=0)을 잘라 링 띠를 내고 경계 보존 QuadriFlow 로 깐 메시. (메시 또는 None, 실제로 자른
+    절단 링) 을, 반쪽을 만들 수 없으면 False 를 돌려준다. 메시는 호출자가 쓰거나 지운다."""
+    half = _clip_positive(source, ('X',), scale)
     if half is None:
-        say("양의 반쪽에 면이 없어 대칭을 건너뜁니다")
+        say("양의 반쪽에 면이 없어 반쪽 리토폴로지를 건너뜁니다")
         return False
     mesh, cuts = None, ()
     # 절단은 원본이 멀쩡해도 교차점에 비매니폴드 엣지·정점을 남긴다 — 그대로 보내면
@@ -851,10 +895,151 @@ def _half_attempt(obj, target_faces: int, scale: float, work_dir: str, requested
     finally:
         bpy.data.objects.remove(holder)
         bpy.data.meshes.remove(half)
-    if mesh is None:
+    return mesh, cuts
+
+
+def _split_attempt(obj, target_faces: int, scale: float, work_dir: str, requested_cuts: tuple, say, notes: list):
+    """양의 반쪽과 X 로 뒤집은 음의 반쪽을 각각 경계 보존 QuadriFlow 로 깔고 중앙선(X=0)에서 용접한다.
+
+    비대칭 모델은 반쪽+미러를 쓸 수 없어 전체를 한 번에 깔았는데, 그러면 중앙선 앵커가 없어 얼굴·몸통 가운데
+    와이어가 들쭉날쭉했다. 양쪽을 대칭 경로와 똑같이 X=0 경계를 보존해 깔면 두 반쪽 모두 중앙선을 따라 루프가
+    정렬되고, 경계 정점 수가 달라도(QuadriFlow 가 따로 정한다) DP 짝으로 용접하면 차이만큼만 삼각형이 남는다.
+    성공하면 작업본 메시를 바꾸고 (절단 링, 접합 보고) 를, 시드가 모두 실패하거나 중앙선 용접이 안 되면 None 을,
+    반쪽을 만들 수 없으면 False 를 돌려준다."""
+    def straddles(cut) -> bool:
+        return abs(cut.center[0]) < cut.radius * ring_cut.STRADDLE_RATIO
+
+    crossing = tuple(cut for cut in requested_cuts if straddles(cut))
+    positive = tuple(cut for cut in requested_cuts if cut.center[0] >= 0.0 and not straddles(cut)) + crossing
+    negative = ring_cut.reflect_cuts(
+        tuple(cut for cut in requested_cuts if cut.center[0] < 0.0 and not straddles(cut)), ('X',)) + crossing
+    halves = []
+    try:
+        for sign, side_cuts, label in ((1, positive, "양의"), (-1, negative, "음의")):
+            say(f"{label} 반쪽 QuadriFlow")
+            source = obj.data.copy()
+            try:
+                if sign < 0:
+                    _flip_x(source)
+                result = _half_quadriflow(source, target_faces, scale, work_dir, side_cuts, say, notes)
+            finally:
+                bpy.data.meshes.remove(source)
+            if result is False:
+                return False
+            mesh, cuts = result
+            if mesh is None:
+                return None
+            seams = ()
+            if cuts:
+                say(f"{label} 반쪽 절단 링 {len(cuts)}개 접합")
+                seams = ring_cut.stitch_bands(mesh, cuts, ('X',), _plane_tolerance_of(mesh, scale))
+            # 반쪽마다 작은 구멍을 메우고 대칭면 정점을 평면에 맞춘다 — 중앙선 루프는 열어 둔다
+            holder = bpy.data.objects.new(mesh.name, mesh)
+            try:
+                _repair_output(holder, ('X',))
+            finally:
+                bpy.data.objects.remove(holder)
+            if sign < 0:
+                _flip_x(mesh)
+                cuts = ring_cut.reflect_cuts(cuts, ('X',))
+            halves.append((mesh, cuts, seams))
+        say("중앙선 용접")
+        joined = _weld_center(halves[0][0], halves[1][0], scale)
+        if joined is None:
+            say("중앙선 용접 실패")
+            return None
+        _swap_mesh(obj, joined)
+        return halves[0][1] + halves[1][1], halves[0][2] + halves[1][2]
+    finally:
+        for mesh, _cuts, _seams in halves:
+            bpy.data.meshes.remove(mesh)
+
+
+def _flip_x(mesh) -> None:
+    """메시를 X=0 평면에 반사한다(법선도 뒤집어 바깥을 유지)."""
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bmesh.ops.scale(bm, vec=(-1.0, 1.0, 1.0), verts=bm.verts[:])
+    bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+
+
+def _weld_center(mesh_a, mesh_b, scale: float):
+    """두 반쪽 메시를 합치고 X=0 경계 루프 쌍을 정점 용접한 새 메시. 가장 큰 중앙선 루프의 짝을 못 찾으면 None.
+
+    두 반쪽은 같은 단면 곡선을 각자 다시 찍어 정점 수가 다르다(실측 링 접합과 같은 20 대 16 꼴). 짝은 브리지 DP 와
+    같은 경로(ring_cut.pair_steps)로 잡아 b 정점을 a 정점에 붙인다 — 남는 정점은 세 변 구멍·퇴화 쿼드가 되어
+    뒤의 출력 수리가 삼각형으로 닫는다."""
+    bm = bmesh.new()
+    bm.from_mesh(mesh_a)
+    count_a = len(bm.verts)
+    bm.from_mesh(mesh_b)
+    bm.verts.ensure_lookup_table()
+    bm.verts.index_update()
+    loops_a, loops_b = [], []
+    for loop in _boundary_loops(bm):
+        if not _loop_on_plane(loop, ('X',), scale):
+            continue
+        ordered = _ordered_loop_vertices(loop)
+        if ordered is None:
+            continue
+        for vertex in ordered:
+            vertex.co.x = 0.0
+        (loops_a if ordered[0].index < count_a else loops_b).append(ordered)
+    if not loops_a or not loops_b:
+        bm.free()
         return None
-    _swap_mesh(obj, mesh)
-    return cuts
+    loops_a.sort(key=len, reverse=True)
+    targetmap = {}
+    unpaired_b = list(loops_b)
+    for index, a_verts in enumerate(loops_a):
+        a_points = [tuple(v.co) for v in a_verts]
+        centroid = Vector([sum(p[i] for p in a_points) / len(a_points) for i in range(3)])
+        extent = max((Vector(p) - centroid).length for p in a_points)
+        length = ring_cut.perimeter_of(a_points)
+        best = None
+        for b_verts in unpaired_b:
+            b_points = [tuple(v.co) for v in b_verts]
+            b_centroid = Vector([sum(p[i] for p in b_points) / len(b_points) for i in range(3)])
+            b_length = ring_cut.perimeter_of(b_points)
+            if min(length, b_length) < max(length, b_length) * ring_cut.RING_SIZE_MIN_RATIO:
+                continue
+            distance = (b_centroid - centroid).length
+            if distance > extent * CENTER_PAIR_RATIO:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, b_verts, b_points)
+        if best is None:
+            if index == 0:
+                bm.free()
+                return None   # 몸통 중앙선조차 짝이 없다 — 반쪽 출력이 어긋났다
+            continue
+        _distance_, b_verts, b_points = best
+        unpaired_b.remove(b_verts)
+        for j, i in ring_cut.pair_steps(a_points, b_points, True).items():
+            targetmap[b_verts[j]] = a_verts[i]
+    if not targetmap:
+        bm.free()
+        return None
+    # 붙는 자리는 두 찍기의 가운데 — 두 반쪽 모두 반쯤 틀렸으므로 평균이 표면에 가장 가깝다(뒤의 슈링크랩이 마저 당긴다)
+    groups: dict = {}
+    for b_vertex, a_vertex in targetmap.items():
+        groups.setdefault(a_vertex, []).append(b_vertex)
+    for a_vertex, b_vertices in groups.items():
+        total = a_vertex.co.copy()
+        for b_vertex in b_vertices:
+            total += b_vertex.co
+        a_vertex.co = total / (len(b_vertices) + 1)
+        a_vertex.co.x = 0.0
+    bmesh.ops.weld_verts(bm, targetmap=targetmap)
+    _weld_degenerate_bm(bm, scale)
+    joined = bpy.data.meshes.new(mesh_a.name + "_split")
+    bm.to_mesh(joined)
+    bm.free()
+    joined.update()
+    return joined
 
 
 def _stitch_plane_tolerance(obj) -> float:
@@ -930,20 +1115,22 @@ def _fit_cuts(holder, cuts: tuple, notes: list) -> tuple:
     return tuple(fitted)
 
 
-def _recut(work, ring_guides, target_faces: int, symmetry: bool, area, requested: tuple, full_requested: tuple) -> tuple:
+def _recut(work, ring_guides, target_faces: int, symmetry: bool, area, requested: tuple, full_requested: tuple,
+           split: bool = False) -> tuple:
     """목표 면수를 바꾼 뒤 띠 폭을 다시 잡은 절단 링. 이미 뺀 가이드는 빼 둔 채로 둔다 — 띠 폭이 줄면 같은 자리 링
     둘이 더는 합쳐지지 않으므로 앞에서 남은 이름만 이어 쓴다."""
     kept_half = {cut.name for cut in requested}
     kept_full = {cut.name for cut in full_requested}
-    half, full = _requested_cuts(work, ring_guides, target_faces, symmetry, None, area=area)
+    half, full = _requested_cuts(work, ring_guides, target_faces, symmetry, None, area=area, split=split)
     return (tuple(cut for cut in half if cut.name in kept_half),
             tuple(cut for cut in full if cut.name in kept_full))
 
 
-def _requested_cuts(work, ring_guides, target_faces: int, symmetry: bool, notes=None, area=None) -> tuple:
+def _requested_cuts(work, ring_guides, target_faces: int, symmetry: bool, notes=None, area=None,
+                    split: bool = False) -> tuple:
     """월드 좌표 링 가이드를 작업본 로컬 절단 링으로 바꾼다. (반쪽용, 전체용) 을 돌려준다 — 대칭이면 반쪽용은
-    음의 쪽 가이드를 양의 쪽으로 미러하고 중복을 합친다. 띠 반폭은 출력 엣지 길이(표면적 / 목표 면수)의 절반이다.
-    area 를 주면 작업본 면적 대신 그 값을 표면적으로 쓴다."""
+    음의 쪽 가이드를 양의 쪽으로 미러하고 중복을 합친다. 좌우 분할이면 미러 없이 대칭면에 닿는 링만 뺀다.
+    띠 반폭은 출력 엣지 길이(표면적 / 목표 면수)의 절반이다. area 를 주면 작업본 면적 대신 그 값을 표면적으로 쓴다."""
     if not ring_guides:
         return (), ()
     to_local = work.matrix_world.inverted()
@@ -953,16 +1140,16 @@ def _requested_cuts(work, ring_guides, target_faces: int, symmetry: bool, notes=
     edge = math.sqrt(max(area, 1e-12) / max(int(target_faces), 1))
     # 띠 폭 = 출력 엣지 하나. 엣지 두 개로 넓히면 오거(014)에서 접합이 5개 중 1개로 줄었다(실측 2026-09-23)
     cuts = ring_cut.ring_cuts(guides, edge)
-    if not symmetry:
+    if not symmetry and not split:
         return cuts, cuts
     half = []
-    for cut in ring_cut.mirror_cuts(cuts, ('X',)):
+    for cut in (ring_cut.mirror_cuts(cuts, ('X',)) if symmetry else cuts):
         # 대칭면을 가로지르지도, 떨어져 있지도 않은 링(가랑이에 닿은 허벅지)은 반쪽 출력에서 띠 경계가 대칭면 경계와
         # 불규칙하게 뭉쳐 모든 시드가 큰 구멍으로 버려졌다(실측 2026-09-23, 갱스터) — 반쪽에서는 자르지 않는다
         straddles = abs(cut.center[0]) < cut.radius * ring_cut.STRADDLE_RATIO
         if not straddles and min(abs(p[0]) for p in cut.points) < cut.half_width * PLANE_MARGIN_BANDS:
             if notes is not None:
-                notes.append(f"링 가이드 '{cut.name}' 이 대칭면(X=0)에 닿아 대칭 리토폴로지에서는 쓰지 않았습니다 "
+                notes.append(f"링 가이드 '{cut.name}' 이 대칭면(X=0)에 닿아 반쪽 리토폴로지에서는 쓰지 않았습니다 "
                              "— 축 오프셋으로 대칭면에서 조금 떨어뜨려 주세요")
             continue
         half.append(cut)
@@ -1555,7 +1742,7 @@ def _decimate(obj, target_faces: int) -> None:
         bpy.ops.object.modifier_apply(modifier=mod.name)
 
 
-def _shrinkwrap(obj, target, plane_axes: tuple = ()) -> None:
+def _shrinkwrap(obj, target, plane_axes: tuple = (), clamp_negative: bool = True) -> None:
     """리토폴로지 결과를 원본 표면에 붙여 복셀·QuadriFlow 가 뭉갠 디테일을 되찾는다.
 
     최근접점 방식(NEAREST_SURFACEPOINT)만 쓰면 접히는 공간(겨드랑이·소매 안쪽)에서 이웃 정점이 서로 다른
@@ -1573,7 +1760,8 @@ def _shrinkwrap(obj, target, plane_axes: tuple = ()) -> None:
     형상만 뭉개지고 짧은 엣지는 늘어나지 않는다.
 
     plane_axes 가 있으면 그 평면 위 정점은 매 단계 뒤 평면으로 되돌린다 — 평면을 넘어간 정점을 두면
-    미러 복제와 겹쳐 대칭이 깨진다(실측: 대칭 오차 0.07).
+    미러 복제와 겹쳐 대칭이 깨진다(실측: 대칭 오차 0.07). clamp_negative 를 끄면(좌우 분할: 양쪽이 다 있다)
+    평면 위 정점만 되돌리고 음의 쪽 정점은 그대로 둔다.
 
     target 은 안쪽 껍질을 뺀 바깥 면(_outer_surface)이라 투영 한계도 그 면적으로 잡힌다 — 두 겹 전체로 재면
     한계가 약 1.4배로 커져 먼 겹으로 끌려갈 여지가 늘어난다."""
@@ -1605,10 +1793,11 @@ def _shrinkwrap(obj, target, plane_axes: tuple = ()) -> None:
         vertices = obj.data.vertices
         for index, component in pinned:
             vertices[index].co[component] = 0.0
-        for vertex in vertices:
-            for component in components:
-                if vertex.co[component] < 0.0:
-                    vertex.co[component] = 0.0
+        if clamp_negative:
+            for vertex in vertices:
+                for component in components:
+                    if vertex.co[component] < 0.0:
+                        vertex.co[component] = 0.0
         obj.data.update()
 
     def project():

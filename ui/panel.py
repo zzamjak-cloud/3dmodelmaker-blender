@@ -330,6 +330,11 @@ class LP3D_PT_output(bpy.types.Panel):
         row = box.row(align=True)
         row.prop(props, "retopo_faces")
         row.prop(props, "retopo_symmetry", toggle=True)
+        source = quadretopo.find_retopo_target(coll)
+        mismatch = source.get(quadretopo.MIRROR_MISMATCH_KEY) if source is not None else None
+        if mismatch is not None and mismatch > quadretopo.MIRROR_MISMATCH_MAX:
+            # 리토폴로지가 잰 원본 비대칭도 — 대칭 토글을 켜도 미러 대신 좌우 분할(중앙선 유지)로 깐다
+            box.label(text=f"원본 비대칭 {mismatch:.0%} — 대칭 대신 좌우 분할(중앙선 유지)", icon='INFO')
         from .ring_guides import draw_ring_guides
         draw_ring_guides(box, bpy.context, coll)
         run = box.row()

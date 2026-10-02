@@ -538,7 +538,17 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
                     normal_map=True, progress=_say, ring_guides=guides)
                 notes = result['notes']
                 rings = f" · 링 {result['rings']}개 접합" if guides else ""
-                line = (f"리토폴로지 완료: {result['obj'].name} ({result['collection']}) · {result['method']} · "
+                if result.get('symmetry'):
+                    layout_note = " · X 대칭"
+                elif result.get('split'):
+                    layout_note = " · 좌우 분할(중앙선 유지)"
+                else:
+                    layout_note = " · 비대칭"
+                mismatch = result.get('mirror_mismatch')
+                if symmetry and not result.get('symmetry') and mismatch is not None:
+                    # 토글은 켜져 있어도 원본이 비대칭이면 대칭을 쓰지 않는다 — 로그가 아니라 상태 줄에서 바로 보이게
+                    layout_note += f" · X 대칭 꺼짐(원본 비대칭 {mismatch:.0%})"
+                line = (f"리토폴로지 완료: {result['obj'].name} ({result['collection']}) · {result['method']}{layout_note} · "
                         f"면 {result['faces']} "
                         f"(쿼드 {result['quads']}){rings} · 텍스처 {len(result['images'])}장 · "
                         f"{result['seconds']}s")

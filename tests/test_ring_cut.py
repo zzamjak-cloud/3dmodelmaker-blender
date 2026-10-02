@@ -25,6 +25,8 @@ crowded_pairs = _cut.crowded_pairs
 guide_quad_floor = _cut.guide_quad_floor
 mirror_cuts = _cut.mirror_cuts
 ring_cuts = _cut.ring_cuts
+pair_steps = _cut.pair_steps
+reflect_cuts = _cut.reflect_cuts
 
 
 def _ring(count: int, radius: float, z: float, phase: float = 0.0):
@@ -172,3 +174,53 @@ class _Edge:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitWeldTests(unittest.TestCase):
+    """좌우 분할의 중앙선 용접 — 같은 곡선을 다르게 찍은 두 열의 정점 짝."""
+
+    @staticmethod
+    def _circle(count, phase=0.0):
+        return [(0.0, math.cos(2 * math.pi * k / count + phase), math.sin(2 * math.pi * k / count + phase))
+                for k in range(count)]
+
+    def test_pair_steps_pairs_every_b_vertex_and_leaves_only_the_difference_unpaired(self):
+        a, b = self._circle(20), self._circle(16, phase=0.1)
+        pairs = pair_steps(a, b, True)
+        self.assertEqual(sorted(pairs), list(range(16)))          # b 정점은 모두 짝이 있다
+        self.assertEqual(len(set(pairs.values())), 16)             # 20 대 16 이면 a 정점 4개만 짝이 없다
+        for j, i in pairs.items():   # 짝은 서로 가까운 정점이다
+            self.assertLess(math.dist(a[i], b[j]), 2 * math.pi / 16)
+
+    def test_pair_steps_collapses_extra_b_vertices_onto_one_a_vertex(self):
+        a, b = self._circle(12), self._circle(15)
+        pairs = pair_steps(a, b, True)
+        self.assertEqual(len(pairs), 15)
+        self.assertEqual(len(set(pairs.values())), 12)   # a 정점마다 적어도 하나, 셋은 둘씩 받는다
+
+    def test_pair_steps_handles_reversed_and_rotated_b(self):
+        a = self._circle(10)
+        b = list(reversed(self._circle(10, phase=1.3)))
+        pairs = pair_steps(a, b, True)
+        self.assertEqual(len(pairs), 10)
+        self.assertEqual(len(set(pairs.values())), 10)
+        for j, i in pairs.items():
+            self.assertLess(math.dist(a[i], b[j]), 2 * math.pi / 10)
+
+    def test_pair_steps_empty(self):
+        self.assertEqual(pair_steps([], self._circle(4), True), {})
+
+    def test_reflect_cuts_mirrors_everything_without_merging(self):
+        guides = [("왼팔", [(-0.5 + 0.1 * math.cos(t), 0.1 * math.sin(t), 1.0) for t in
+                           (2 * math.pi * k / 12 for k in range(12))]),
+                  ("오른팔", [(0.5 + 0.1 * math.cos(t), 0.1 * math.sin(t), 1.0) for t in
+                            (2 * math.pi * k / 12 for k in range(12))])]
+        cuts = ring_cuts(guides, 0.05)
+        reflected = reflect_cuts(cuts, ('X',))
+        self.assertEqual(len(reflected), 2)
+        self.assertAlmostEqual(reflected[0].center[0], 0.5, places=6)
+        self.assertAlmostEqual(reflected[1].center[0], -0.5, places=6)
+        back = reflect_cuts(reflected, ('X',))
+        for original, twice in zip(cuts, back):
+            self.assertAlmostEqual(original.center[0], twice.center[0], places=9)
+            self.assertEqual(original.name, twice.name)

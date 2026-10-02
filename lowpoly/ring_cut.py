@@ -126,6 +126,17 @@ def mirror_cuts(cuts: tuple[RingCut, ...], axes: tuple[str, ...]) -> tuple[RingC
     return tuple(unique)
 
 
+def reflect_cuts(cuts: tuple[RingCut, ...], axes: tuple[str, ...]) -> tuple[RingCut, ...]:
+    """모든 절단 링을 축에 대해 반사한다(합치지 않는다). 좌우 분할 경로가 음의 반쪽 가이드를 +X 로 보냈다 되돌릴 때 쓴다."""
+    result = list(cuts)
+    for axis in axes:
+        component = "XYZ".index(axis)
+        result = [RingCut(cut.name, _mirror_point(cut.center, component), _mirror_point(cut.normal, component),
+                          cut.radius, cut.half_width, tuple(_mirror_point(p, component) for p in cut.points))
+                  for cut in result]
+    return tuple(result)
+
+
 def crowded_pairs(cuts: tuple[RingCut, ...]) -> tuple[tuple[str, str, float], ...]:
     """축 방향 간격이 좁아 접합이 서로 간섭할 수 있는 링 쌍 (이름, 이름, 간격)."""
     pairs = []
@@ -162,6 +173,11 @@ def guide_quad_floor(cuts: tuple[RingCut, ...], area: float) -> tuple[int, str]:
             if along / MIN_RING_GAP_RATIO < limit:
                 limit, reason = along / MIN_RING_GAP_RATIO, f"'{a.name}'·'{b.name}' 간격 {along:.3g}"
     return int(area / (limit * limit)) + 1, reason
+
+
+def perimeter_of(points) -> float:
+    """닫힌 점 열의 둘레."""
+    return _perimeter(points)
 
 
 def _perimeter(points) -> float:
@@ -630,10 +646,8 @@ def _bridge_loops_fallback(bm, a_verts: list, b_verts: list, a_closed: bool, b_c
     return faces
 
 
-def _bridge(bm, a_verts: list, b_verts: list, closed: bool) -> list:
-    """두 정점 열을 쿼드 위주로 잇는다. 닫힌 링은 시작 위상과 방향을 바꿔 가장 싼 배치를 고른다."""
-    a_points = [tuple(v.co) for v in a_verts]
-    b_points = [tuple(v.co) for v in b_verts]
+def _best_steps(a_points: list, b_points: list, closed: bool):
+    """두 정점 열을 잇는 가장 싼 DP 경로. (steps, b 순서) 또는 None. 닫힌 링은 시작 위상과 방향을 바꿔 가며 고른다."""
     mean_edge = _mean_step(a_points, closed) + _mean_step(b_points, closed)
     penalty = TRIANGLE_PENALTY * max(mean_edge * 0.5, 1.0e-9)
     candidates = []
@@ -656,8 +670,42 @@ def _bridge(bm, a_verts: list, b_verts: list, closed: bool) -> list:
         if best is None or cost < best[0]:
             best = (cost, steps, order)
     if best is None:
+        return None
+    return best[1], best[2]
+
+
+def pair_steps(a_points: list, b_points: list, closed: bool) -> dict[int, int]:
+    """두 정점 열을 **용접**할 때의 짝 — b 정점 번호 → a 정점 번호. 순수 계산.
+
+    같은 곡선을 두 번 따로 다시 찍은 두 열(좌우 분할의 X=0 경계)을 하나로 합칠 때 쓴다. 브리지 DP 와 같은
+    경로에서 각 b 정점을 그 걸음의 a 정점에 붙인다. 'b' 걸음이 이어지면 b 여럿이 한 a 로 모여 그 쿼드가
+    삼각형이 되고, 'a' 걸음의 a 정점은 짝이 없어 세 변 구멍이 남는다 — 둘 다 |nA-nB| 개뿐이며 구멍은 뒤의
+    출력 수리가 메운다."""
+    if not a_points or not b_points:
+        return {}
+    found = _best_steps(a_points, b_points, closed)
+    if found is None:
+        return {}
+    steps, order = found
+    n, m = len(a_points), len(b_points)
+    pairs: dict[int, int] = {}
+    for i, j, kind in steps:
+        pairs.setdefault(order[j % m], i % n)
+        if kind == "b":
+            pairs.setdefault(order[(j + 1) % m], i % n)
+    if not closed:
+        pairs.setdefault(order[-1], n - 1)
+    return pairs
+
+
+def _bridge(bm, a_verts: list, b_verts: list, closed: bool) -> list:
+    """두 정점 열을 쿼드 위주로 잇는다. 닫힌 링은 시작 위상과 방향을 바꿔 가장 싼 배치를 고른다."""
+    a_points = [tuple(v.co) for v in a_verts]
+    b_points = [tuple(v.co) for v in b_verts]
+    found = _best_steps(a_points, b_points, closed)
+    if found is None:
         return []
-    _cost, steps, order = best
+    steps, order = found
     b_ordered = [b_verts[j] for j in order]
     faces = []
     n, m = len(a_verts), len(b_ordered)

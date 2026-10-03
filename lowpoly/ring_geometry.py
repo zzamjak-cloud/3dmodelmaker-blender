@@ -681,3 +681,42 @@ def _unit(v):
 
 def _distance(a, b) -> float:
     return sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+
+def surface_path(mesh, a, b, normal, tolerance: float):
+    """표면 위 두 점 a·b 를 표면을 따라 잇는 점 열 (a … b). 찾지 못하면 None. mesh 는 MeshData 나 SectionMesh.
+
+    a·b 와 두 점의 평균 법선을 담는 평면으로 메시를 잘라, 두 점에 가장 가까운 단면 루프에서 짧은 쪽 호를 쓴다.
+    평평한 면에서는 직선, 휘어진 면에서는 그 평면이 표면을 지나는 곡선이 된다 — 엣지 선 가이드가 하드 엣지나
+    판 위를 똑바로 가로지르게 한다. 단면이 두 점에서 tolerance 넘게 떨어지면(다른 부위 루프) None."""
+    chord = tuple(b[i] - a[i] for i in range(3))
+    span = sqrt(_dot(chord, chord))
+    if span < 1.0e-9:
+        return None
+    up = tuple(normal[i] - chord[i] * _dot(normal, chord) / (span * span) for i in range(3))
+    if sqrt(_dot(up, up)) < 1.0e-6:
+        up = _tangent_frame(_unit(chord))[0]
+    plane_normal = _unit(_cross(chord, up))
+    section = mesh if isinstance(mesh, SectionMesh) else SectionMesh(mesh)
+    best = None
+    for points, closed, *_rest in section_loops(section, a, plane_normal):
+        if len(points) < 2:
+            continue
+        ia = min(range(len(points)), key=lambda k: _distance(points[k], a))
+        ib = min(range(len(points)), key=lambda k: _distance(points[k], b))
+        error = max(_distance(points[ia], a), _distance(points[ib], b))
+        if best is None or error < best[0]:
+            best = (error, points, closed, ia, ib)
+    if best is None or best[0] > tolerance:
+        return None
+    _error, points, closed, ia, ib = best
+    if ia == ib:
+        return (tuple(a), tuple(b))
+    if closed:
+        n = len(points)
+        forward = [points[(ia + k) % n] for k in range((ib - ia) % n + 1)]
+        backward = [points[(ia - k) % n] for k in range((ia - ib) % n + 1)]
+        arc = forward if perimeter(forward, False) <= perimeter(backward, False) else backward
+    else:
+        arc = points[ia:ib + 1] if ia < ib else points[ib:ia + 1][::-1]
+    return (tuple(a),) + tuple(tuple(p) for p in arc[1:-1]) + (tuple(b),)

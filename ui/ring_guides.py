@@ -16,6 +16,7 @@ from bpy_extras import view3d_utils
 from mathutils import Vector
 
 GUIDE_PREFIX = "LP3D_Ring"
+EDGE_PREFIX = "LP3D_Edge"
 PROXY_FACES = 32000          # 단면용 복셀 프록시 면수 — 리토폴로지 입력 사다리의 복셀 밀도와 같다
 KNIFE_CLEARANCE_EDGES = 2.0  # 붙은 단면을 옮길 때 이웃 부위와 떨어져야 하는 거리 — 추정 출력 엣지 길이의 배수
 LIST_LIMIT = 8               # 패널은 리드로우마다 그려지므로 목록을 이 개수까지만 보여 준다
@@ -53,6 +54,7 @@ def _on_offset_changed(self, _context):
 
 class LP3DRingGuideProps(bpy.types.PropertyGroup):
     is_ring: BoolProperty(name="링 가이드", default=False)
+    is_edge: BoolProperty(name="엣지 선 가이드", default=False)   # 열린 선 — 리토폴로지가 이 선을 따라 와이어 엣지를 깐다
     center: FloatVectorProperty(name="중심", size=3, subtype='XYZ')
     axis: FloatVectorProperty(name="축", size=3, subtype='XYZ')
     hit: FloatVectorProperty(name="클릭 지점", size=3, subtype='XYZ')
@@ -99,6 +101,67 @@ def guide_world_points(collection) -> list:
         if len(points) >= 3:
             result.append((guide.name, [tuple(p) for p in points]))
     return result
+
+
+def is_edge_guide(obj) -> bool:
+    return obj is not None and obj.type == 'CURVE' and obj.lp3d_ring_guide.is_edge
+
+
+def edge_guides(collection) -> list:
+    """컬렉션의 엣지 선 가이드 커브들."""
+    if collection is None:
+        return []
+    return [obj for obj in collection.objects if is_edge_guide(obj)]
+
+
+def edge_world_points(collection) -> list:
+    """리토폴로지에 넘길 엣지 선 (이름, 월드 좌표 열린 점 열) 목록."""
+    result = []
+    for guide in edge_guides(collection):
+        points = [guide.matrix_world @ Vector(point.co[:3])
+                  for spline in guide.data.splines for point in spline.points]
+        if len(points) >= 2:
+            result.append((guide.name, [tuple(p) for p in points]))
+    return result
+
+
+def create_edge_guide(collection, source, points_world):
+    """월드 좌표 점 열로 열린 엣지 선 가이드(원본 로컬 좌표 POLY 커브)를 만든다. 점이 2개 미만이면 None."""
+    if len(points_world) < 2:
+        return None
+    to_local = source.matrix_world.inverted()
+    curve = bpy.data.curves.new(EDGE_PREFIX, 'CURVE')
+    curve.dimensions = '3D'
+    guide = bpy.data.objects.new(EDGE_PREFIX, curve)
+    collection.objects.link(guide)
+    guide.matrix_world = source.matrix_world.copy()
+    guide.show_in_front = True
+    guide.hide_render = True
+    guide.lp3d_ring_guide.is_edge = True
+    _write_points(curve, [tuple(to_local @ Vector(p)) for p in points_world], cyclic=False)
+    return guide
+
+
+def surface_segment(source, a_world, b_world, normal_a, normal_b) -> list:
+    """두 월드 표면 점을 표면을 따라 잇는 월드 점 열(a 제외, b 포함). 단면을 못 찾으면 직선."""
+    geometry = _geometry()
+    to_local = source.matrix_world.inverted()
+    a, b = tuple(to_local @ Vector(a_world)), tuple(to_local @ Vector(b_world))
+    normal = (source.matrix_world.to_3x3().transposed() @ (Vector(normal_a) + Vector(normal_b)))
+    normal = tuple(normal.normalized()) if normal.length > 1e-9 else (0.0, 0.0, 1.0)
+    span = math.dist(a, b)
+    # 프록시는 복셀이라 원본 표면에서 조금 뜬다 — 프록시 엣지 길이 정도는 허용한다
+    area = _cached_area(source) or sum(polygon.area for polygon in source.data.polygons)
+    tolerance = max(span * 0.3, 2.0 * math.sqrt(area / PROXY_FACES))
+    path = geometry.surface_path(_section_mesh(source), a, b, normal, tolerance)
+    if path is None:
+        path = (a, b)
+    # 단면은 복셀 프록시라 실제 표면에서 1cm 가까이 뜬다 — 리토폴로지는 결과를 원본 표면에 붙이므로 선도 원본 위에 둔다
+    projected = []
+    for point in path[1:]:
+        found, location, _normal, _index = source.closest_point_on_mesh(Vector(point))
+        projected.append(tuple(source.matrix_world @ (location if found else Vector(point))))
+    return projected
 
 
 def section_source(collection):
@@ -303,13 +366,13 @@ def refresh_ring_guide(guide, *, source=None, section=None) -> bool:
     return True
 
 
-def _write_points(curve, points) -> None:
+def _write_points(curve, points, cyclic: bool = True) -> None:
     curve.splines.clear()
     spline = curve.splines.new('POLY')
     spline.points.add(len(points) - 1)
     for point, target in zip(points, spline.points):
         target.co = (point[0], point[1], point[2], 1.0)
-    spline.use_cyclic_u = True
+    spline.use_cyclic_u = cyclic
 
 
 def remove_guide(guide) -> None:
@@ -392,14 +455,14 @@ def _is_undo_key(event) -> bool:
     return (event.type == 'Z' and (event.ctrl or event.oskey) and not event.shift) or event.type == 'BACK_SPACE'
 
 
-def _undo_last(operator) -> None:
-    """이 세션에서 만든 마지막 링만 지운다. 모달 중 전역 언도가 끼어들면 원본까지 되돌아갈 수 있어 키를 여기서 삼킨다."""
+def _undo_last(operator, label: str = "링 가이드") -> None:
+    """이 세션에서 만든 마지막 가이드만 지운다. 모달 중 전역 언도가 끼어들면 원본까지 되돌아갈 수 있어 키를 여기서 삼킨다."""
     while operator._created:
         guide = bpy.data.objects.get(operator._created.pop())
         if guide is not None and guide.users_collection:
             detach_guide(guide)
-            _push_undo("링 가이드 취소")
-            operator.report({'INFO'}, "마지막 링 가이드를 취소했습니다")
+            _push_undo(f"{label} 취소")
+            operator.report({'INFO'}, f"마지막 {label}을 취소했습니다")
             break
     try:
         operator._area.tag_redraw()
@@ -708,8 +771,8 @@ class LP3D_OT_ring_guide_remove(bpy.types.Operator):
 
     def execute(self, context):
         guide = bpy.data.objects.get(self.name)
-        if not is_guide(guide):
-            self.report({'WARNING'}, f"링 가이드를 찾을 수 없습니다: {self.name}")
+        if not (is_guide(guide) or is_edge_guide(guide)):
+            self.report({'WARNING'}, f"가이드를 찾을 수 없습니다: {self.name}")
             return {'CANCELLED'}
         remove_guide(guide)
         return {'FINISHED'}
@@ -776,10 +839,233 @@ def draw_ring_guides(layout, context, collection) -> None:
         box.label(text=f"외 {len(others) - LIST_LIMIT}개")
 
 
+EDGE_COLOR = (0.2, 0.9, 1.0, 1.0)
+EDGE_POINT_PIXELS = 4.0
+
+
+def _draw_edge_preview(operator):
+    try:
+        _draw_edge_stroke(operator)
+    except ReferenceError:
+        pass
+
+
+def _draw_edge_stroke(operator):
+    region = bpy.context.region
+    rv3d = bpy.context.region_data
+    if not operator._path or region is None or rv3d is None or region.as_pointer() != operator._region_pointer:
+        return
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+
+    projected = [view3d_utils.location_3d_to_region_2d(region, rv3d, Vector(p)) for p in operator._path]
+    projected = [tuple(p) for p in projected if p is not None]
+    lines = [(projected[i], projected[i + 1]) for i in range(len(projected) - 1)]
+    if operator._mouse is not None and projected:
+        lines.append((projected[-1], operator._mouse))   # 다음 점까지 고무줄
+    clicked = [view3d_utils.location_3d_to_region_2d(region, rv3d, Vector(p)) for p in operator._clicks]
+    size = EDGE_POINT_PIXELS
+    for point in clicked:
+        if point is not None:   # 찍은 점은 작은 십자로
+            lines.append(((point[0] - size, point[1]), (point[0] + size, point[1])))
+            lines.append(((point[0], point[1] - size), (point[0], point[1] + size)))
+    if not lines:
+        return
+    shader = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
+    batch = batch_for_shader(shader, 'LINES', {"pos": [p for pair in lines for p in pair]})
+    gpu.state.blend_set('ALPHA')
+    shader.uniform_float("viewportSize", (region.width, region.height))
+    shader.uniform_float("lineWidth", 2.0)
+    shader.uniform_float("color", EDGE_COLOR)
+    batch.draw(shader)
+    gpu.state.blend_set('NONE')
+
+
+class LP3D_OT_edge_guide_draw(bpy.types.Operator):
+    bl_idname = "lp3d.edge_guide_draw"
+    bl_label = "엣지 선 그리기"
+    bl_description = ("표면을 클릭해 점을 찍으면 점 사이를 표면을 따라 잇는 선을 그린다. 리토폴로지가 이 선을 따라 "
+                      "와이어 엣지를 깐다 — 메카닉 하드 엣지나 원하는 와이어 흐름에 쓴다. Enter·Space·우클릭으로 선을 "
+                      "확정하고, Backspace·Ctrl+Z 로 마지막 점(점이 없으면 마지막 선)을 취소, ESC 로 긋던 선을 버리거나 끝낸다")
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and _job_collection(context)[1] is not None
+
+    def invoke(self, context, event):
+        if context.area is None or context.area.type != 'VIEW_3D':
+            self.report({'ERROR'}, "3D 뷰포트에서 실행해야 합니다")
+            return {'CANCELLED'}
+        collection, target = _job_collection(context)
+        source = section_source(collection)
+        self._collection_name = collection.name
+        self._target_name = target.name
+        self._area = context.area
+        self._created = []
+        self._region_pointer = 0
+        self._clicks = []      # 찍은 월드 점
+        self._normals = []
+        self._path = []        # 표면을 따라 이은 월드 점 열
+        self._marks = []       # 점마다 그때까지의 경로 길이 — 마지막 점 취소용
+        self._mouse = None
+        context.window.cursor_modal_set('WAIT')
+        try:
+            _section_mesh(source)   # 첫 구간이 멈추지 않도록 프록시를 미리 굽는다
+        finally:
+            context.window.cursor_modal_restore()
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(_draw_edge_preview, (self,), 'WINDOW', 'POST_PIXEL')
+        context.window_manager.modal_handler_add(self)
+        self._update_header()
+        return {'RUNNING_MODAL'}
+
+    def _update_header(self):
+        try:
+            self._area.header_text_set(
+                f"엣지 선 {len(self._created)}개 · 점 {len(self._clicks)}개 — 클릭: 점 추가(표면을 따라 이음), "
+                "Enter/Space/우클릭: 선 확정, Backspace/Ctrl+Z: 마지막 점 취소, ESC: 버리기/종료")
+        except (AttributeError, ReferenceError):
+            pass
+
+    def _redraw(self):
+        try:
+            self._area.tag_redraw()
+        except (AttributeError, ReferenceError):
+            pass
+
+    def _finish(self):
+        if self._handle is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
+            self._handle = None
+        try:
+            self._area.header_text_set(None)
+        except (AttributeError, ReferenceError):
+            pass
+        self._redraw()
+
+    def cancel(self, _context):
+        self._finish()
+
+    def _reset_line(self):
+        self._clicks, self._normals, self._path, self._marks = [], [], [], []
+
+    def _commit(self) -> None:
+        collection, _target, source = _modal_targets(self)
+        if len(self._clicks) >= 2 and collection is not None and source is not None:
+            guide = create_edge_guide(collection, source, self._path)
+            if guide is not None:
+                self._created.append(guide.name)
+                _push_undo("엣지 선 추가")
+                self.report({'INFO'}, f"{guide.name}: 점 {len(self._clicks)}개")
+        self._reset_line()
+
+    def modal(self, context, event):
+        if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
+            found = _viewport_under_mouse(context, event)
+            if found is not None and found[0].as_pointer() == self._region_pointer:
+                self._mouse = found[2]
+                self._redraw()
+            return {'PASS_THROUGH'}
+        if event.value != 'PRESS':
+            return {'RUNNING_MODAL'} if _is_undo_key(event) else {'PASS_THROUGH'}
+        if event.type in {'RET', 'NUMPAD_ENTER', 'SPACE'} or event.type == 'RIGHTMOUSE':
+            if self._clicks:
+                self._commit()
+            elif event.type == 'RIGHTMOUSE':
+                self._finish()
+                return {'FINISHED'}
+            self._update_header()
+            self._redraw()
+            return {'RUNNING_MODAL'}
+        if event.type == 'ESC':
+            if self._clicks:
+                self._reset_line()
+                self._update_header()
+                self._redraw()
+                return {'RUNNING_MODAL'}
+            self._finish()
+            return {'FINISHED'}
+        if _is_undo_key(event):
+            if self._clicks:
+                self._clicks.pop()
+                self._normals.pop()
+                del self._path[self._marks.pop():]
+            else:
+                _undo_last(self, "엣지 선")
+            self._update_header()
+            self._redraw()
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE':
+            collection, target, source = _modal_targets(self)
+            if collection is None or target is None or source is None:
+                self._finish()
+                return {'CANCELLED'}
+            hit = _raycast(context, event, target)
+            if hit is None:
+                return {'PASS_THROUGH'}   # 사이드바 버튼·빈 공간 클릭은 그대로 넘긴다
+            found = _viewport_under_mouse(context, event)
+            self._region_pointer = found[0].as_pointer()
+            if self._clicks:
+                try:
+                    segment = surface_segment(source, self._clicks[-1], hit[0], self._normals[-1], hit[1])
+                except (RuntimeError, ValueError, ReferenceError):
+                    segment = [hit[0]]   # 단면 계산이 실패해도 모달은 살린다 — 직선으로 잇는다
+            else:
+                segment = [hit[0]]
+            self._marks.append(len(self._path))
+            self._path.extend(segment)
+            self._clicks.append(hit[0])
+            self._normals.append(hit[1])
+            self._update_header()
+            self._redraw()
+            return {'RUNNING_MODAL'}
+        return {'PASS_THROUGH'}
+
+
+class LP3D_OT_edge_guide_clear(bpy.types.Operator):
+    bl_idname = "lp3d.edge_guide_clear"
+    bl_label = "엣지 선 모두 삭제"
+    bl_description = "선택한 항목의 엣지 선 가이드를 모두 지운다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(edge_guides(_job_collection(context)[0]))
+
+    def execute(self, context):
+        guides = edge_guides(_job_collection(context)[0])
+        for guide in guides:
+            remove_guide(guide)
+        self.report({'INFO'}, f"엣지 선 {len(guides)}개를 지웠습니다")
+        return {'FINISHED'}
+
+
+def draw_edge_guides(layout, context, collection) -> None:
+    """리토폴로지 상자 안의 엣지 선 섹션."""
+    box = layout.box()
+    box.label(text="엣지 선 (하드 엣지·와이어 흐름)", icon='IPO_LINEAR')
+    row = box.row(align=True)
+    row.operator("lp3d.edge_guide_draw", text="엣지 선 그리기", icon='GREASEPENCIL')
+    row.operator("lp3d.edge_guide_clear", text="", icon='TRASH')
+    guides = edge_guides(collection)
+    if not guides:
+        box.label(text="클릭으로 점 · 점 사이는 표면을 따라 이음")
+        box.label(text="Enter/우클릭 확정 · Backspace 마지막 점 취소")
+        return
+    for guide in guides[:LIST_LIMIT]:
+        row = box.row(align=True)
+        count = sum(len(spline.points) for spline in guide.data.splines)
+        row.label(text=f"{guide.name}  점 {count}")
+        row.operator("lp3d.ring_guide_remove", text="", icon='X').name = guide.name
+    if len(guides) > LIST_LIMIT:
+        box.label(text=f"외 {len(guides) - LIST_LIMIT}개")
+
+
 _CLASSES = (
     LP3DRingGuideProps,
     LP3D_OT_ring_guide_add, LP3D_OT_ring_guide_knife, LP3D_OT_ring_guide_check,
     LP3D_OT_ring_guide_remove, LP3D_OT_ring_guide_clear,
+    LP3D_OT_edge_guide_draw, LP3D_OT_edge_guide_clear,
 )
 
 

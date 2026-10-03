@@ -523,7 +523,7 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
                 target.status = f"리토폴로지: {text}"
 
         def _run():
-            from .ring_guides import guide_world_points
+            from .ring_guides import edge_world_points, guide_world_points
             collection = bpy.data.collections.get(collection_name)
             obj = bpy.data.objects.get(source_name)
             notes = []
@@ -531,13 +531,16 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
                 if collection is None or obj is None:
                     raise RuntimeError("결과 컬렉션이나 메시가 사라졌습니다")
                 guides = guide_world_points(collection)
+                lines = edge_world_points(collection)
                 result = quadretopo.retopologize(
                     obj, collection,
                     target_faces=target_faces, symmetry=symmetry,
                     texture_size=int(prefs.shapegen_texture_size),
-                    normal_map=True, progress=_say, ring_guides=guides)
+                    normal_map=True, progress=_say, ring_guides=guides, edge_guides=lines)
                 notes = result['notes']
                 rings = f" · 링 {result['rings']}개 접합" if guides else ""
+                if lines:
+                    rings += f" · 엣지 선 {result.get('edges', 0)}/{len(lines)}개"
                 if result.get('symmetry'):
                     layout_note = " · X 대칭"
                 elif result.get('split'):

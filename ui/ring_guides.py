@@ -1088,6 +1088,7 @@ def _guide_segments(obj, lift, eye, toward, perspective):
 
 def _draw_guides_depth():
     """링·엣지 선 가이드를 깊이로 나눠 그린다 — 몸에 가려진 뒤쪽은 흐리게, 보이는 앞쪽은 밝게.
+    선택한 가이드는 테마의 선택·활성 색으로 굵게 그린다(오버레이가 Blender 선택 강조를 덮는다).
 
     가이드가 '항상 앞에 그리기'라 몸 뒤쪽 선도 앞쪽과 같은 색으로 겹쳐 보여 헷갈렸다(사용자 요청 2026-10-03)."""
     try:
@@ -1106,25 +1107,36 @@ def _draw_guides_depth():
         eye = view.translation
         toward = (view.to_3x3() @ Vector((0.0, 0.0, 1.0))).normalized()   # 직교 뷰의 시점 쪽 방향
         lift = max(rv3d.view_distance * DEPTH_LIFT_RATIO, 1e-4)
-        batches = {"edge": [], "ring": []}
+        active = context.view_layer.objects.active
+        batches = {}
         for guide in guides:
             kind = "edge" if guide.lp3d_ring_guide.is_edge else "ring"
-            batches[kind].extend(_guide_segments(guide, lift, eye, toward, rv3d.is_perspective))
+            # 오버레이가 Blender 의 선택 강조(주황)를 덮으므로 선택 상태도 여기서 그린다
+            state = "active" if guide == active and guide.select_get() else ("selected" if guide.select_get() else kind)
+            batches.setdefault(state, []).extend(_guide_segments(guide, lift, eye, toward, rv3d.is_perspective))
         shader = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
         shader.uniform_float("viewportSize", (region.width, region.height))
         gpu.state.blend_set('ALPHA')
         gpu.state.depth_mask_set(False)
-        for kind, points in batches.items():
+        theme = bpy.context.preferences.themes[0].view_3d
+        colors = dict(GUIDE_COLORS)
+        for state, source in (("selected", theme.object_selected), ("active", theme.object_active)):
+            rgb = tuple(source)[:3]
+            colors[state] = ((*rgb, 1.0), (*(c * 0.75 for c in rgb), 0.7))
+        # 선택한 가이드를 마지막에(위에) 그린다
+        for state in sorted(batches, key=lambda key: ("edge", "ring", "selected", "active").index(key)):
+            points = batches[state]
             if not points:
                 continue
             batch = batch_for_shader(shader, 'LINES', {"pos": points})
-            front, back = GUIDE_COLORS[kind]
+            front, back = colors[state]
+            picked = state in ("selected", "active")
             gpu.state.depth_test_set('GREATER')
-            shader.uniform_float("lineWidth", 1.0)
+            shader.uniform_float("lineWidth", 2.0 if picked else 1.0)
             shader.uniform_float("color", back)
             batch.draw(shader)
             gpu.state.depth_test_set('LESS_EQUAL')
-            shader.uniform_float("lineWidth", 3.0)
+            shader.uniform_float("lineWidth", 5.0 if picked else 3.0)
             shader.uniform_float("color", front)
             batch.draw(shader)
         gpu.state.depth_test_set('NONE')

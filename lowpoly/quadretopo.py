@@ -223,7 +223,7 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
                 # 틈 폭·캡 판정·reach 가 추정 출력 엣지에 묶여 있어 목표 면수가 바뀌면 다시 만든다
                 edges["lines"] = edge_line.edge_lines(local, math.sqrt(max(area, 1e-12) / max(int(faces), 1)))
 
-            edges = {"lines": (), "welded": set()}
+            edges = {"lines": (), "welded": set(), "mode": "slit"}
             remake_lines(target_faces)
         target_raises = 0
         raise_base = None   # (올리기 전 목표, 그때 실패 수, 그때 실패한 접합)
@@ -319,12 +319,16 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
             retries += 1
             attempt -= 1
             outcome, seams = None, ()
-        if outcome is None and full_requested:
+        if outcome is None and (full_requested or (edges is not None and edges["lines"])):
             # 링을 넣은 시도가 모든 밀도에서 실패했다 — 데시메이트로 떨어지기 전에 첫 밀도로 링 없이 한 번 더 깐다.
             # 링 없는 반쪽 재시도는 사다리 마지막 단에만 있어, 그 단이 매니폴드 정리에서 막히면 한 번도 돌지 않았다
             # (실측 2026-09-28, 근육질 좀비 12,000면: 목 가이드 하나 때문에 데시메이트 폴백, 링 없이는 바로 성공)
             density, triangles = ladder[0]
-            say("링을 넣은 시도가 모두 실패 — 링 없이 다시 깔기")
+            say("가이드를 넣은 시도가 모두 실패 — 링·틈 없이 다시 깔기")
+            if edges is not None:
+                # 엣지 선이 많으면(판 외곽을 선 70개로 이음) 틈이 QuadriFlow 를 모든 밀도에서 실패시켜 데시메이트로
+                # 떨어졌다(실측 2026-10-03). 입력은 그대로 깔고 출력에서 선을 따라가는 엣지 사슬만 편다
+                edges["mode"] = "snap"
             stale, work.data = work.data, snapshot.copy()
             bpy.data.meshes.remove(stale)
             _voxel_remesh(work, target_faces, wanted=density)
@@ -335,9 +339,12 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
                     edges["welded"].clear()
                 outcome, _cuts, _stitched = _quadriflow(work, target_faces, symmetry, say, allow_full=True,
                                                         notes=notes, split=split, edges=edges)
-                if outcome is not None:
+                if outcome is not None and full_requested:
                     notes.append("링 가이드를 넣은 시도가 모든 밀도에서 실패해 링 없이 깔았습니다 "
                                  "— 가이드를 단면이 일정한 위치로 옮겨 주세요")
+                if outcome is not None and edges is not None and edges["lines"]:
+                    notes.append("엣지 선 틈을 넣은 시도가 모든 밀도에서 실패해, 틈 없이 깔고 선을 따라가는 출력 엣지만 "
+                                 "폈습니다 — 선이 많거나 짧으면 이렇게 됩니다. 길고 떨어진 선일수록 정확합니다")
             seams = ()
         for seam in seams:
             notes.append(f"링 '{seam.name}': 절단 링 {seam.ring_sizes[0]}·{seam.ring_sizes[1]}정점 접합"
@@ -865,7 +872,8 @@ def _quadriflow(obj, target_faces: int, symmetry: bool, say=lambda _text: None, 
         holder = bpy.data.objects.new(full.name, full)
         try:
             cuts = _cut_bands(holder, requested_cuts if full_cuts is None else full_cuts, scale, say, notes, ())
-            slits = _slit_input(holder, _edge_lines(edges), cuts, False, say, notes)
+            slits = _slit_input(holder, _edge_lines(edges), cuts, False, say, notes,
+                                edges["mode"] if edges else "slit")
             max_shells = _shell_count(full) + QF_EXTRA_SHELLS
             request = max(int(target_faces * QF_REQUEST_SCALE), 4)
             src = os.path.join(work_dir, "in.blend")
@@ -874,7 +882,7 @@ def _quadriflow(obj, target_faces: int, symmetry: bool, say=lambda _text: None, 
             bpy.data.objects.remove(holder)
             bpy.data.meshes.remove(full)
         mesh = _race_quadriflow(src, work_dir, request, expected=target_faces,
-                                preserve_boundary=bool(cuts) or bool(slits), plane_axes=(), scale=scale,
+                                preserve_boundary=bool(cuts), plane_axes=(), scale=scale,
                                 max_shells=max_shells, cuts=cuts, slits=slits,
                                 attempts=2 if symmetry else QF_ATTEMPTS,
                                 score=_combined_score((lambda m: _stitch_score(m, cuts, (), 0.0)) if cuts else None, slits),
@@ -922,7 +930,7 @@ def _half_quadriflow(source, target_faces: int, scale: float, work_dir: str, req
             say(f"반쪽 정리 실패 {quadriflow_ready(holder, ('X',))}")
         else:
             cuts = _cut_bands(holder, requested_cuts, scale, say, notes, ('X',))
-            slits = _slit_input(holder, lines, cuts, True, say, notes)
+            slits = _slit_input(holder, lines, cuts, True, say, notes, edges["mode"] if edges else "slit")
             # 띠 하나가 팔·다리를 끊을 때마다 셸이 하나씩 는다
             max_shells = max(_shell_count(holder.data) + QF_EXTRA_SHELLS, QF_HALF_MAX_SHELLS + len(cuts))
             request = max(int(target_faces / 2 * QF_HALF_REQUEST_SCALE), 4)
@@ -1218,11 +1226,11 @@ def _edge_lines(edges) -> tuple:
     return tuple(edges["lines"]) if edges else ()
 
 
-def _slit_input(holder, lines: tuple, cuts: tuple, half: bool, say, notes: list) -> tuple:
+def _slit_input(holder, lines: tuple, cuts: tuple, half: bool, say, notes: list, mode: str = "slit") -> tuple:
     """QuadriFlow 입력에 엣지 선 틈을 낸다. 반쪽이면 대칭면 근처, 링 띠 근처를 잘라 낸 선만 쓴다. 낸 선을 돌려준다."""
     if not lines:
         return ()
-    margin_plane = lines[0].edge * edge_line.PLANE_MARGIN_EDGES
+    margin_plane = lines[0].edge * (edge_line.SNAP_PLANE_MARGIN_EDGES if mode == "snap" else edge_line.PLANE_MARGIN_EDGES)
     margin_band = lines[0].edge * edge_line.BAND_MARGIN_EDGES
 
     def keep(point) -> bool:
@@ -1237,33 +1245,54 @@ def _slit_input(holder, lines: tuple, cuts: tuple, half: bool, say, notes: list)
     usable = edge_line.dedupe_lines(edge_line.trim_lines(lines, keep))
     if not usable:
         return ()
+    if mode == "snap":
+        return usable   # 입력은 그대로 — 출력에서 선을 따라가는 엣지 사슬만 편다
     say(f"엣지 선 {len(usable)}개 위치에 틈 생성")
+    def defects(mesh) -> dict:
+        """틈 경계(면 1장 엣지)는 경계 보존 QuadriFlow 가 받으므로 세지 않는다 — 사전 검사의 나머지 거절 사유만."""
+        check = bmesh.new()
+        check.from_mesh(mesh)
+        report = {
+            "tiny": sum(1 for e in check.edges
+                        if all(abs(e.verts[0].co[i] - e.verts[1].co[i]) < 1e-4 for i in range(3))),
+            "edge": sum(1 for e in check.edges if len(e.link_faces) > 2),
+            "vert": sum(1 for v in check.verts if not v.is_manifold),
+            "wind": sum(1 for e in check.edges if len(e.link_faces) == 2 and not e.is_contiguous),
+        }
+        check.free()
+        return report
+
+    before = defects(holder.data)
+    original = holder.data.copy()
     bm = bmesh.new()
     bm.from_mesh(holder.data)
-
-    def broken(mesh_bm) -> int:
-        return (sum(1 for e in mesh_bm.edges if len(e.link_faces) > 2)
-                + sum(1 for v in mesh_bm.verts if not v.is_manifold))
-
-    before = broken(bm)
-    slits, skipped = edge_line.cut_slits(bm, usable)
+    grooves, skipped = edge_line.cut_slits(bm, usable)
+    # 이웃한 경로 정점이 선 위 같은 점으로 옮겨지면 길이 0 엣지가 생겨 사전 검사가 거절한다(실측 선 70개: 11개)
+    _stretch_tiny_edges(bm)
     for reason in skipped:
         if reason not in notes:
             notes.append(reason)
-    if not slits:
-        bm.free()   # 조밀화만 된 입력을 보내지 않는다 — 선이 없을 때와 같은 입력이어야 한다
-        return ()
-    if broken(bm) > before:
+    if grooves:
+        bm.to_mesh(holder.data)
+        holder.data.update()
+    bm.free()
+    after = defects(holder.data) if grooves else before
+    if grooves and any(after[key] > before[key] for key in after):
         # QuadriFlow 사전 검사가 입력을 통째로 거절한다(종료 코드 3) — 선 없이 까는 편이 낫다
-        bm.free()
-        note = "엣지 선 틈이 입력 메시를 비매니폴드로 만들어 이번 시도에서는 선 없이 깝니다"
+        note = f"엣지 선 틈이 QuadriFlow 사전 검사에 걸려(전 {before} → 후 {after}) 이번 시도에서는 선 없이 깝니다"
+        say(note)
         if note not in notes:
             notes.append(note)
-        return ()
-    bm.to_mesh(holder.data)
-    bm.free()
-    holder.data.update()
-    return slits
+        grooves = ()
+    if not grooves:
+        # 조밀화만 된 입력·거절될 입력을 보내지 않는다 — 기하만 되돌린다(호출자가 이 메시 데이터블록을 쥐고 있다)
+        restore = bmesh.new()
+        restore.from_mesh(original)
+        restore.to_mesh(holder.data)
+        restore.free()
+        holder.data.update()
+    bpy.data.meshes.remove(original)
+    return grooves
 
 
 def _weld_output(mesh, slits: tuple, say, notes: list, edges) -> None:
@@ -1271,7 +1300,10 @@ def _weld_output(mesh, slits: tuple, say, notes: list, edges) -> None:
     say(f"엣지 선 {len(slits)}개 용접")
     bm = bmesh.new()
     bm.from_mesh(mesh)
-    welded, failed = edge_line.weld_slits(bm, slits, ring_cut.pair_steps)
+    if edges is not None and edges.get("mode") == "snap":
+        welded, failed = edge_line.snap_lines(bm, slits)
+    else:
+        welded, failed = edge_line.weld_slits(bm, slits, ring_cut.pair_steps)
     bm.to_mesh(mesh)
     bm.free()
     mesh.update()

@@ -21,7 +21,8 @@ from math import sqrt
 REACH_RATIO = 0.75          # 출력 틈 경계 정점이 선에서 떠도 되는 거리 = 추정 출력 엣지 × 이 비율 (QuadriFlow 경계 정점은 엣지 절반쯤 뜬다)
 RESAMPLE_RATIO = 0.25       # 선을 추정 출력 엣지의 이 비율 간격으로 다시 찍는다 — 자르기·거리 계산의 해상도
 MIN_LENGTH_EDGES = 2.0      # 추정 출력 엣지 이 개수보다 짧은 선(조각)은 와이어 하나도 못 정한다
-PLANE_MARGIN_EDGES = 2.0    # 반쪽 리토폴로지에서 선은 대칭면에서 출력 엣지 이만큼 떨어진 곳까지만 쓴다 — 틈이 대칭면 경계에 닿으면 반쪽 루프가 깨진다
+PLANE_MARGIN_EDGES = 2.0    # 반쪽 리토폴로지에서 틈은 대칭면에서 출력 엣지 이만큼 떨어진 곳까지만 — 틈이 대칭면 경계에 닿으면 반쪽 루프가 깨진다
+SNAP_PLANE_MARGIN_EDGES = 0.5   # 사슬 펴기(입력 불변)는 대칭면 경계 정점만 피하면 된다
 BAND_MARGIN_EDGES = 2.0     # 링 절단 띠에서도 이만큼 떨어진 곳까지만 — 틈이 띠 경계에 닿으면 링 접합 루프가 깨진다
 DUPLICATE_RATIO = 0.7       # 선 점의 이 비율 이상이 앞선 선의 reach×2 안이면 같은 선(대칭 반사본·좌우를 따로 그린 선)으로 본다
 CORRIDOR_RATIO = 1.0        # 입력 엣지 경로는 선에서 입력 평균 엣지 × 이 비율 안의 정점만 지난다
@@ -41,6 +42,7 @@ LOOP_NEAR_RATIO = 0.8       # 출력 경계 루프 정점의 이 비율 이상�
 DENSIFY_RATIO = 0.35        # 선 근처 입력 엣지를 추정 출력 엣지 × 이 비율 이하가 되도록 쪼갠다 — 입력이 출력보다 성기면
                             # 경로가 선 끝에 못 닿고 지그재그가 남는다(실측 메카닉: 입력 4.7cm · 출력 3.8cm 에서 커버리지 0.4~0.5)
 DENSIFY_ROUNDS = 4
+TINY_EDGE = 1.0e-4          # Blender QuadriFlow 사전 검사가 길이 0 으로 보는 축별 차이
 CAP_REACH_RATIO = 0.5       # 정점이 모두 선에서 출력 엣지 × 이 비율 안인 면은 QuadriFlow 가 틈을 덮은 캡이다 — 틈이 있으면 표면 면은
                             # 선을 가로지르지 못하고, 선 끝 근처 표면 면도 정점 넷이 지름 출력 엣지 원 안에 모일 수 없다
 
@@ -236,6 +238,19 @@ def _distances(coords, points):
     return best.tolist()
 
 
+def snap_lines(bm, lines) -> tuple:
+    """QuadriFlow 출력에서 선을 따라가는 엣지 사슬을 선(원본 표면) 위로 펴고 고정 표식을 남긴다. (편 선, 실패 사유)."""
+    layer = bm.verts.layers.int.get(PIN_ATTRIBUTE) or bm.verts.layers.int.new(PIN_ATTRIBUTE)
+    done, failed = [], []
+    for line in lines:
+        if snap_chain(bm, line, layer):
+            snap_chain(bm, line, layer)   # 한 번에 이웃 엣지 절반까지만 옮기므로 한 번 더
+            done.append(line.name)
+        else:
+            failed.append(f"엣지 선 '{line.name}' 을 따라가는 출력 엣지를 찾지 못했습니다")
+    return tuple(done), tuple(failed)
+
+
 def cut_slits(bm, lines) -> tuple:
     """선마다 입력 메시 엣지 경로를 찾아 선 위로 정점을 옮기고 split 해 틈을 낸다. (낸 선, 건너뛴 사유) 를 돌려준다.
 
@@ -357,6 +372,11 @@ def _densify(bm, line) -> int:
         ngons = list({f for f in result["geom"] if isinstance(f, bmesh.types.BMFace) and len(f.verts) > 3})
         if ngons:
             bmesh.ops.poke(bm, faces=ngons)
+        # 얇은 삼각형을 쪼개면 정점이 한 점에 뭉쳐 축별 1e-4 미만 엣지(사전 검사 거절 사유)가 생긴다(실측 선 70개: 6~30개)
+        tiny = {v for e in bm.edges if all(abs(e.verts[0].co[i] - e.verts[1].co[i]) < TINY_EDGE for i in range(3))
+                for v in e.verts}
+        if tiny:
+            bmesh.ops.remove_doubles(bm, verts=list(tiny), dist=TINY_EDGE * 3.0)
         total += len(long_edges)
     return total
 

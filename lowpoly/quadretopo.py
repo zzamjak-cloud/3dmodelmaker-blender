@@ -13,6 +13,7 @@
 #
 # 텍스처를 AI 로 다시 만들지 않고 원본에서 굽는 것이 예전 리토폴로지 경로와의 결정적인 차이다.
 # 원본 오브젝트는 어느 경우에도 손대지 않는다 — 실패하면 작업본만 지우고 예외를 올린다.
+import itertools
 import math
 import os
 import subprocess
@@ -35,6 +36,7 @@ RETOPO_LINK_KEY = 'lp3d_retopo_link'  # 원본·결과 컬렉션이 함께 갖�
 RESULT_GAP_RATIO = 0.25           # 결과를 원본 폭의 (1 + 이 비율)만큼 +X 로 옮겨 나란히 둔다
 
 _WORKER = os.path.join(os.path.dirname(__file__), "quadriflow_worker.py")
+_RACE_COUNTER = itertools.count()   # QuadriFlow 출력 파일 이름을 실행마다 다르게
 
 MERGE_DIST = 2e-4              # 이보다 짧은 엣지는 이 길이까지 늘린다. Blender 의 QuadriFlow 사전 검사는 길이가
                                # 1e-4 미만인 엣지를 '길이 0'으로 보고 거절한다(실측 2026-09-20: 27개 때문에
@@ -1496,11 +1498,10 @@ def _race_quadriflow(src: str, work_dir: str, request: int, *, expected: int,
     best = None
     scored = 0
     for seed in range(1, attempts + 1):
-        dst = os.path.join(work_dir, f"out{tag}{seed}.blend")
-        # 좌우 분할은 같은 작업 폴더에서 반쪽을 두 번 깐다 — 앞 반쪽의 출력 파일이 남아 있으면 실패한 워커 대신 그걸
-        # 읽는다(실측 2026-10-03: 음의 반쪽 QuadriFlow 가 실패했는데 양의 반쪽 출력 1,710면이 그대로 쓰였다)
-        if os.path.exists(dst):
-            os.remove(dst)
+        # 좌우 분할은 같은 작업 폴더에서 반쪽을 두 번 깐다 — 출력 파일 이름이 같으면 실패한 워커 대신 앞 반쪽의 출력을
+        # 읽는다(실측 2026-10-03: 음의 반쪽 QuadriFlow 가 실패했는데 양의 반쪽 출력 1,710면이 그대로 쓰였다). 지우는 대신
+        # 실행마다 이름을 새로 짓는다(CI 검증기는 __file__ 을 쓰는 모듈의 파일 삭제를 막는다)
+        dst = os.path.join(work_dir, f"out{tag}{seed}_{next(_RACE_COUNTER)}.blend")
         command = [bpy.app.binary_path, "--background", "--factory-startup", "--python-exit-code", "1",
                    "--python", _WORKER, "--",
                    src, dst, str(request), "1" if preserve_boundary else "0", str(seed)]

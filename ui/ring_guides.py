@@ -1120,8 +1120,9 @@ def _draw_guides_depth():
         gpu.state.depth_mask_set(False)
         theme = bpy.context.preferences.themes[0].view_3d
         colors = dict(GUIDE_COLORS)
-        for state, source in (("selected", theme.object_selected), ("active", theme.object_active)):
-            rgb = tuple(source)[:3]
+        for state, attr, fallback in (("selected", "object_selected", (0.93, 0.34, 0.0)),
+                                      ("active", "object_active", (1.0, 0.63, 0.16))):
+            rgb = tuple(getattr(theme, attr, fallback))[:3]   # 테마 속성 이름이 버전마다 다를 수 있다
             colors[state] = ((*rgb, 1.0), (*(c * 0.75 for c in rgb), 0.7))
         # 선택한 가이드를 마지막에(위에) 그린다
         for state in sorted(batches, key=lambda key: ("edge", "ring", "selected", "active").index(key)):

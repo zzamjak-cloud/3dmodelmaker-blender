@@ -129,7 +129,8 @@ _MAP_PLAN = (
 
 
 def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
-                 texture_size=2048, normal_map=True, progress=None, ring_guides=(), edge_guides=()) -> dict:
+                 texture_size=2048, normal_map=True, progress=None, ring_guides=(), edge_guides=(),
+                 polish: float = 0.0) -> dict:
     """source_obj 를 복제해 쿼드 메시로 다시 깔고 텍스처를 베이크로 옮긴다. **원본은 건드리지 않는다.**
 
     결과는 `<원본 컬렉션>_리토폴로지` 컬렉션에 `<이름>_리토폴로지` 로 만들고, 원본과 겹치지 않게 원본 폭만큼
@@ -385,6 +386,9 @@ def retopologize(source_obj, collection, target_faces=8000, symmetry=True,
                     remove_fragments(work)   # 반쪽 출력에서 떨어져 나온 부스러기 패치를 걷어낸다
                     make_manifold(work)      # 미러 뒤 남은 구멍·겹친 면을 닫는다 (결과는 삼각형)
                     _repair_output(work)     # 그 삼각형을 다시 쿼드로 합친다
+            if polish > 0.0 and method == "QUADRIFLOW":
+                say("폴리시")
+                _polish(work, polish, plane_axes or (('X',) if symmetry else ()))
             pins = work.data.attributes.get(edge_line.PIN_ATTRIBUTE)
             if pins is not None:
                 work.data.attributes.remove(pins)   # 작업용 표식 — 결과 에셋에 남기지 않는다
@@ -1891,6 +1895,58 @@ def symmetry_error(obj, axis: str = 'X') -> float:
         mirrored[component] = -mirrored[component]
         worst = max(worst, tree.find(mirrored)[2])
     return worst
+
+
+POLISH_SHARP_DEGREES = 40.0   # 이면각(면 법선 사이)이 이보다 큰 엣지의 정점은 하드 엣지로 보고 폴리시에서 고정한다
+POLISH_MAX_ITERATIONS = 12
+POLISH_GROUP = "lp3d_polish"
+
+
+def _polish(obj, strength: float, plane_axes: tuple = ()) -> int:
+    """리토폴로지 결과의 찌글찌글한 면을 부피를 지키는 라플라시안으로 편다. 움직인 정점 수.
+
+    슈링크랩이 결과를 원본(셰이프 서버 메시)에 붙이면 원본의 잔요철을 그대로 받아 판 위가 울퉁불퉁하다(사용자 요청
+    2026-10-03, FST ForgePolish 처럼). 엣지 선 정점(PIN_ATTRIBUTE)·이면각이 큰 하드 엣지 정점·경계 정점은 고정하고
+    나머지만 편다. 대칭 결과는 대칭면 정점의 X 를 0 에 다시 묶는다. 텍스처는 뒤의 베이크가 원본에서 옮기므로 표면이
+    조금 들어가도 색은 맞는다(베이크 광선 거리 안)."""
+    import math as _math
+    strength = max(0.0, min(1.0, strength))
+    if strength <= 0.0:
+        return 0
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.normal_update()
+    pins = bm.verts.layers.int.get(edge_line.PIN_ATTRIBUTE)
+    sharp = _math.radians(POLISH_SHARP_DEGREES)
+    locked = set()
+    for edge in bm.edges:
+        if len(edge.link_faces) != 2:
+            locked.update(v.index for v in edge.verts)
+        elif edge.link_faces[0].normal.angle(edge.link_faces[1].normal, 0.0) > sharp:
+            locked.update(v.index for v in edge.verts)
+    if pins is not None:
+        locked.update(v.index for v in bm.verts if v[pins])
+    bm.free()
+    free = [i for i in range(len(obj.data.vertices)) if i not in locked]
+    if not free:
+        return 0
+    group = obj.vertex_groups.get(POLISH_GROUP) or obj.vertex_groups.new(name=POLISH_GROUP)
+    group.add(free, 1.0, 'REPLACE')
+    plane = {i: v.co.copy() for i, v in enumerate(obj.data.vertices) if plane_axes and abs(v.co.x) < 1e-6}
+    mod = obj.modifiers.new("LP3D_Polish", 'LAPLACIANSMOOTH')
+    mod.iterations = max(1, int(round(POLISH_MAX_ITERATIONS * strength)))
+    mod.lambda_factor = 0.5
+    mod.lambda_border = 0.0
+    mod.use_volume_preserve = True
+    mod.use_normalized = True
+    mod.vertex_group = group.name
+    with _override(obj):
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+    for index in plane:
+        obj.data.vertices[index].co.x = 0.0   # 미러 대칭을 지킨다
+    obj.vertex_groups.remove(obj.vertex_groups[POLISH_GROUP])
+    obj.data.update()
+    return len(free)
 
 
 def _decimate(obj, target_faces: int) -> None:

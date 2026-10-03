@@ -152,3 +152,48 @@ class SurfacePathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChainTests(unittest.TestCase):
+    def test_merge_corner_lines_into_a_closed_square(self):
+        # 사각형 외곽을 변 넷으로 나눠 그린 경우(모서리에서 끝점이 살짝 어긋남) — 한 닫힌 고리가 된다
+        sides = [("a", [(0, 0, 0), (1, 0, 0)]), ("b", [(1.01, 0, 0), (1, 1, 0)]),
+                 ("c", [(1, 1, 0), (0, 1, 0)]), ("d", [(0, 0.99, 0), (0, 0.01, 0)])]
+        chains = edge_line.merge_chains(sides, 0.05)
+        self.assertEqual(len(chains), 1)
+        name, points, closed = chains[0]
+        self.assertTrue(closed)
+        self.assertEqual(sorted(name.split("+")), ["a", "b", "c", "d"])
+        self.assertAlmostEqual(edge_line.length(points + [points[0]]), 4.0, delta=0.06)
+
+    def test_merge_open_chain_and_reversed_piece(self):
+        chains = edge_line.merge_chains([("a", [(0, 0, 0), (1, 0, 0)]), ("b", [(2, 0, 0), (1, 0, 0)])], 0.05)
+        self.assertEqual(len(chains), 1)
+        _name, points, closed = chains[0]
+        self.assertFalse(closed)
+        self.assertEqual({points[0], points[-1]}, {(0, 0, 0), (2, 0, 0)})
+
+    def test_t_junction_is_not_merged(self):
+        lines = [("a", [(0, 0, 0), (1, 0, 0)]), ("b", [(1, 0, 0), (2, 0, 0)]), ("c", [(1, 0, 0), (1, 1, 0)])]
+        self.assertEqual(len(edge_line.merge_chains(lines, 0.05)), 3)
+
+    def test_single_drawn_loop_is_closed(self):
+        loop = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0.01, 0)]
+        (_n, _p, closed), = edge_line.merge_chains([("loop", loop)], 0.05)
+        self.assertTrue(closed)
+
+    def test_edge_lines_marks_closed_and_repeats_first_point(self):
+        square = [("sq", [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0.02, 0)])]
+        (line,) = edge_line.edge_lines(square, 0.2)
+        self.assertTrue(line.closed)
+        self.assertEqual(line.points[0], line.points[-1])
+
+    def test_trim_closed_loop_rejoins_across_the_seam(self):
+        square = edge_line.edge_lines([("sq", [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0.02, 0)])], 0.1)
+        # 오른쪽 변 가운데만 잘라 낸다 — 이음매(원점)를 지나는 한 조각이 남아야 한다
+        pieces = edge_line.trim_lines(square, lambda p: not (p[0] > 0.9 and 0.4 < p[1] < 0.6))
+        self.assertEqual(len(pieces), 1)
+        self.assertFalse(pieces[0].closed)
+        self.assertGreater(edge_line.length(pieces[0].points), 3.5)
+        untouched = edge_line.trim_lines(square, lambda p: True)
+        self.assertTrue(untouched[0].closed)

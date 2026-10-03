@@ -12,6 +12,7 @@ import math
 
 import bpy
 from bpy.props import BoolProperty, FloatProperty, FloatVectorProperty, StringProperty
+from bpy.app.handlers import persistent
 from bpy_extras import view3d_utils
 from mathutils import Vector
 
@@ -135,7 +136,7 @@ def create_edge_guide(collection, source, points_world):
     guide = bpy.data.objects.new(EDGE_PREFIX, curve)
     collection.objects.link(guide)
     guide.matrix_world = source.matrix_world.copy()
-    guide.show_in_front = True
+    guide.show_in_front = False   # 앞뒤 구분은 깊이 오버레이(_draw_guides_depth)가 한다
     guide.hide_render = True
     guide.lp3d_ring_guide.is_edge = True
     _write_points(curve, [tuple(to_local @ Vector(p)) for p in points_world], cyclic=False)
@@ -156,7 +157,9 @@ def surface_segment(source, a_world, b_world, normal_a, normal_b) -> list:
     path = geometry.surface_path(_section_mesh(source), a, b, normal, tolerance)
     if path is None:
         path = (a, b)
-    # 단면은 복셀 프록시라 실제 표면에서 1cm 가까이 뜬다 — 리토폴로지는 결과를 원본 표면에 붙이므로 선도 원본 위에 둔다
+    # 단면은 복셀 프록시라 실제 표면에서 1cm 가까이 뜬다 — 리토폴로지는 결과를 원본 표면에 붙이므로 선도 원본 위에 둔다.
+    # (평균 법선 방향 레이 투영은 골을 지나는 선을 다른 면에 붙여 오히려 선을 망쳤다 — 실측 허벅지 선 커버리지 0.94 → 0.
+    # 원본 요철로 생긴 작은 계단은 리토폴로지가 선을 쓸 때 편다: edge_line.smooth)
     projected = []
     for point in path[1:]:
         found, location, _normal, _index = source.closest_point_on_mesh(Vector(point))
@@ -320,7 +323,7 @@ def _new_guide(collection, source, section, center, axis, hit, radius, bounds=()
     guide = bpy.data.objects.new(GUIDE_PREFIX, curve)
     collection.objects.link(guide)
     guide.matrix_world = source.matrix_world.copy()
-    guide.show_in_front = True
+    guide.show_in_front = False   # 앞뒤 구분은 깊이 오버레이(_draw_guides_depth)가 한다
     guide.hide_render = True
     ring = guide.lp3d_ring_guide
     _refreshing = True   # offset 대입도 update 콜백을 부르므로 초기화 동안은 막는다
@@ -1061,6 +1064,84 @@ def draw_edge_guides(layout, context, collection) -> None:
         box.label(text=f"외 {len(guides) - LIST_LIMIT}개")
 
 
+GUIDE_COLORS = {   # (앞 — 보이는 부분, 뒤 — 몸에 가려진 부분)
+    "edge": ((0.0, 0.85, 1.0, 1.0), (0.35, 0.38, 0.45, 0.55)),
+    "ring": ((1.0, 0.75, 0.0, 1.0), (0.45, 0.4, 0.3, 0.55)),
+}
+DEPTH_LIFT_RATIO = 0.004   # 표면에 붙은 선이 표면과 깊이 다툼을 하지 않게 시점 쪽으로 이만큼(뷰 거리 비율) 띄운다
+_depth_handle = None
+
+
+def _guide_segments(obj, lift, eye, toward, perspective):
+    points = []
+    for spline in obj.data.splines:
+        pts = [obj.matrix_world @ Vector(p.co[:3]) for p in spline.points]
+        if len(pts) < 2:
+            continue
+        lifted = [p + ((eye - p).normalized() if perspective else toward) * lift for p in pts]
+        count = len(lifted) if spline.use_cyclic_u else len(lifted) - 1
+        for i in range(count):
+            points.append(tuple(lifted[i]))
+            points.append(tuple(lifted[(i + 1) % len(lifted)]))
+    return points
+
+
+def _draw_guides_depth():
+    """링·엣지 선 가이드를 깊이로 나눠 그린다 — 몸에 가려진 뒤쪽은 흐리게, 보이는 앞쪽은 밝게.
+
+    가이드가 '항상 앞에 그리기'라 몸 뒤쪽 선도 앞쪽과 같은 색으로 겹쳐 보여 헷갈렸다(사용자 요청 2026-10-03)."""
+    try:
+        context = bpy.context
+        region, rv3d = context.region, context.region_data
+        if region is None or rv3d is None or context.view_layer is None:
+            return
+        guides = [o for o in context.view_layer.objects
+                  if o.type == 'CURVE' and o.visible_get() and (o.lp3d_ring_guide.is_edge or o.lp3d_ring_guide.is_ring)]
+        if not guides:
+            return
+        import gpu
+        from gpu_extras.batch import batch_for_shader
+
+        view = rv3d.view_matrix.inverted()
+        eye = view.translation
+        toward = (view.to_3x3() @ Vector((0.0, 0.0, 1.0))).normalized()   # 직교 뷰의 시점 쪽 방향
+        lift = max(rv3d.view_distance * DEPTH_LIFT_RATIO, 1e-4)
+        batches = {"edge": [], "ring": []}
+        for guide in guides:
+            kind = "edge" if guide.lp3d_ring_guide.is_edge else "ring"
+            batches[kind].extend(_guide_segments(guide, lift, eye, toward, rv3d.is_perspective))
+        shader = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
+        shader.uniform_float("viewportSize", (region.width, region.height))
+        gpu.state.blend_set('ALPHA')
+        gpu.state.depth_mask_set(False)
+        for kind, points in batches.items():
+            if not points:
+                continue
+            batch = batch_for_shader(shader, 'LINES', {"pos": points})
+            front, back = GUIDE_COLORS[kind]
+            gpu.state.depth_test_set('GREATER')
+            shader.uniform_float("lineWidth", 1.0)
+            shader.uniform_float("color", back)
+            batch.draw(shader)
+            gpu.state.depth_test_set('LESS_EQUAL')
+            shader.uniform_float("lineWidth", 3.0)
+            shader.uniform_float("color", front)
+            batch.draw(shader)
+        gpu.state.depth_test_set('NONE')
+        gpu.state.blend_set('NONE')
+    except ReferenceError:
+        pass
+
+
+@persistent
+def _guides_not_in_front(*_args):
+    """예전 파일의 가이드는 '항상 앞에 그리기'라 뒤쪽 선이 앞쪽과 같은 검은 선으로 덮인다 — 끈다."""
+    for obj in bpy.data.objects:
+        if obj.type == 'CURVE' and (obj.lp3d_ring_guide.is_edge or obj.lp3d_ring_guide.is_ring) and obj.show_in_front:
+            obj.show_in_front = False
+    return None
+
+
 _CLASSES = (
     LP3DRingGuideProps,
     LP3D_OT_ring_guide_add, LP3D_OT_ring_guide_knife, LP3D_OT_ring_guide_check,
@@ -1070,13 +1151,24 @@ _CLASSES = (
 
 
 def register():
+    global _depth_handle
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Object.lp3d_ring_guide = bpy.props.PointerProperty(type=LP3DRingGuideProps)
+    _depth_handle = bpy.types.SpaceView3D.draw_handler_add(_draw_guides_depth, (), 'WINDOW', 'POST_VIEW')
+    if _guides_not_in_front not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_guides_not_in_front)
+    bpy.app.timers.register(_guides_not_in_front, first_interval=0.1)
 
 
 def unregister():
+    global _depth_handle
     _proxy_cache.clear()
+    if _depth_handle is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_depth_handle, 'WINDOW')
+        _depth_handle = None
+    if _guides_not_in_front in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_guides_not_in_front)
     if hasattr(bpy.types.Object, "lp3d_ring_guide"):
         del bpy.types.Object.lp3d_ring_guide
     for cls in reversed(_CLASSES):

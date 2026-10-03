@@ -185,6 +185,12 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
         default=True,
         update=_persist_cb,
     )
+    retopo_polish: FloatProperty(
+        name="폴리시",
+        description="리토폴로지 결과의 찌글찌글한 면을 부피를 지키며 편다 — 엣지 선·날카로운 모서리·경계는 고정. 0 이면 끈다",
+        default=0.5, min=0.0, max=1.0, subtype='FACTOR',
+        update=_persist_cb,
+    )
     multiview_preview_open: BoolProperty(
         name="멀티뷰 미리보기",
         description="패널에 멀티뷰(3면도) 시트 썸네일을 펼쳐 보여준다",

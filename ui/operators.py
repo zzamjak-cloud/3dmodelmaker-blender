@@ -507,6 +507,7 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
         prefs = preferences.get_prefs()
         props = context.scene.lp3d
         target_faces, symmetry = int(props.retopo_faces), bool(props.retopo_symmetry)
+        polish = float(getattr(props, "retopo_polish", 0.0))
         scene_name, uid = context.scene.name, job.uid
         collection_name, source_name = job.collection_name, source.name
         key = f"{uid}:retopo"
@@ -536,7 +537,7 @@ class LP3D_OT_job_retopo(bpy.types.Operator):
                     obj, collection,
                     target_faces=target_faces, symmetry=symmetry,
                     texture_size=int(prefs.shapegen_texture_size),
-                    normal_map=True, progress=_say, ring_guides=guides, edge_guides=lines)
+                    normal_map=True, progress=_say, ring_guides=guides, edge_guides=lines, polish=polish)
                 notes = result['notes']
                 rings = f" · 링 {result['rings']}개 접합" if guides else ""
                 if lines:

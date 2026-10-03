@@ -330,6 +330,7 @@ class LP3D_PT_output(bpy.types.Panel):
         row = box.row(align=True)
         row.prop(props, "retopo_faces")
         row.prop(props, "retopo_symmetry", toggle=True)
+        box.prop(props, "retopo_polish", slider=True)
         source = quadretopo.find_retopo_target(coll)
         mismatch = source.get(quadretopo.MIRROR_MISMATCH_KEY) if source is not None else None
         if mismatch is not None and mismatch > quadretopo.MIRROR_MISMATCH_MAX:

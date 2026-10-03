@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from math import sqrt
 
 REACH_RATIO = 0.75          # 출력 틈 경계 정점이 선에서 떠도 되는 거리 = 추정 출력 엣지 × 이 비율 (QuadriFlow 경계 정점은 엣지 절반쯤 뜬다)
+JOIN_RATIO = 0.5            # 선 끝점이 추정 출력 엣지 × 이 비율 안에서 맞닿으면 한 사슬로 잇는다
 RESAMPLE_RATIO = 0.25       # 선을 추정 출력 엣지의 이 비율 간격으로 다시 찍는다 — 자르기·거리 계산의 해상도
 MIN_LENGTH_EDGES = 2.0      # 추정 출력 엣지 이 개수보다 짧은 선(조각)은 와이어 하나도 못 정한다
 PLANE_MARGIN_EDGES = 2.0    # 반쪽 리토폴로지에서 틈은 대칭면에서 출력 엣지 이만큼 떨어진 곳까지만 — 틈이 대칭면 경계에 닿으면 반쪽 루프가 깨진다
@@ -50,9 +51,10 @@ CAP_REACH_RATIO = 0.5       # 정점이 모두 선에서 출력 엣지 × 이 �
 @dataclass(frozen=True)
 class EdgeLine:
     name: str
-    points: tuple            # 다시 찍은 로컬 좌표 점 열 (열린 선)
+    points: tuple            # 다시 찍은 로컬 좌표 점 열. 닫힌 선은 마지막 점이 첫 점과 같다
     reach: float             # 출력 틈 경계 정점 허용 거리
     edge: float              # 추정 출력 엣지 길이
+    closed: bool = False     # 판 외곽처럼 한 바퀴 도는 선
 
 
 # --- 순수 계산 -------------------------------------------------------------------
@@ -119,16 +121,74 @@ def closest(points, point):
 
 
 def edge_lines(guides, edge: float) -> tuple:
-    """(이름, 로컬 점 열) 가이드들을 EdgeLine 으로. 너무 짧은 선은 뺀다."""
+    """(이름, 로컬 점 열) 가이드들을 EdgeLine 으로. 끝점이 맞닿은 선은 사슬·닫힌 고리로 합친다(merge_chains).
+    너무 짧은 선은 뺀다. 선을 3D 로 평활하지 않는다 — 골을 지나는 선이 표면에서 떠 커버리지가 0.9 → 0.3 으로 떨어졌다."""
     lines = []
-    for name, points in guides:
+    for name, points, closed in merge_chains(guides, edge * JOIN_RATIO):
         if len(points) < 2:
             continue
+        if closed:
+            points = list(points) + [points[0]]
         sampled = resample(points, edge * RESAMPLE_RATIO)
         if length(sampled) < edge * MIN_LENGTH_EDGES:
             continue
-        lines.append(EdgeLine(name, sampled, edge * REACH_RATIO, edge))
+        lines.append(EdgeLine(name, sampled, edge * REACH_RATIO, edge, closed))
     return tuple(lines)
+
+
+def merge_chains(guides, tolerance: float) -> list:
+    """끝점이 tolerance 안에서 맞닿은 선들을 하나로 잇는다. [(이름, 점 열, 닫힘)].
+
+    판 외곽을 클릭으로 그리면 한 변씩 선이 나뉘고 모서리에서 끝점이 맞닿는다(실측 사용자 21선). 따로 다루면 모서리마다
+    틈 끝(팁)이 생겨 용접이 깨졌다. 한 점에 끝이 정확히 둘 모이는 곳만 잇는다 — 셋 이상(T·X 갈림)은 그대로 둔다.
+    한 바퀴 돌아 처음 선의 시작에 닿으면 닫힌 고리다."""
+    items = [(name, [tuple(p) for p in points]) for name, points in guides if len(points) >= 2]
+    ends = [(i, side) for i in range(len(items)) for side in (0, 1)]
+
+    def at(end):
+        i, side = end
+        return items[i][1][0] if side == 0 else items[i][1][-1]
+
+    partner = {}
+    for end in ends:
+        near = [other for other in ends if other != end and _distance(at(end), at(other)) <= tolerance]
+        if len(near) == 1:
+            other = near[0]
+            mutual = [e for e in ends if e != other and _distance(at(other), at(e)) <= tolerance]
+            if mutual == [end]:
+                partner[end] = other
+    result, used = [], set()
+    for start in range(len(items)):
+        if start in used:
+            continue
+        # 사슬의 한쪽 끝까지 거슬러 올라간다 (닫힌 고리면 시작으로 돌아온다)
+        i, side = start, 0
+        visited = {start}
+        while (i, side) in partner:
+            j, other_side = partner[(i, side)]
+            if j in visited:
+                break
+            visited.add(j)
+            i, side = j, 1 - other_side
+        head = (i, side)
+        chain_points, names, closed = [], [], False
+        i, enter = head
+        while True:
+            used.add(i)
+            names.append(items[i][0])
+            pts = items[i][1] if enter == 0 else items[i][1][::-1]
+            chain_points.extend(pts if not chain_points else pts[1:])
+            exit_end = (i, 1 - enter)
+            nxt = partner.get(exit_end)
+            if nxt is None:
+                break
+            j, side = nxt
+            if j in used:
+                closed = (j, side) == head
+                break
+            i, enter = j, side
+        result.append(("+".join(names), chain_points, closed))
+    return result
 
 
 def reflect_lines(lines, component: int = 0) -> tuple:
@@ -137,7 +197,8 @@ def reflect_lines(lines, component: int = 0) -> tuple:
         q = list(p)
         q[component] = -q[component]
         return tuple(q)
-    return tuple(EdgeLine(line.name, tuple(flip(p) for p in line.points), line.reach, line.edge) for line in lines)
+    return tuple(EdgeLine(line.name, tuple(flip(p) for p in line.points), line.reach, line.edge, line.closed)
+                 for line in lines)
 
 
 def trim_lines(lines, keep) -> tuple:
@@ -153,6 +214,12 @@ def trim_lines(lines, keep) -> tuple:
                 current = []
         if current:
             pieces.append(current)
+        if line.closed and len(pieces) == 1 and len(pieces[0]) == len(line.points):
+            result.append(line)   # 잘린 데 없는 닫힌 고리는 그대로
+            continue
+        if line.closed and len(pieces) >= 2 and keep(line.points[0]) and keep(line.points[-1]):
+            # 닫힌 고리가 잘리면 마지막 조각과 첫 조각은 이음매를 사이에 둔 한 조각이다
+            pieces = [pieces[-1] + pieces[0][1:]] + pieces[1:-1]
         pieces = [piece for piece in pieces if len(piece) >= 2 and length(piece) >= line.edge * MIN_LENGTH_EDGES]
         for index, piece in enumerate(pieces):
             name = line.name if len(pieces) == 1 else f"{line.name}#{index + 1}"
@@ -276,6 +343,21 @@ def cut_slits(bm, lines) -> tuple:
         if len(corridor) < 2:
             skipped.append(f"엣지 선 '{line.name}' 근처에 입력 메시 정점이 없어 쓰지 않았습니다")
             continue
+        if line.closed:
+            path = _closed_path(line, corridor, coords, radius)
+            if path is None:
+                skipped.append(f"엣지 선 '{line.name}' (닫힌 고리)을 따라 입력 메시 경로를 찾지 못했습니다")
+                continue
+            for vertex in path:
+                _snap_to_line(vertex, line)
+            used.update(path)
+            for vertex in path:
+                used.update(edge.other_vert(vertex) for edge in vertex.link_edges)
+            ring = path + [path[0]]
+            split_edges.extend(bm.edges.get((ring[i], ring[i + 1])) for i in range(len(path)))
+            opened.append((line, [tuple(v.co) for v in path]))   # 팁이 없다 — 모든 정점이 둘로 갈린다
+            cut.append(line)
+            continue
         start = min(corridor, key=lambda v: _distance(tuple(v.co), line.points[0]))
         end = min(corridor, key=lambda v: _distance(tuple(v.co), line.points[-1]))
         if start is end:
@@ -300,6 +382,36 @@ def cut_slits(bm, lines) -> tuple:
         bm.normal_update()   # 조밀화·poke·정점 옮김 뒤 법선이 낡았거나 0 이면 벌릴 방향을 못 잡는다
         _open_slits(bm, opened)
     return tuple(cut), tuple(skipped)
+
+
+def _closed_path(line, corridor, coords, radius):
+    """닫힌 고리 선을 따라가는 입력 메시 정점 고리(첫 정점 반복 없음). 두 반쪽을 따로 찾아 잇는다. 없으면 None."""
+    half = len(line.points) // 2
+    first = line.points[:half + 1]
+    second = line.points[half:]
+    d_first = _distances(coords, first)
+    d_second = _distances(coords, second)
+    near_first = {v for v in corridor if d_first[v.index] <= radius}
+    near_second = {v for v in corridor if d_second[v.index] <= radius}
+    if len(near_first) < 2 or len(near_second) < 2:
+        return None
+    start = min(near_first, key=lambda v: _distance(tuple(v.co), first[0]))
+    middle = min(near_first, key=lambda v: _distance(tuple(v.co), first[-1]))
+    if start is middle:
+        return None
+    one = _corridor_path(start, middle, near_first, d_first, radius)
+    if one is None:
+        return None
+    blocked = set(one[1:-1])
+    two = _corridor_path(middle, start, (near_second | {start, middle}) - blocked, d_second, radius)
+    if two is None or len(one) + len(two) < 5:
+        return None
+    cycle = one + two[1:-1]
+    if len(set(cycle)) != len(cycle):
+        return None
+    if length([tuple(v.co) for v in cycle + [cycle[0]]]) > length(line.points) * PATH_DETOUR_MAX + 2.0 * radius:
+        return None
+    return cycle
 
 
 def _open_slits(bm, opened) -> None:
@@ -449,6 +561,14 @@ def _weld_line(bm, line, pair_steps, layer, failed) -> bool:
     import bmesh
     from mathutils import Vector
 
+    if line.closed:
+        if _weld_closed(bm, line, pair_steps, layer):
+            snap_chain(bm, line, layer)
+            return True
+        if snap_chain(bm, line, layer):
+            return True
+        failed.append(f"엣지 선 '{line.name}' (닫힌 고리)의 틈 안·밖 루프를 찾지 못했습니다")
+        return False
     any_welded = False
     for _attempt in range(SLIT_LOOPS_MAX):
         loop = _slit_loop(bm, line)
@@ -490,12 +610,51 @@ def _weld_line(bm, line, pair_steps, layer, failed) -> bool:
     return any_welded
 
 
+def _weld_closed(bm, line, pair_steps, layer) -> bool:
+    """닫힌 고리 틈의 안쪽·바깥쪽 경계 루프를 닫힌 DP 짝으로 용접한다(링 접합과 같은 짝). 둘을 못 찾으면 거짓."""
+    import bmesh
+    from mathutils import Vector
+
+    loops = []
+    for loop in _boundary_loops(bm):
+        vertices = {v for e in loop for v in e.verts}
+        near = sum(1 for v in vertices if closest(line.points, tuple(v.co))[0] <= line.reach)
+        if near >= len(vertices) * LOOP_NEAR_RATIO and near >= 3:
+            loops.append((len(loop), loop))
+    if len(loops) < 2:
+        return False
+    loops.sort(key=lambda item: -item[0])
+    a_verts, b_verts = _walk(loops[0][1]), _walk(loops[1][1])
+    if a_verts is None or b_verts is None:
+        return False
+    # 두 루프가 고리 둘레를 거의 다 덮어야 같은 고리의 안·밖이다
+    total = length(line.points)
+    for verts in (a_verts, b_verts):
+        if length([tuple(v.co) for v in verts] + [tuple(verts[0].co)]) < total * 0.6:
+            return False
+    pairs = pair_steps([tuple(v.co) for v in a_verts], [tuple(v.co) for v in b_verts], True)
+    keep = set(a_verts)
+    targetmap = {b_verts[j]: a_verts[i] for j, i in pairs.items() if b_verts[j] not in keep}
+    if not targetmap:
+        return False
+    for vertex in a_verts:
+        vertex.co = Vector(closest(line.points, tuple(vertex.co))[2])
+        vertex[layer] = 1
+    bmesh.ops.weld_verts(bm, targetmap=targetmap)
+    return True
+
+
 def snap_chain(bm, line, layer=None) -> bool:
     """출력 메시에서 선을 따라가는 엣지 사슬을 찾아 선 위로 옮긴다. 찾으면 참.
 
     틈이 짧으면 QuadriFlow 가 일부를 닫아(캡을 접어) 용접할 경계가 남지 않지만, 출력 엣지는 틈을 따라 이미 놓여
     있다(실측 메카닉 허벅지: 경계 없음, 선 근처 엣지 커버리지 0.6~0.9). 선 근처 통로에서 선과 나란한 엣지를 우선하는
-    최단 경로를 찾아 그 정점을 선 위로 옮기고 표식을 남긴다."""
+    최단 경로를 찾아 그 정점을 선 위로 옮기고 표식을 남긴다. 닫힌 고리는 두 반으로 나눠 편다."""
+    if line.closed:
+        half = len(line.points) // 2
+        parts = (line.points[:half + 1], line.points[half:])
+        done = [snap_chain(bm, EdgeLine(line.name, part, line.reach, line.edge), layer) for part in parts]
+        return any(done)
     bm.verts.ensure_lookup_table()
     bm.verts.index_update()
     distances = _distances([tuple(v.co) for v in bm.verts], line.points)

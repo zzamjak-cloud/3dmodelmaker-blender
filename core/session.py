@@ -971,10 +971,13 @@ class GenerationSession:
                          f"시각 검토 턴 {turn}/{self.review_turns_total}: 렌더 보고 결함 수정 요청"
                          + (f" (자동 점검: {summary})" if summary else ""),
                          phase='GEN')
-        images = [render] + ([self.ref_image] if self.ref_image else [])
+        # 시트를 빼면 검토가 결함만 보고 시트와의 형태 차이는 못 잡는다
+        sheet = self.multiview if self.multiview and self.multiview != self.ref_image else None
+        images = [render] + [p for p in (sheet, self.ref_image) if p]
         self._dispatch(prompts.build_object_review_prompt(
             self.request, os.path.basename(render), code, turn, self.review_turns_total,
-            ref_image=self._ref_name(), diagnostics=diagnostics), images=images)
+            ref_image=self._ref_name(), diagnostics=diagnostics,
+            multiview=os.path.basename(sheet) if sheet else None), images=images)
         return True
 
     def _dispatch_compare(self, code: str) -> bool:

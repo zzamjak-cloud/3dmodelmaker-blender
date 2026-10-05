@@ -5,6 +5,7 @@ import os
 from .base import AgentBackend, AgentReply
 
 _LAST_MSG = "codex_last_message.txt"
+REASONING_EFFORT = "high"  # 모델을 명시할 때만 함께 지정한다
 
 
 class CodexBackend(AgentBackend):
@@ -24,13 +25,26 @@ class CodexBackend(AgentBackend):
             "-o", os.path.join(self.workdir, _LAST_MSG),
         ]
 
+    def _model_flags(self):
+        # -m 을 resume에도 붙인다 — 빼면 ~/.codex/config.toml 기본 모델로 검토 턴이 돈다.
+        # 추론 강도도 사용자 설정(medium 등)에 맡기면 시트 비율을 재지 않고 일반형으로 찍는다
+        if not self.model:
+            return []
+        return ["-m", self.model, "-c", f'model_reasoning_effort="{REASONING_EFFORT}"']
+
+    @staticmethod
+    def _image_flags(images):
+        # -i 는 값을 여러 개 받는 옵션이라 바로 뒤의 "-"(stdin 프롬프트)까지 이미지로 먹는다 —
+        # 다른 플래그 앞에 둬서 다음 플래그가 값 목록을 끊게 한다
+        flags = []
+        for img in images or []:
+            flags += ["-i", img]
+        return flags
+
     def build_initial_command(self, user_prompt: str, images: list = None) -> list:
         # 프롬프트 인자는 "-" — codex exec가 stdin에서 읽는다 (.cmd 셸림 줄 잘림 회피)
-        # 모델 지정은 초기 세션에만 적용 (resume 서브커맨드는 -m 미지원, 세션 모델 유지)
-        model = ["-m", self.model] if self.model else []
-        cmd = [self.exe, "exec", *model, *self._common_flags()]
-        for img in images or []:
-            cmd += ["-i", img]  # 참조 이미지를 첫 요청에 첨부
+        cmd = [self.exe, "exec", *self._image_flags(images), *self._model_flags(),
+               *self._common_flags()]
         cmd.append("-")
         return cmd
 
@@ -38,11 +52,10 @@ class CodexBackend(AgentBackend):
         # resume 서브커맨드는 -s/--cd를 지원하지 않음 (cwd는 subprocess의 workdir 사용)
         cmd = [
             self.exe, "exec", "resume", session_id,
+            *self._image_flags(images), *self._model_flags(),
             "--json", "--skip-git-repo-check",
             "-o", os.path.join(self.workdir, _LAST_MSG),
         ]
-        for img in images or []:
-            cmd += ["-i", img]  # codex는 네이티브 이미지 첨부 지원
         cmd.append("-")  # 프롬프트는 stdin
         return cmd
 

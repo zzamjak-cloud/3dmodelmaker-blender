@@ -183,3 +183,17 @@ class TestObjectReviewPrompt(unittest.TestCase):
     def test_ref_image_only_when_given(self):
         self.assertNotIn("참조 이미지", prompts.build_object_review_prompt("a", "r.png", "", 1, 1))
         self.assertIn("ref.png", prompts.build_object_review_prompt("a", "r.png", "", 1, 1, ref_image="ref.png"))
+
+    def test_object_review_compares_against_sheet(self):
+        p = prompts.build_object_review_prompt("로봇", "r.png", "", 1, 1, multiview="multiview.png")
+        self.assertIn("multiview.png", p)
+        self.assertIn("시트 대조", p)
+        self.assertNotIn("갈아엎지 마라", p)
+        # 시트가 없으면 기존처럼 결함만 고친다
+        self.assertIn("갈아엎지 마라", prompts.build_object_review_prompt("로봇", "r.png", "", 1, 1))
+
+    def test_object_multiview_note_requires_measurement(self):
+        p = prompts.build_initial_prompt("로봇", multiview="multiview.png")
+        self.assertIn("폭:깊이:높이", p)
+        self.assertIn("hex", p)
+        self.assertIn("시트가 이긴다", p)

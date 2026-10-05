@@ -41,14 +41,26 @@ class TestCodexCommandModelContract(unittest.TestCase):
 
         self.assertNotIn("-m", backend.build_initial_command("ignored"))
 
-    def test_resume_does_not_override_session_model(self):
+    def test_resume_keeps_explicit_model(self):
         backend = CodexBackend("codex", self.workdir)
         backend.model = "gpt-6-astra"
 
         command = backend.build_resume_command("thread-1", "ignored", [])
 
-        self.assertNotIn("-m", command)
+        self.assertEqual(command[command.index("-m") + 1], "gpt-6-astra")
+        self.assertIn('model_reasoning_effort="high"', command)
         self.assertIn("thread-1", command)
+
+    def test_stdin_dash_not_consumed_by_image_flag(self):
+        backend = CodexBackend("codex", self.workdir)
+        backend.model = "gpt-6-astra"
+
+        for command in (backend.build_initial_command("x", ["a.png", "b.png"]),
+                        backend.build_resume_command("t", "x", ["a.png"])):
+            self.assertEqual(command[-1], "-")
+            # 마지막 이미지 값 바로 뒤는 다른 플래그여야 한다
+            last = max(i for i, v in enumerate(command) if v == "-i")
+            self.assertTrue(command[last + 2].startswith("-") and command[last + 2] != "-")
 
 
 if __name__ == "__main__":

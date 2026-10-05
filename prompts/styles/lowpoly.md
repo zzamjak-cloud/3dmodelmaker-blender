@@ -9,18 +9,18 @@
 3. **데포르메 변형기를 적극 사용하라**: `lp.bend`(구부림), `lp.bulge`(배불림/잘록), `lp.shear`(기울임), `lp.stretch_at`(특정 높이만 과장), `lp.taper`(끝 좁힘), `lp.jitter`(유기물 표면). 프리미티브를 그대로 두지 말고 변형기로 실루엣에 성격을 부여하라.
 4. **정량 과장 (데포르메의 공식)**: 사실 비율은 심심하다. 모델의 정체성을 만드는 특징 부위(지붕·굴뚝·바퀴·손잡이·문·잎덩어리)는 사실 대비 **130~160%**로 키우고, 지지 부위(벽·다리·기둥)는 80~90%로 줄여 대비를 만들어라. `lp.stretch_at`/`lp.bulge`/`lp.taper`가 이 용도의 도구다.
 5. **곡률 대비**: 모델당 최소 1개는 곡률 실루엣(`lathe smooth`/`bulge`/`bend`)을 넣어라. 전부 직선이면 미완성으로 보이고, 직선 파트 옆의 곡선 파트가 서로를 돋보이게 한다.
-6. **본체 단일 box 금지**: 본체를 box 하나로 만들지 마라 — `prism`(기울어진 벽·박공 실루엣)·`cone`(절두체)·`taper`·`lathe`로 실루엣에 경사와 성격을 부여하라. box는 작은 보조 디테일에만 써라.
-7. **색은 3~6색, 같은 재질도 2톤**: 단색 덩어리는 밋밋하다. 같은 재질이라도 밝은 톤/어두운 톤 2가지로 나눠 입체감을 줘라 (예: 지붕 윗면은 밝게, 옆면은 어둡게 / 나무 잎덩어리마다 명도 차이). 캐주얼 톤: 채도 높고 밝게.
+6. **로우폴리 = 최소 면, 박스 조립이 아니다**: 로우폴리는 "실루엣의 꺾임마다 면 하나"로 형태를 읽히게 하는 것이다. 본체를 box 하나로, 또는 box 여러 개를 쌓아 만들지 마라 — `silhouette`(정면·측면·평면 윤곽 교차)·`loft`(단면 이어 붙이기)·`prism`·`lathe`로 **한 덩어리 껍질**을 만들고, 오목한 곳은 `cut`으로 파라. box는 작은 보조 디테일에만 써라.
+7. **색은 3~6색, 재질·부위마다 고유색 하나**: 같은 재질을 밝은 톤/어두운 톤으로 나눠 명암을 칠하지 마라 — 명암은 플랫 셰이딩과 조명이 만든다. 색은 재질이나 부위가 실제로 다를 때만 나눠라(차체 빨강·창 유리·고무 검정, 여우 주황·가슴털 크림). 무늬·얼룩은 `set_color(inside=영역)`, 높이 경계(양말·밑동)는 `below=/above=`로 칠하라. 캐주얼 톤: 채도 높고 밝게.
 
 ## 좋은 예시 (참고 패턴)
 
 ```python
-# 낡은 나무 배럴: lathe 곡률 실루엣 + 디테일 밴드 + 2톤 배색
+# 낡은 나무 배럴: lathe 곡률 실루엣 + 디테일 밴드 + 재질별 배색
 body = lp.lathe("Body", profile=[(0.28, 0.0), (0.36, 0.2), (0.40, 0.45),
                                  (0.36, 0.7), (0.28, 0.9)], segments=10)
-lp.set_color(body, (0.55, 0.36, 0.18))          # 나무 밝은 톤
+lp.set_color(body, (0.55, 0.36, 0.18))          # 나무
 lid = lp.cylinder("Lid", radius=0.26, depth=0.04, segments=10, location=(0, 0, 0.9))
-lp.set_color(lid, (0.42, 0.27, 0.13))            # 나무 어두운 톤 (2톤)
+lp.set_color(lid, (0.55, 0.36, 0.18))            # 같은 나무 — 명암을 색으로 칠하지 않는다
 bands = []
 for z in (0.18, 0.72):                            # 금속 밴드 2개
     band = lp.lathe(f"Band{z}", profile=[(0.375, z - 0.03), (0.395, z), (0.375, z + 0.03)],
@@ -31,24 +31,46 @@ barrel = lp.join([body, lid, *bands], name="Barrel")
 ```
 
 ```python
-# 데포르메 오두막: prism 실루엣(기울어진 벽) + 140% 과장 지붕 + 곡률 굴뚝 (질량 위계: 벽>지붕>굴뚝·문)
-body = lp.prism("Body", outline=[(-0.9, 0.0), (0.9, 0.0), (0.72, 1.5), (-0.72, 1.5)], depth=1.5)
-lp.set_color(body, (0.93, 0.87, 0.72))                # 벽 밝은 톤
-roof = lp.prism("Roof", outline=[(-1.25, 1.35), (1.25, 1.35), (0.0, 2.5)], depth=2.0)  # 벽보다 40% 넓게 과장
-lp.set_color(roof, (0.85, 0.35, 0.30))
-chimney = lp.lathe("Chimney", profile=[(0.16, 1.8), (0.12, 2.4), (0.20, 2.55), (0.20, 2.75)],
-                   segments=8, smooth=1, location=(0.45, 0.35, 0))  # 지붕에 파묻어 배치(은면은 자동 삭제)
-lp.set_color(chimney, (0.55, 0.50, 0.50))
-door = lp.box("Door", size=(0.42, 0.08, 0.72), location=(0, -0.77, 0.36))  # 벽에 0.02m 파묻힘
-lp.set_color(door, (0.48, 0.32, 0.20))
-hut = lp.join([body, roof, chimney, door], name="Hut")
+# 데포르메 자동차: silhouette 단일 본체 + cut 휠 아치 + cut(depth, frame) 창 — 틀·유리가 한 윤곽에서 나와 어긋나지 않음
+body = lp.silhouette("Body",
+    front=[(-0.8, 0.15), (0.8, 0.15), (0.82, 0.65), (0.6, 1.3), (-0.6, 1.3), (-0.82, 0.65)],
+    side=[(-1.7, 0.2), (1.7, 0.2), (1.75, 0.7), (1.35, 0.8), (1.0, 1.3), (-0.3, 1.3),
+          (-0.85, 0.78), (-1.75, 0.68)],                 # -y가 앞: 낮은 보닛 → 경사 앞유리 → 짧은 트렁크
+    top=[(-0.7, -1.75), (0.7, -1.75), (0.82, -1.3), (0.82, 1.4), (0.72, 1.75), (-0.72, 1.75),
+         (-0.82, 1.4), (-0.82, -1.3)])                   # 위에서 본 앞뒤 모서리 깎임
+lp.set_color(body, (0.85, 0.25, 0.22))                   # 색은 cut 전에
+for y in (-1.05, 1.05):                                  # 휠 아치: 차체를 관통하는 원기둥으로 파냄
+    arch = lp.cylinder(f"Arch{y}", radius=0.4, depth=2.0, segments=10,
+                       location=(0, y, 0.3), rotation=(0, 1.5708, 0))
+    lp.set_color(arch, (0.15, 0.13, 0.13))
+    lp.cut(body, arch)
+glass = lp.prism("Glass", outline=[(-0.72, 0.84), (0.95, 0.84), (0.88, 1.2), (-0.2, 1.2)],
+                 depth=2.0, axis='X')                    # 옆창: 양쪽 옆면을 모두 관통하는 커터 하나
+lp.set_color(glass, (0.55, 0.75, 0.85))
+lp.cut(body, glass, depth=0.04, frame=0.04, frame_color=(0.12, 0.12, 0.14))  # 경사진 옆면을 따라 틀+유리
+shield = lp.prism("Shield", outline=[(-0.6, 0.8), (-0.25, 1.15), (-0.45, 1.3), (-0.8, 0.9)],
+                  depth=1.3, axis='X')                   # 앞유리: 측면에서 본 경사선을 안팎으로 걸치는 띠
+lp.set_color(shield, (0.55, 0.75, 0.85))
+lp.cut(body, shield, depth=0.04, frame=0.05, frame_color=(0.12, 0.12, 0.14))
+wheel = lp.cylinder("WheelL", radius=0.34, depth=0.24, segments=10,
+                    location=(0.72, -1.05, 0.34), rotation=(0, 1.5708, 0))
+lp.set_color(wheel, (0.18, 0.17, 0.17))
+rear = lp.cylinder("WheelRL", radius=0.34, depth=0.24, segments=10,
+                   location=(0.72, 1.05, 0.34), rotation=(0, 1.5708, 0))
+lp.set_color(rear, (0.18, 0.17, 0.17))
+lamp = lp.cylinder("LampL", radius=0.12, depth=0.1, segments=8,
+                   location=(0.52, -1.74, 0.6), rotation=(1.5708, 0, 0))
+lp.set_color(lamp, (0.98, 0.92, 0.6))
+half = lp.join([wheel, rear, lamp], name="SideParts")
+lp.mirror_x(half)                                        # 부착물은 반쪽만 만들고 대칭
+car = lp.join([body, half], name="Car")
 ```
 
 ```python
-# 폭격으로 부서진 돌담: 계단형 파단면 + 그을림 파트 분할 + 잔해 쌓기 (공통 규칙 12의 코드 패턴)
+# 폭격으로 부서진 돌담: 계단형 파단면 + 그을림 파트 분할 + 잔해 쌓기 (공통 규칙 13의 코드 패턴)
 wall = lp.prism("Wall", outline=[(-1.4, 0.0), (0.1, 0.0), (0.1, 1.1), (0.5, 1.1), (0.35, 1.6), (-1.4, 1.6)],
                 depth=0.3)                            # 오른쪽 윤곽이 계단형으로 무너진 실루엣
-lp.set_color(wall, (0.72, 0.68, 0.60))                # 돌 밝은 톤
+lp.set_color(wall, (0.72, 0.68, 0.60))                # 돌
 scorch = lp.prism("Scorch", outline=[(0.1, 0.0), (0.8, 0.0), (0.65, 0.7), (0.5, 1.1), (0.1, 1.1)],
                   depth=0.3)                          # 그을림 = 파단면 주변 벽을 별도 파트로 나눠 어두운 톤 (검은 판 부착 금지)
 lp.set_color(scorch, (0.38, 0.34, 0.30))
@@ -58,7 +80,7 @@ for i, (x, y) in enumerate(positions):                # 잔해: 서로 떨어뜨
     s = 0.26 - i * 0.03                               # 갈수록 작은 파편
     d = lp.box(f"Debris{i}", size=(s, s * 0.8, s * 0.6),
                location=(x, y, s * 0.25), rotation=(0, 0, i * 0.9))  # 지면에만 살짝 파묻힘
-    lp.set_color(d, (0.55, 0.51, 0.45) if i % 2 else (0.66, 0.62, 0.54))  # 잔해도 2톤
+    lp.set_color(d, (0.72, 0.68, 0.60))           # 벽과 같은 돌
     debris.append(d)
 ruin = lp.join([wall, scorch, *debris], name="RuinedWall")
 ```

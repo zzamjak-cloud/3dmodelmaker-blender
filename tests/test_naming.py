@@ -41,3 +41,14 @@ class TestResultName(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSceneAssetNames(unittest.TestCase):
+    def test_decimal_dimensions_do_not_end_the_clause(self):
+        # 실제 사고: 배경 에셋이 전부 "읽히게_단순하게_정리하라"(요청문 끝 지시문)로 이름 붙었다
+        request = ("폭 0.48m, 깊이 0.36m, 높이 0.3m의 어촌 나무 상자\n색: 갈색\n"
+                   "배경에 여러 개가 반복 배치될 프랍이다 — 실루엣이 멀리서도 읽히게 단순하게 정리하라.")
+        self.assertEqual(naming.result_name(request), "어촌_나무_상자")
+
+    def test_dimension_first_clause_skipped(self):
+        self.assertEqual(naming.result_name("높이 0.4m의 통통한 어업용 부표. 배가 부른 몸통"), "통통한_어업용_부표")

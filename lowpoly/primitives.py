@@ -160,25 +160,44 @@ def prism(name="Prism", outline=((-0.5, 0.0), (0.5, 0.0), (0.5, 1.0), (0.0, 1.5)
     return _new_object(name, bm, location, rotation, (1, 1, 1))
 
 
-def tube(name="Tube", points=((0, 0, 0), (0, 0, 1)), radius=0.05, segments=6,
+def tube(name="Tube", points=((0, 0, 0), (0, 0, 1)), radius=0.05, segments=6, closed=False,
          location=(0, 0, 0), rotation=(0, 0, 0)) -> bpy.types.Object:
     """폴리라인 경로를 따라 원형 단면을 스윕한 튜브(양 끝 캡 포함).
 
     손잡이·나뭇가지·파이프·난간·가로등 기둥처럼 가늘고 긴 형태에 사용.
     radius는 숫자 하나(균일) 또는 점 개수와 같은 길이의 목록(끝으로 가늘어지는 가지).
+    closed=True면 마지막 점에서 첫 점으로 이어 닫힌 고리를 만든다(캡 없음) — 배 현측 테두리·
+    테이블 상판 테두리·화분 테두리처럼 둘레를 한 바퀴 도는 것은 반쪽 tube를 미러하지 말고
+    둘레 전체 점을 주고 closed=True로 하나만 만들어라. 반쪽을 미러하면 뱃머리처럼 모이는
+    꼭짓점에서 끝이 끊겨 본체가 그 틈으로 삐져나온다. 꺾이는 점은 마이터로 이어 두께가 유지된다.
     예: 굽은 가지 = lp.tube(points=[(0,0,0), (0.1,0,0.5), (0.35,0,0.8)],
                             radius=[0.08, 0.05, 0.02], segments=6)"""
     pts = [Vector(p) for p in points]
-    if len(pts) < 2:
-        raise ValueError("tube는 경로 점이 2개 이상 필요하다")
+    if closed and len(pts) > 2 and (pts[0] - pts[-1]).length < 1e-6:
+        pts = pts[:-1]  # 첫 점을 끝에 반복해 준 경우
+    if len(pts) < (3 if closed else 2):
+        raise ValueError("tube는 경로 점이 2개(closed면 3개) 이상 필요하다")
     radii = list(radius) if hasattr(radius, "__len__") else [radius] * len(pts)
-    # 각 점의 접선: 끝점은 세그먼트 방향, 중간점은 앞뒤 평균(마이터 조인트)
-    seg_dirs = [(pts[i + 1] - pts[i]).normalized() for i in range(len(pts) - 1)]
-    tangents = [seg_dirs[0]]
-    for i in range(1, len(pts) - 1):
-        avg = seg_dirs[i - 1] + seg_dirs[i]
-        tangents.append(avg.normalized() if avg.length > 1e-6 else seg_dirs[i])
-    tangents.append(seg_dirs[-1])
+    radii = (radii + [radii[-1]] * len(pts))[:len(pts)]
+    count = len(pts)
+    seg_count = count if closed else count - 1
+    seg_dirs = [(pts[(i + 1) % count] - pts[i]).normalized() for i in range(seg_count)]
+    # 각 점의 접선과 마이터: 끝점은 세그먼트 방향, 꺾이는 점은 앞뒤 평균 + 꺾임 방향으로 늘림
+    tangents, miters = [], []
+    for i in range(count):
+        d_in = seg_dirs[i - 1] if (closed or i > 0) else None
+        d_out = seg_dirs[i] if (closed or i < count - 1) else None
+        if d_in is None or d_out is None:
+            tangents.append(d_out or d_in)
+            miters.append(None)
+            continue
+        avg = d_in + d_out
+        t = avg.normalized() if avg.length > 1e-6 else d_out
+        tangents.append(t)
+        cos_half = max(math.sqrt(max((1.0 + d_in.dot(d_out)) / 2.0, 0.0)), 0.35)
+        bend = d_out - d_in
+        bend -= t * bend.dot(t)
+        miters.append((bend.normalized(), 1.0 / cos_half) if bend.length > 1e-6 else None)
     # 프레임 평행 이동(parallel transport)으로 단면 뒤틀림 방지
     normal = Vector((0, 0, 1)).cross(tangents[0])
     if normal.length < 1e-6:
@@ -187,21 +206,33 @@ def tube(name="Tube", points=((0, 0, 0), (0, 0, 1)), radius=0.05, segments=6,
     bm = bmesh.new()
     rings = []
     prev_t = tangents[0]
-    for p, r, t in zip(pts, radii, tangents):
+    for p, r, t, miter in zip(pts, radii, tangents, miters):
         normal = (prev_t.rotation_difference(t) @ normal).normalized()
         binormal = t.cross(normal).normalized()
         ring = []
         for i in range(segments):
             a = math.tau * i / segments
-            ring.append(bm.verts.new(p + (normal * math.cos(a) + binormal * math.sin(a)) * r))
+            offset = (normal * math.cos(a) + binormal * math.sin(a)) * r
+            if miter is not None:
+                axis, scale = miter
+                offset += axis * (offset.dot(axis) * (scale - 1.0))
+            ring.append(bm.verts.new(p + offset))
         rings.append(ring)
         prev_t = t
-    for lower, upper in zip(rings, rings[1:]):
+    pairs = list(zip(rings, rings[1:]))
+    if closed:
+        # 한 바퀴 돈 프레임이 시작 프레임과 어긋날 수 있어, 가장 가깝게 맞는 회전 위치로 잇는다
+        last, first = rings[-1], rings[0]
+        shift = min(range(segments), key=lambda k: sum(
+            (last[i].co - first[(i + k) % segments].co).length for i in range(segments)))
+        pairs.append((last, first[shift:] + first[:shift]))
+    for lower, upper in pairs:
         for i in range(segments):
             bm.faces.new((lower[i], lower[(i + 1) % segments],
                           upper[(i + 1) % segments], upper[i]))
-    bm.faces.new(tuple(reversed(rings[0])))
-    bm.faces.new(tuple(rings[-1]))
+    if not closed:
+        bm.faces.new(tuple(reversed(rings[0])))
+        bm.faces.new(tuple(rings[-1]))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     return _new_object(name, bm, location, rotation, (1, 1, 1))
 
@@ -216,16 +247,23 @@ def _is_closed_mesh(mesh) -> bool:
 
 
 def _union_solids(solids) -> bpy.types.Mesh:
-    """닫힌 오브젝트들을 불리언 유니온(EXACT)으로 병합한 월드 공간 메시를 반환.
+    """닫힌 오브젝트들을 불리언 유니온(EXACT)으로 병합한 월드 공간 메시를 반환."""
+    return _boolean_mesh(solids[0], solids[1:], 'UNION')
+
+
+def _boolean_mesh(base, others, operation, world=True) -> bpy.types.Mesh:
+    """base에 others를 차례로 불리언(EXACT) 적용한 메시를 반환. world=False면 base 로컬 공간.
 
     bpy.ops 없이 모디파이어 + depsgraph 평가로 굽는다. 결과가 비면 예외."""
-    base = solids[0]
     mods = []
     try:
-        for other in solids[1:]:
-            mod = base.modifiers.new(name="LP3D_Union", type='BOOLEAN')
-            mod.operation = 'UNION'
+        for other in others:
+            mod = base.modifiers.new(name="LP3D_Boolean", type='BOOLEAN')
+            mod.operation = operation
             mod.solver = 'EXACT'
+            # 미러·fast join으로 겹친 셸을 여러 개 품은 피연산자는 자기 교차 처리가 없으면 몸통이 통째로 사라진다.
+            # 차집합·교집합에는 켜지 않는다 — 느린 판정 경로로 빠져 수 분씩 멈춘다
+            mod.use_self = operation == 'UNION'
             mod.object = other
             mods.append(mod)
         depsgraph = bpy.context.evaluated_depsgraph_get()
@@ -238,8 +276,9 @@ def _union_solids(solids) -> bpy.types.Mesh:
             base.modifiers.remove(mod)
     if len(mesh.polygons) == 0:
         bpy.data.meshes.remove(mesh)
-        raise RuntimeError("불리언 유니온 결과가 비어 있음")
-    mesh.transform(base.matrix_world)
+        raise RuntimeError(f"불리언 {operation} 결과가 비어 있음")
+    if world:
+        mesh.transform(base.matrix_world)
     return mesh
 
 

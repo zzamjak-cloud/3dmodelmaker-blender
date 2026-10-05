@@ -13,7 +13,7 @@ _PREF_KEYS = ("codex_path", "timeout", "ai_concurrency",
               "use_multiview", "use_library",
               "asset_library_path", "texture_resolution", "texture_per_view",
               "image_backend", "openrouter_api_key", "image_model", "image_quality",
-              "character_compare_turns", "use_shapegen", "shapegen_url", "shapegen_token",
+              "character_compare_turns", "object_review_turns", "scene_asset_review_turns", "use_shapegen", "shapegen_url", "shapegen_token",
               "character_height", "shapegen_texture_size",
               "scene_tri_budget", "scene_max_assets", "scene_timeout_scale")
 # 제거된 모델·턴 설정은 복원하지 않아 구버전 파일도 현재 생성 정책을 따른다.

@@ -13,7 +13,7 @@ from .. import preferences
 from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply
 from . import (errors, executor, genmeta, jobs, library, models, multiview, naming,
-               prompts, runner, scheduler, shapegen, snapshots, styles, texgen)
+               prompts, review_diag, runner, scheduler, shapegen, snapshots, styles, texgen)
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
 
@@ -217,6 +217,14 @@ class GenerationSession:
             self.max_iterations = 1 + self.compare_turns_left
         # 배경 잡이 스폰한 에셋이면 부모 uid 문자열 — 완료 시 부모에게 알린다
         self.parent_uid = str(getattr(job, "parent_uid", "") or "") if job else ""
+        # 오브젝트는 실행 결과를 렌더해 모델이 직접 보고 고치는 검토 턴을 돈다. 코드만으로는
+        # 창틀 어긋남·떠 있는 파트·끊긴 몸통처럼 '보면 바로 아는' 결함을 알 수 없다.
+        # 배경 에셋은 수가 많아 시간이 크게 늘므로 횟수를 따로 정한다. 변형은 원본을 따르므로 제외한다.
+        review_key = "scene_asset_review_turns" if self.parent_uid else "object_review_turns"
+        self.review_turns_left = (int(getattr(self.prefs, review_key, 1) or 0)
+                                  if (self.system_mode == 'OBJECT' and not variation_code) else 0)
+        self.review_turns_total = self.review_turns_left
+        self.max_iterations += self.review_turns_left
         self.texture_path = None    # 개별 매핑 결과 PNG (보관 폴더)
         self._final_note = ""       # 마무리 통계 문구 (텍스처 단계 뒤에 붙인다)
         if job:
@@ -902,6 +910,16 @@ class GenerationSession:
                                  phase='GEN')
                 self._dispatch(prompts.build_error_prompt(error))
                 return
+            # 검토·대조 턴의 수정본이 끝내 실패하면 실행 전에 비워진 컬렉션에 직전 성공 결과를 되살린다
+            if self.last_code:
+                restored, _ = executor.execute(self.last_code, self.collection_name,
+                                               seed=self.iteration, workdir=self.workdir)
+                if restored:
+                    self._set_status("수정본 실행 실패 — 직전 결과로 마무리",
+                                     f"수정 턴 실행 오류 반복: 직전 성공 코드로 복원 ({error.splitlines()[-1]})")
+                    self.review_turns_left = self.compare_turns_left = 0
+                    self._finalize()
+                    return
             self._finish("실패: 코드 실행 오류 반복", ok=False)
             return
 
@@ -911,24 +929,63 @@ class GenerationSession:
         if self.compare_turns_left > 0 and self.multiview:
             if self._dispatch_compare(code):
                 return
+        if self.review_turns_left > 0:
+            if self._dispatch_review(code):
+                return
         self._finalize()
+
+    def _render_sheet(self, tag: str):
+        """세션 컬렉션 메시를 6시점 렌더해 한 장으로 이은 경로를 돌려준다. 메시가 없으면 None."""
+        from ..texturing import capture as tex_capture
+        coll = bpy.data.collections.get(self.collection_name)
+        mesh_objs = [o for o in coll.objects if o.type == 'MESH'] if coll else []
+        if not mesh_objs:
+            return None
+        out_dir = os.path.join(self.workdir, f"{tag}_{self.iteration}")
+        with _bake_context(self.scene_name) as ctx:
+            views = tex_capture.render_views(ctx, mesh_objs, out_dir)
+        return tex_capture.join_sheet(views, os.path.join(self.workdir, f"{tag}_{self.iteration}.png"))
+
+    def _dispatch_review(self, code: str) -> bool:
+        """현재 모델을 6시점 렌더해 모델 스스로 결함을 찾아 고치는 턴을 보낸다. 실패하면 False."""
+        try:
+            render = self._render_sheet("review")
+        except Exception as e:
+            _log.exception("시각 검토 렌더 실패")
+            self._set_status("시각 검토 렌더 실패 — 검토 없이 마무리", f"검토 렌더 실패: {e}")
+            return False
+        if not render:
+            return False
+        try:
+            coll = bpy.data.collections.get(self.collection_name)
+            diagnostics = review_diag.describe(review_diag.shell_boxes(
+                [o for o in coll.objects if o.type == 'MESH'] if coll else []))
+        except Exception:
+            _log.exception("시각 검토 자동 점검 실패")
+            diagnostics = []
+        turn = self.review_turns_total - self.review_turns_left + 1
+        self.review_turns_left -= 1
+        self.iteration += 1
+        summary = " / ".join(l for l in diagnostics if not l.startswith("  "))
+        self._set_status(f"시각 검토 {turn}/{self.review_turns_total} — {self._model_label()} 호출중...",
+                         f"시각 검토 턴 {turn}/{self.review_turns_total}: 렌더 보고 결함 수정 요청"
+                         + (f" (자동 점검: {summary})" if summary else ""),
+                         phase='GEN')
+        images = [render] + ([self.ref_image] if self.ref_image else [])
+        self._dispatch(prompts.build_object_review_prompt(
+            self.request, os.path.basename(render), code, turn, self.review_turns_total,
+            ref_image=self._ref_name(), diagnostics=diagnostics), images=images)
+        return True
 
     def _dispatch_compare(self, code: str) -> bool:
         """현재 모델을 6시점 렌더해 턴어라운드 시트와 대조하는 턴을 보낸다. 실패하면 False.
 
         렌더는 개별 매핑용 캡처(texturing.capture)를 그대로 쓴다 — 시트와 칸 순서는
         다르지만 라벨이 붙어 있어 모델이 대조할 수 있다."""
-        from ..texturing import capture as tex_capture
         try:
-            coll = bpy.data.collections.get(self.collection_name)
-            mesh_objs = [o for o in coll.objects if o.type == 'MESH'] if coll else []
-            if not mesh_objs:
+            render = self._render_sheet("compare")
+            if not render:
                 return False
-            out_dir = os.path.join(self.workdir, f"compare_{self.iteration}")
-            with _bake_context(self.scene_name) as ctx:
-                views = tex_capture.render_views(ctx, mesh_objs, out_dir)
-            render = tex_capture.join_sheet(views, os.path.join(self.workdir,
-                                                                f"render_{self.iteration}.png"))
         except Exception as e:
             _log.exception("6면도 대조 렌더 실패")
             self._set_status("6면도 대조 렌더 실패 — 대조 없이 마무리", f"대조 렌더 실패: {e}")

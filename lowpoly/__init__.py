@@ -5,6 +5,7 @@
 import bpy
 
 from .primitives import box, cylinder, cone, sphere, plane, lathe, prism, tube, join
+from .hull import silhouette, loft, cut, emboss, attach
 from .modeling import (bevel, mirror_x, array, scatter, taper, shade_flat,
                        bend, bulge, shear, stretch_at, jitter)
 from .voxel import voxel, voxel_box, voxel_column
@@ -16,6 +17,7 @@ from .scene import (terrain, room, instance, place_grid, place_along, place_scat
 
 __all__ = [
     "root", "box", "cylinder", "cone", "sphere", "plane", "lathe", "prism", "tube", "join",
+    "silhouette", "loft", "cut", "emboss", "attach",
     "bevel", "mirror_x", "array", "scatter", "taper", "bend", "bulge", "shear",
     "stretch_at", "jitter", "shade_flat",
     "set_color", "game_ready",

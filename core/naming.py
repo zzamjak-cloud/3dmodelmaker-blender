@@ -29,10 +29,14 @@ def result_name(request: str) -> str:
     한국어 수식어는 명사 앞에 오므로 구절 끝이 '무엇'이다 — "낮고 넓은 주황색 삼인용 소파" → "주황색_삼인용_소파".
     너무 길면 앞 단어부터 버린다. 쓸 단어가 없으면 FALLBACK."""
     text = str(request or "")
-    clause = re.split(r"[,.;:\n—()\[\]]", text, maxsplit=1)[0]
-    words = [w for w in re.findall(r"[0-9A-Za-z가-힣]+", clause) if _usable(w)]
-    if not words:
-        words = [w for w in re.findall(r"[0-9A-Za-z가-힣]+", text) if _usable(w)]
+    # 소수점(0.48m)의 마침표는 구절 경계가 아니다 — 경계로 보면 "폭 0"만 남아 이름감을 잃는다
+    clauses = re.split(r"(?<!\d)\.|\.(?!\d)|[,;:\n—()\[\]]", text)
+    words = []
+    # 치수만 있는 구절("폭 0.48m")은 건너뛰고 이름감이 있는 첫 구절을 쓴다 — 요청문 끝은 지시문이다
+    for clause in clauses:
+        words = [w for w in re.findall(r"[0-9A-Za-z가-힣]+", clause) if _usable(w)]
+        if words:
+            break
     words = words[-MAX_WORDS:]
     while len(words) > 1 and len("_".join(words)) > MAX_CHARS:
         words = words[1:]

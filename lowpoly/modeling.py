@@ -51,6 +51,15 @@ def mirror_x(obj, merge_threshold=0.001):
     xform = mw.inverted() @ Matrix.Diagonal((-1.0, 1.0, 1.0, 1.0)) @ mw
     bmesh.ops.transform(bm, matrix=xform, verts=verts)
     bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=merge_threshold)
+    # 반쪽을 닫힌 메시로 만들었으면 X=0 단면이 양쪽에 남아 몸통 한가운데 내부 벽이 된다 —
+    # 이 벽이 표면을 좌우로 갈라 cut/emboss 영역이 반으로 나뉘고 가운데 금이 생긴다
+    on_plane = [f for f in bm.faces
+                if all(abs((mw @ v.co).x) <= merge_threshold for v in f.verts)]
+    if on_plane:
+        bmesh.ops.delete(bm, geom=on_plane, context='FACES_ONLY')
+        loose = [e for e in bm.edges if not e.link_faces]
+        if loose:
+            bmesh.ops.delete(bm, geom=loose, context='EDGES')
     # 미러된 페이스는 노멀이 뒤집히므로 재계산
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     _write_back(bm, obj)

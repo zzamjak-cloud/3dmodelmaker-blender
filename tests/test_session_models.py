@@ -156,7 +156,32 @@ class TestSessionModelRouting(unittest.TestCase):
     def test_old_default_preference_still_starts_astra(self):
         session = self._session(codex_model="DEFAULT")
         self.assertEqual(session.backend.model, "gpt-6-astra")
+        # 제거된 후속 턴 설정은 되살아나지 않는다 — 늘어나는 것은 오브젝트 시각 검토 턴뿐
+        self.assertEqual(session.max_iterations, 1 + session.review_turns_total)
+
+    def test_object_review_turn_defaults_to_one(self):
+        session = self._session()
+        self.assertEqual(session.review_turns_total, 1)
+        self.assertEqual(session.max_iterations, 2)
+
+    def test_object_review_turn_can_be_disabled(self):
+        self._session()
+        PREFS.current.object_review_turns = 0
+        session = SESSION.GenerationSession(scene_name="Scene", uid=7, request="crate", exe="codex")
+        self.assertEqual(session.review_turns_total, 0)
         self.assertEqual(session.max_iterations, 1)
+
+    def test_scene_asset_uses_its_own_review_setting(self):
+        # 배경 에셋(부모 uid가 있는 자식 잡)은 오브젝트 설정이 아니라 배경 에셋 설정을 따른다
+        self._session()
+        self.job.parent_uid = "3"
+        PREFS.current.object_review_turns = 2
+        PREFS.current.scene_asset_review_turns = 0
+        session = SESSION.GenerationSession(scene_name="Scene", uid=7, request="crate", exe="codex")
+        self.assertEqual(session.review_turns_total, 0)
+        PREFS.current.scene_asset_review_turns = 1
+        session = SESSION.GenerationSession(scene_name="Scene", uid=7, request="crate", exe="codex")
+        self.assertEqual(session.review_turns_total, 1)
 
     def test_start_log_records_requested_and_effective_provider_models(self):
         session = self._session()

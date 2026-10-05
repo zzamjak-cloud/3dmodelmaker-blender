@@ -144,6 +144,21 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=1.8, min=0.2, max=10.0,
         update=_persist_cb,
     )
+    object_review_turns: IntProperty(
+        name="오브젝트 시각 검토 횟수",
+        description=("오브젝트 생성 후 결과를 6시점으로 렌더해 Astra가 직접 보고 결함(창틀 어긋남·떠 있는 파트·"
+                     "끊긴 몸·빠진 시그니처)을 고치는 추가 턴 수. 0이면 검토 없이 마무리. "
+                     "1회당 Astra 호출 1번이 늘어난다"),
+        default=1, min=0, max=2,
+        update=_persist_cb,
+    )
+    scene_asset_review_turns: IntProperty(
+        name="배경 에셋 시각 검토 횟수",
+        description=("배경 공간이 만드는 에셋(키트)마다 도는 시각 검토 턴 수. 에셋 수만큼 Astra 호출이 "
+                     "늘어나 키트 단계 시간이 늘어난다(AI 동시 실행 수만큼 병렬). 0이면 검토 없이 배치로 넘어간다"),
+        default=1, min=0, max=2,
+        update=_persist_cb,
+    )
     character_compare_turns: IntProperty(
         name="6면도 대조 횟수 (코드 모델링 폴백)",
         description=("셰이프 서버가 없어 캐릭터를 코드로 모델링할 때만 쓰인다 — 실행 결과를 시트와 같은 "
@@ -270,7 +285,11 @@ class LP3DPreferences(bpy.types.AddonPreferences):
                  else 'DISCLOSURE_TRI_RIGHT', emboss=False)
         if self.show_advanced:
             col = box.column()
+            col.label(text="오브젝트", icon='OBJECT_DATA')
+            col.prop(self, "object_review_turns")
+            col.separator()
             col.label(text="배경 공간", icon='WORLD')
+            col.prop(self, "scene_asset_review_turns")
             col.prop(self, "scene_tri_budget")
             col.prop(self, "scene_max_assets")
             col.prop(self, "scene_timeout_scale")
@@ -294,6 +313,8 @@ class _Defaults:
     image_model = imagegen.DEFAULT_MODEL
     image_quality = 'high'
     character_compare_turns = 1
+    object_review_turns = 1
+    scene_asset_review_turns = 1
     use_shapegen = True
     shapegen_url = "http://127.0.0.1:8081"
     shapegen_token = ""

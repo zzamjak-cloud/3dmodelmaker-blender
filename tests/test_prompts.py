@@ -161,3 +161,25 @@ class TestSceneAssetColors(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestObjectReviewPrompt(unittest.TestCase):
+    def test_names_render_turn_and_code(self):
+        p = prompts.build_object_review_prompt("자동차", "review_1.png", "x = 1", 1, 2)
+        self.assertIn("review_1.png", p)
+        self.assertIn("시각 검토 1/2", p)
+        self.assertIn("자동차", p)
+        self.assertIn("x = 1", p)
+        self.assertIn("STATUS: DONE", p)
+        self.assertIn("전체 코드", p)
+
+    def test_checks_known_defects(self):
+        # 실제로 나온 결함(떠 있는 부착물·창틀 어긋남·끊긴 생명체)을 짚어야 모델이 찾는다
+        p = prompts.build_object_review_prompt("여우", "r.png", "", 1, 1)
+        self.assertIn("lp.attach", p)
+        self.assertIn("frame=", p)
+        self.assertIn("union", p)
+
+    def test_ref_image_only_when_given(self):
+        self.assertNotIn("참조 이미지", prompts.build_object_review_prompt("a", "r.png", "", 1, 1))
+        self.assertIn("ref.png", prompts.build_object_review_prompt("a", "r.png", "", 1, 1, ref_image="ref.png"))

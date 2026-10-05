@@ -130,13 +130,21 @@ def _get_material() -> bpy.types.Material:
 
 # ---------- 공개 API ----------
 
-def set_color(obj, color, faces=None):
+def set_color(obj, color, faces=None, axis='Z', above=None, below=None, inside=None):
     """오브젝트(또는 일부 페이스)에 팔레트 색을 입힌다.
 
     color=(r,g,b) 0~1 범위. faces=None이면 전체, 아니면 페이스 인덱스 리스트.
     요청한 색은 고정 팔레트에서 지각적으로 가장 가까운 스와치로 스냅된다.
+    above/below를 주면 면 중심의 월드 좌표가 axis 방향으로 그 범위에 드는 면만 칠한다 —
+    한 파트 안의 색 경계(여우 다리의 검은 양말·기둥 밑동·칼날과 손잡이)를 파트를 쪼개지 않고
+    표현한다. 경계 높이에 loft 단면(또는 cut 홈)이 있어야 경계선이 깔끔하다.
+    inside=영역 오브젝트(lp.sphere/box 등 닫힌 메시)면 면 중심이 그 안에 든 면만 칠하고 영역
+    오브젝트는 삭제된다 — 가슴털·얼룩·눈 주변 무늬·그을림·이끼 자국을 파트 없이 칠한다.
+    조건들은 함께 쓰면 모두 만족하는 면만 칠한다.
     예: lp.set_color(barrel, (0.55, 0.35, 0.18))  # 나무색
-        lp.set_color(barrel, (0.4, 0.4, 0.45), faces=band_faces)  # 금속 밴드만"""
+        lp.set_color(barrel, (0.4, 0.4, 0.45), faces=band_faces)  # 금속 밴드만
+        lp.set_color(leg, (0.15, 0.12, 0.1), below=0.25)  # 다리 아래쪽만 검게
+        lp.set_color(body, (1, 0.95, 0.85), inside=lp.sphere("Bib", radius=0.2, location=(0, -0.3, 0.6)))"""
     mesh = obj.data
     mat = _get_material()
     if mat.name not in [m.name for m in mesh.materials if m]:
@@ -147,12 +155,36 @@ def set_color(obj, color, faces=None):
     uv_layer = mesh.uv_layers.active.data
     u, v = cell_uv(snap_cell(color))
     target = set(faces) if faces is not None else None
+    ranged = above is not None or below is not None
+    region = inside
+    if ranged or region is not None:
+        bpy.context.view_layer.update()  # 방금 바꾼 location을 matrix_world에 반영
+        idx = {'X': 0, 'Y': 1, 'Z': 2}[str(axis).upper()]
+        mw = obj.matrix_world
+        region_inv = region.matrix_world.inverted() if region is not None else None
     for poly in mesh.polygons:
         if target is not None and poly.index not in target:
             continue
+        if ranged:
+            c = (mw @ poly.center)[idx]
+            if (above is not None and c < above) or (below is not None and c > below):
+                continue
+        if region is not None and not _inside(region, region_inv @ (mw @ poly.center)):
+            continue
         for loop_idx in poly.loop_indices:
             uv_layer[loop_idx].uv = (u, v)
+    if region is not None:
+        region_mesh = region.data
+        bpy.data.objects.remove(region)
+        if region_mesh.users == 0:
+            bpy.data.meshes.remove(region_mesh)
     return obj
+
+
+def _inside(region, local_point) -> bool:
+    """닫힌 메시 region 안에 점이 있는지 — 가장 가까운 표면 점의 노멀 반대편이면 안쪽."""
+    ok, loc, normal, _ = region.closest_point_on_mesh(local_point)
+    return bool(ok) and (loc - local_point).dot(normal) > 0
 
 
 def save_palette_png(directory: str) -> str:

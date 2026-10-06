@@ -5,7 +5,7 @@ import os
 from .base import AgentBackend, AgentReply
 
 _LAST_MSG = "codex_last_message.txt"
-REASONING_EFFORT = "high"  # 모델을 명시할 때만 함께 지정한다
+REASONING_EFFORT = "high"  # 세션이 강도를 정하지 않고 모델만 명시했을 때의 기본값
 
 
 class CodexBackend(AgentBackend):
@@ -27,10 +27,15 @@ class CodexBackend(AgentBackend):
 
     def _model_flags(self):
         # -m 을 resume에도 붙인다 — 빼면 ~/.codex/config.toml 기본 모델로 검토 턴이 돈다.
-        # 추론 강도도 사용자 설정(medium 등)에 맡기면 시트 비율을 재지 않고 일반형으로 찍는다
-        if not self.model:
-            return []
-        return ["-m", self.model, "-c", f'model_reasoning_effort="{REASONING_EFFORT}"']
+        # 추론 강도는 세션이 턴 역할별로 정한다(생성 high, 검토·수정 medium 등). 추론 토큰은
+        # 출력 토큰으로 과금되므로 강도가 곧 비용이다. 모델도 강도도 없으면 CLI 설정을 따른다.
+        flags = []
+        if self.model:
+            flags += ["-m", self.model]
+        effort = self.reasoning_effort or (REASONING_EFFORT if self.model else "")
+        if effort:
+            flags += ["-c", f'model_reasoning_effort="{effort}"']
+        return flags
 
     @staticmethod
     def _image_flags(images):
@@ -69,7 +74,7 @@ class CodexBackend(AgentBackend):
                 text = f.read()
         if not text:
             text = self._last_agent_message(stdout)
-        return AgentReply(text=text, session_id=session_id)
+        return AgentReply(text=text, session_id=session_id, usage=self.parse_usage(stdout))
 
     @staticmethod
     def _iter_events(stdout: str):
@@ -90,6 +95,23 @@ class CodexBackend(AgentBackend):
                 if isinstance(value, str):
                     return value
         return None
+
+    def parse_usage(self, stdout: str):
+        """{"type":"turn.completed","usage":{...}} 이벤트에서 토큰 사용량을 꺼낸다. 없으면 None.
+
+        턴마다 어느 역할이 토큰을 쓰는지 로그에 남겨야 라우팅 설정의 효과를 확인할 수 있다."""
+        usage = None
+        for event in self._iter_events(stdout):
+            if event.get("type") != "turn.completed":
+                continue
+            found = event.get("usage")
+            if isinstance(found, dict):
+                usage = {
+                    "input_tokens": int(found.get("input_tokens", 0) or 0),
+                    "cached_input_tokens": int(found.get("cached_input_tokens", 0) or 0),
+                    "output_tokens": int(found.get("output_tokens", 0) or 0),
+                }
+        return usage
 
     def _last_agent_message(self, stdout: str) -> str:
         # {"type":"item.completed","item":{"type":"agent_message","text":"..."}}

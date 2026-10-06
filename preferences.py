@@ -6,7 +6,7 @@ import bpy
 from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
                        StringProperty)
 
-from .core import imagegen
+from .core import imagegen, models
 
 # macOS Finder로 실행한 Blender는 사용자 PATH를 상속하지 않으므로 흔한 설치 경로를 직접 탐색
 _EXTRA_PATHS = (
@@ -144,19 +144,108 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=1.8, min=0.2, max=10.0,
         update=_persist_cb,
     )
+    # ---- 턴 역할별 모델 라우팅 (비용 최적화) ----
+    # Astra는 토큰 소모가 빨라 모든 턴에 쓰면 비용이 급증한다. 형태를 처음 잡는 생성 턴만
+    # Astra·high로 돌리고, 검토·수정·플랜은 Codex CLI 기본 모델(저렴)로 돌리는 것이 기본값이다.
+    generate_model: EnumProperty(
+        name="생성 모델",
+        description="초기 코드 생성 · 변형 · 배경 배치 턴에 쓰는 모델",
+        items=models.MODEL_CHOICES, default='ASTRA',
+        update=_persist_cb,
+    )
+    generate_effort: EnumProperty(
+        name="생성 추론 강도",
+        description="생성 턴의 reasoning effort — 낮추면 시트 비율을 덜 잰다",
+        items=models.EFFORT_CHOICES, default='high',
+        update=_persist_cb,
+    )
+    review_model: EnumProperty(
+        name="검토 모델",
+        description="시각 검토 판정 · 6면도 대조 턴에 쓰는 모델 — 렌더를 보고 결함을 찾는 일",
+        items=models.MODEL_CHOICES, default='DEFAULT',
+        update=_persist_cb,
+    )
+    review_effort: EnumProperty(
+        name="검토 추론 강도",
+        items=models.EFFORT_CHOICES, default='medium',
+        update=_persist_cb,
+    )
+    fix_model: EnumProperty(
+        name="수정 모델",
+        description=("오류 자기수정 · 검토 지적 수정 · 형식 재요청 턴에 쓰는 모델. 수정본 실행이 또 실패하면 "
+                     "마지막 재시도는 생성 모델로 승격한다"),
+        items=models.MODEL_CHOICES, default='DEFAULT',
+        update=_persist_cb,
+    )
+    fix_effort: EnumProperty(
+        name="수정 추론 강도",
+        items=models.EFFORT_CHOICES, default='medium',
+        update=_persist_cb,
+    )
+    plan_model: EnumProperty(
+        name="배경 플랜 모델",
+        description="배경 공간의 플랜 JSON을 세우는 턴에 쓰는 모델",
+        items=models.MODEL_CHOICES, default='DEFAULT',
+        update=_persist_cb,
+    )
+    plan_effort: EnumProperty(
+        name="배경 플랜 추론 강도",
+        items=models.EFFORT_CHOICES, default='medium',
+        update=_persist_cb,
+    )
+    review_mode: EnumProperty(
+        name="시각 검토 방식",
+        description="검토 턴이 결함을 찾는 방식",
+        items=(
+            ('DIRECT', "즉시 수정 (권장)",
+             "검토 모델이 렌더를 보고 바로 전체 코드를 다시 쓴다 — 턴 1번. 실측에서 판정 턴은 거의 항상 "
+             "결함을 찾아 수정 턴이 뒤따랐고, resume 입력이 턴마다 다시 과금돼 2단계가 더 비쌌다"),
+            ('TWO_STAGE', "판정 후 수정",
+             "검토 모델이 결함 목록만 판정하고, 결함이 있을 때만 수정 모델이 전체 코드를 고친다 — "
+             "검토 모델이 비싸고 결함 없음 판정이 잦을 때만 유리하다"),
+        ),
+        default='DIRECT',
+        update=_persist_cb,
+    )
+    review_resolution: IntProperty(
+        name="검토 렌더 크기(px)",
+        description=("검토·대조 턴에 보내는 시점당 렌더 크기. 이미지 토큰은 면적에 비례하므로 1024→512는 "
+                     "약 1/4. 텍스처 매핑용 캡처 크기는 이 값과 무관하다"),
+        default=512, min=256, max=1024, step=128,
+        update=_persist_cb,
+    )
+    skip_clean_review: BoolProperty(
+        name="자동 점검 이상 없으면 검토 생략",
+        description=("렌더 전 자동 점검(짝 없는 파트·떠 있는 파트)에 걸린 것이 없고 대조할 멀티뷰 시트도 "
+                     "없으면 시각 검토 턴을 보내지 않는다 — 검토 호출 1번이 통째로 절약된다"),
+        default=True,
+        update=_persist_cb,
+    )
     object_review_turns: IntProperty(
         name="오브젝트 시각 검토 횟수",
-        description=("오브젝트 생성 후 결과를 6시점으로 렌더해 Astra가 직접 보고 결함(창틀 어긋남·떠 있는 파트·"
-                     "끊긴 몸·빠진 시그니처)을 고치는 추가 턴 수. 0이면 검토 없이 마무리. "
-                     "1회당 Astra 호출 1번이 늘어난다"),
-        default=1, min=0, max=2,
+        description=("오브젝트 생성 후 결과를 6시점으로 렌더해 검토 모델이 직접 보고 결함(창틀 어긋남·떠 있는 파트·"
+                     "끊긴 몸·빠진 시그니처)을 고치는 추가 턴 수. 기본 0 — 실측에서 검토가 품질을 올린다고 보기 "
+                     "어려웠고(저렴한 모델의 수정은 오히려 나빠지기도 했다) 비용은 생성 턴만큼 더 든다. "
+                     "쓰려면 검토·수정 모델을 Astra로 두는 편이 낫다"),
+        default=0, min=0, max=2,
         update=_persist_cb,
     )
     scene_asset_review_turns: IntProperty(
         name="배경 에셋 시각 검토 횟수",
-        description=("배경 공간이 만드는 에셋(키트)마다 도는 시각 검토 턴 수. 에셋 수만큼 Astra 호출이 "
-                     "늘어나 키트 단계 시간이 늘어난다(AI 동시 실행 수만큼 병렬). 0이면 검토 없이 배치로 넘어간다"),
-        default=1, min=0, max=2,
+        description=("배경 공간이 만드는 에셋(키트)마다 도는 시각 검토 턴 수. 에셋 수만큼 검토 호출이 "
+                     "늘어나 키트 단계 시간이 늘어난다(AI 동시 실행 수만큼 병렬). 기본 0 — 검토 없이 배치로 넘어간다"),
+        default=0, min=0, max=2,
+        update=_persist_cb,
+    )
+    scene_asset_review_scope: EnumProperty(
+        name="배경 에셋 검토 범위",
+        description="배경 에셋 중 어느 것에 시각 검토 턴을 돌릴지",
+        items=(
+            ('LANDMARK', "랜드마크·대형(L)만 (권장)",
+             "눈에 띄는 랜드마크와 size_class L 에셋만 검토한다 — 소품 수십 개의 검토 호출을 아낀다"),
+            ('ALL', "모든 에셋", "플랜의 모든 에셋을 검토한다"),
+        ),
+        default='LANDMARK',
         update=_persist_cb,
     )
     character_compare_turns: IntProperty(
@@ -285,11 +374,21 @@ class LP3DPreferences(bpy.types.AddonPreferences):
                  else 'DISCLOSURE_TRI_RIGHT', emboss=False)
         if self.show_advanced:
             col = box.column()
+            col.label(text="턴 역할별 모델 (비용 최적화)", icon='SETTINGS')
+            for role in ("generate", "review", "fix", "plan"):
+                row = col.row(align=True)
+                row.prop(self, f"{role}_model")
+                row.prop(self, f"{role}_effort", text="")
+            col.separator()
             col.label(text="오브젝트", icon='OBJECT_DATA')
             col.prop(self, "object_review_turns")
+            col.prop(self, "review_mode")
+            col.prop(self, "review_resolution")
+            col.prop(self, "skip_clean_review")
             col.separator()
             col.label(text="배경 공간", icon='WORLD')
             col.prop(self, "scene_asset_review_turns")
+            col.prop(self, "scene_asset_review_scope")
             col.prop(self, "scene_tri_budget")
             col.prop(self, "scene_max_assets")
             col.prop(self, "scene_timeout_scale")
@@ -313,8 +412,20 @@ class _Defaults:
     image_model = imagegen.DEFAULT_MODEL
     image_quality = 'high'
     character_compare_turns = 1
-    object_review_turns = 1
-    scene_asset_review_turns = 1
+    object_review_turns = 0
+    scene_asset_review_turns = 0
+    scene_asset_review_scope = 'LANDMARK'
+    generate_model = 'ASTRA'
+    generate_effort = 'high'
+    review_model = 'DEFAULT'
+    review_effort = 'medium'
+    fix_model = 'DEFAULT'
+    fix_effort = 'medium'
+    plan_model = 'DEFAULT'
+    plan_effort = 'medium'
+    review_mode = 'DIRECT'
+    review_resolution = 512
+    skip_clean_review = True
     use_shapegen = True
     shapegen_url = "http://127.0.0.1:8081"
     shapegen_token = ""

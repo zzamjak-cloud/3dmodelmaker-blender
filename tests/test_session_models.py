@@ -128,6 +128,7 @@ class TestSessionModelRouting(unittest.TestCase):
         SESSION.tempfile.mkdtemp = self.original_mkdtemp
         SESSION._sessions.clear()
         BPY.data.scenes.clear()
+        BPY.data.collections.clear()
         shutil.rmtree(self.workdir, ignore_errors=True)
 
     def _session(self, codex_model="ASTRA"):
@@ -159,8 +160,16 @@ class TestSessionModelRouting(unittest.TestCase):
         # 제거된 후속 턴 설정은 되살아나지 않는다 — 늘어나는 것은 오브젝트 시각 검토 턴뿐
         self.assertEqual(session.max_iterations, 1 + session.review_turns_total)
 
-    def test_object_review_turn_defaults_to_one(self):
+    def test_object_review_turn_defaults_to_zero(self):
+        # 실측에서 검토 턴이 품질을 올리지 못했고 비용만 늘어 기본은 생성 1턴이다
         session = self._session()
+        self.assertEqual(session.review_turns_total, 0)
+        self.assertEqual(session.max_iterations, 1)
+
+    def test_object_review_turn_can_be_enabled(self):
+        self._session()
+        PREFS.current.object_review_turns = 1
+        session = SESSION.GenerationSession(scene_name="Scene", uid=7, request="crate", exe="codex")
         self.assertEqual(session.review_turns_total, 1)
         self.assertEqual(session.max_iterations, 2)
 
@@ -291,14 +300,36 @@ class TestSessionModelFallback(unittest.TestCase):
                 session._dispatch("원본 요청")
                 self.assertFalse(session._try_model_fallback(error))
 
-    def test_resume_failure_does_not_trigger_model_fallback(self):
+    def test_resume_failure_on_default_model_turn_does_not_trigger_model_fallback(self):
+        # 기본 모델로 라우팅된 후속 턴(검토 등)의 오류는 Astra 폴백 대상이 아니다
         session = self._session()
         session.session_id = "thread-1"
         session._was_resume = True
+        session.backend.model = ""
         session._pending_prompt = "후속 요청"
         session._pending_images = []
 
         self.assertFalse(session._try_model_fallback(ASTRA_ERROR))
+
+    def test_resume_turn_on_astra_falls_back_keeping_session(self):
+        # 검토를 Astra로 설정했는데 계정에 Astra가 없으면 세션을 유지한 채 그 턴을 기본 모델로 다시 보낸다
+        session = self._session()
+        launched = []
+        session._submit_ai = lambda fn: fn()
+        session._launch = lambda cmd, prompt: launched.append((prompt, cmd))
+        session.session_id = "thread-1"
+        session.routing[SESSION.models.ROLE_REVIEW] = (SESSION.models.ASTRA_ID, "medium")
+        session._dispatch("검토 요청", images=["r.png"], role=SESSION.models.ROLE_REVIEW)
+        self.assertIn("-m", launched[-1][1])
+
+        self.assertTrue(session._try_model_fallback(ASTRA_ERROR))
+        self.assertEqual(session.session_id, "thread-1")
+        self.assertTrue(session.model_fallback_used)
+        self.assertEqual(launched[-1][0], "검토 요청")
+        self.assertIn("resume", launched[-1][1])
+        self.assertNotIn("-m", launched[-1][1])
+        self.assertIn("r.png", launched[-1][1])
+        self.assertFalse(session._try_model_fallback(ASTRA_ERROR))   # 1회만
 
     def test_later_initial_style_request_does_not_trigger_model_fallback(self):
         session = self._session()
@@ -403,5 +434,232 @@ class TestSingleGeneration(unittest.TestCase):
                            return_value="오류 복구", create=True),
               patch.object(session, "_dispatch") as dispatch):
             session._blender_execute("bad_code", "DONE")
-        dispatch.assert_called_once_with("오류 복구")
+        # 1차 자기수정은 저렴한 수정 모델로 간다
+        dispatch.assert_called_once_with("오류 복구", role="fix")
         self.assertEqual(session.iteration, 1)
+
+
+# 세션 테스트 그래프의 prompts는 빈 스텁이다 — 검토 프롬프트만 실제 모듈에서 빌려 쓴다
+REAL_PROMPTS = _load(f"{PACKAGE}.core.prompts_real", ROOT / "core" / "prompts.py")
+
+
+class TestCostRoutingInSession(unittest.TestCase):
+    """턴 역할별 모델 라우팅 · 2단계 검토 · 검토 생략 · 사용량 로그가 세션 흐름에 실제로 걸리는지."""
+    setUp = TestSessionModelRouting.setUp
+    tearDown = TestSessionModelRouting.tearDown
+    _session = TestSessionModelRouting._session
+
+    def _with_mesh(self, session):
+        """검토 분기에 들어가도록 세션 컬렉션에 메시 하나를 둔다."""
+        BPY.data.collections[session.collection_name] = SimpleNamespace(
+            objects=[SimpleNamespace(type='MESH')])
+
+    def _dispatched(self, session):
+        """_dispatch가 만든 명령을 모아 (프롬프트, 명령) 목록으로 돌려준다."""
+        launched = []
+        session._submit_ai = lambda fn: fn()
+        session._launch = lambda cmd, prompt: launched.append((prompt, cmd))
+        return launched
+
+    def test_generation_turn_is_astra_high_and_review_turn_is_default_medium(self):
+        session = self._session()
+        launched = self._dispatched(session)
+        session._dispatch("생성")
+        session.session_id = "thread-1"
+        session._dispatch("검토", role=SESSION.models.ROLE_REVIEW)
+
+        gen_cmd, review_cmd = launched[0][1], launched[1][1]
+        self.assertEqual(gen_cmd[gen_cmd.index("-m") + 1], "gpt-6-astra")
+        self.assertIn('model_reasoning_effort="high"', gen_cmd)
+        self.assertNotIn("-m", review_cmd)
+        self.assertIn('model_reasoning_effort="medium"', review_cmd)
+
+    def test_astra_fallback_applies_to_every_astra_role(self):
+        session = self._session()
+        PREFS.current.review_model = 'ASTRA'
+        session = SESSION.GenerationSession(scene_name="Scene", uid=7, request="crate", exe="codex")
+        session._submit_ai = lambda fn: None
+        session._dispatch("첫 요청")
+        self.assertTrue(session._try_model_fallback(ASTRA_ERROR))
+        self.assertEqual(session._route(SESSION.models.ROLE_REVIEW)[0], "")
+        self.assertEqual(session._route(SESSION.models.ROLE_GENERATE)[0], "")
+
+    def test_second_exec_retry_escalates_to_generate_model(self):
+        session = self._session()
+        session.exec_retries = 1
+        with (patch.object(SESSION.executor, "execute",
+                           return_value=(False, "ValueError: invalid"), create=True),
+              patch.object(SESSION.prompts, "build_error_prompt",
+                           return_value="오류 복구", create=True),
+              patch.object(session, "_dispatch") as dispatch):
+            session._blender_execute("bad_code", "DONE")
+        dispatch.assert_called_once_with("오류 복구", role="generate")
+
+    def test_clean_diagnostics_without_sheet_skip_review(self):
+        session = self._session()
+        session.session_id = "thread-1"
+        self._with_mesh(session)
+        with (patch.object(SESSION.review_diag, "shell_boxes", return_value=[], create=True),
+              patch.object(SESSION.review_diag, "describe", return_value=[], create=True),
+              patch.object(session, "_render_sheet") as render,
+              patch.object(session, "_dispatch") as dispatch):
+            self.assertFalse(session._dispatch_review("code"))
+        render.assert_not_called()
+        dispatch.assert_not_called()
+        self.assertEqual(session.review_turns_left, 0)
+        self.assertIn("검토 턴 생략", self.job.log)
+
+    def test_two_stage_review_sends_verdict_then_fix_only_when_defective(self):
+        self._session()
+        PREFS.current.review_mode = 'TWO_STAGE'
+        session = SESSION.GenerationSession(scene_name="Scene", uid=7, request="crate", exe="codex")
+        session.session_id = "thread-1"
+        session.last_code = "x = 1"
+        self._with_mesh(session)
+        with (patch.object(SESSION.review_diag, "shell_boxes", return_value=[], create=True),
+              patch.object(SESSION.review_diag, "describe",
+                           return_value=["짝 없는 파트: bar"], create=True),
+              patch.object(session, "_render_sheet", return_value="review_2.png"),
+              patch.object(SESSION.prompts, "build_object_review_verdict_prompt",
+                           side_effect=REAL_PROMPTS.build_object_review_verdict_prompt, create=True),
+              patch.object(SESSION.prompts, "build_object_review_fix_prompt",
+                           side_effect=REAL_PROMPTS.build_object_review_fix_prompt, create=True),
+              patch.object(session, "_dispatch") as dispatch):
+            self.assertTrue(session._dispatch_review("x = 1"))
+        prompt = dispatch.call_args.args[0]
+        self.assertEqual(dispatch.call_args.kwargs["role"], "review")
+        self.assertEqual(dispatch.call_args.kwargs["images"], ["review_2.png"])  # 시트·참조 재첨부 없음
+        self.assertIn("VERDICT", prompt)
+        self.assertNotIn("```python", prompt)   # 코드는 기록에 있으니 싣지 않는다
+        self.assertTrue(session._awaiting_verdict)
+
+        # 결함 없음 → 수정 턴 없이 마무리
+        with (patch.object(session, "_dispatch") as dispatch,
+              patch.object(session, "_finalize") as finalize):
+            session._handle_reply("VERDICT: OK")
+        dispatch.assert_not_called()
+        finalize.assert_called_once_with()
+
+        # 결함 있음 → 수정 모델에 결함 목록만 넘긴다
+        session._awaiting_verdict = True
+        with (patch.object(session, "_dispatch") as dispatch,
+              patch.object(SESSION.prompts, "build_object_review_fix_prompt",
+                           side_effect=REAL_PROMPTS.build_object_review_fix_prompt, create=True),
+              patch.object(session, "_finalize") as finalize):
+            session._handle_reply("VERDICT: FIX\n- 창틀 어긋남")
+        finalize.assert_not_called()
+        self.assertEqual(dispatch.call_args.kwargs["role"], "fix")
+        self.assertIn("- 창틀 어긋남", dispatch.call_args.args[0])
+        self.assertFalse(session._awaiting_verdict)
+
+    def test_direct_review_mode_sends_full_fix_prompt_to_review_model(self):
+        session = self._session()   # 기본값이 즉시 수정이다
+        session.session_id = None   # 기록 없음 → 코드·이미지를 싣는다
+        session.ref_image = "ref.png"
+        self._with_mesh(session)
+        with (patch.object(SESSION.review_diag, "shell_boxes", return_value=[], create=True),
+              patch.object(SESSION.review_diag, "describe", return_value=["떠 있음"], create=True),
+              patch.object(session, "_render_sheet", return_value="review_2.png"),
+              patch.object(SESSION.prompts, "build_object_review_prompt",
+                           side_effect=REAL_PROMPTS.build_object_review_prompt, create=True),
+              patch.object(session, "_dispatch") as dispatch):
+            self.assertTrue(session._dispatch_review("x = 1"))
+        self.assertEqual(dispatch.call_args.kwargs["role"], "review")
+        self.assertEqual(dispatch.call_args.kwargs["images"], ["review_2.png", "ref.png"])
+        self.assertIn("```python\nx = 1", dispatch.call_args.args[0])
+        self.assertFalse(session._awaiting_verdict)
+
+    def test_usage_is_logged_per_turn_and_summed_at_finish(self):
+        session = self._session()
+        session._turn_role = SESSION.models.ROLE_REVIEW
+        session._log_usage({"input_tokens": 1000, "cached_input_tokens": 600, "output_tokens": 50})
+        session._log_usage({"input_tokens": 200, "output_tokens": 20})
+        self.assertIn("토큰 [검토 · GPT-6 Astra · high] 입력 1,000 (캐시 600) / 출력 50", self.job.log)
+        session._archive = lambda code: "entry-1"
+        with (patch.object(SESSION.scheduler, "cancel_job", create=True),
+              patch.object(SESSION.runner, "remove_keepalive", create=True)):
+            session._finish("완료", ok=True)
+        self.assertIn("토큰 합계 (2턴): 입력 1,200 (캐시 600) / 출력 70", self.job.log)
+
+    def test_review_override_disables_review_turns(self):
+        self._session()
+        session = SESSION.GenerationSession(scene_name="Scene", uid=7, request="crate",
+                                            exe="codex", review_override=False)
+        self.assertEqual(session.review_turns_left, 0)
+
+    def test_resume_failure_while_awaiting_verdict_finalizes_without_review(self):
+        session = self._session()
+        session.session_id = "thread-1"
+        session.last_code = "x = 1"
+        session._turn_role = SESSION.models.ROLE_REVIEW
+        session._awaiting_verdict = True
+        with (patch.object(session, "_dispatch") as dispatch,
+              patch.object(session, "_finalize") as finalize):
+            session._resume_fallback_dispatch()
+        dispatch.assert_not_called()
+        finalize.assert_called_once_with()
+        self.assertFalse(session._awaiting_verdict)
+
+    def test_resume_failure_on_fix_turn_resends_defect_list(self):
+        session = self._session()
+        session.session_id = "thread-1"
+        session.last_code = "x = 1"
+        session.stateless = True
+        session._turn_role = SESSION.models.ROLE_FIX
+        session._review_defects = ["창틀 어긋남"]
+        with (patch.object(SESSION.prompts, "build_object_review_fix_prompt",
+                           side_effect=REAL_PROMPTS.build_object_review_fix_prompt, create=True),
+              patch.object(session, "_dispatch") as dispatch):
+            session._resume_fallback_dispatch()
+        self.assertEqual(dispatch.call_args.kwargs["role"], "fix")
+        self.assertIn("- 창틀 어긋남", dispatch.call_args.args[0])
+        self.assertNotIn("```python", dispatch.call_args.args[0])   # stateless 머리말이 코드를 붙인다
+
+    def test_format_violation_on_fix_turn_keeps_previous_result(self):
+        session = self._session()
+        session.last_code = "x = 1"
+        session.format_retries = 1
+        session._turn_role = SESSION.models.ROLE_FIX
+        with (patch.object(session, "_dispatch") as dispatch,
+              patch.object(session, "_finalize") as finalize,
+              patch.object(session, "_finish") as finish):
+            session._handle_reply("코드 없음")
+        dispatch.assert_not_called()
+        finish.assert_not_called()
+        finalize.assert_called_once_with()
+
+    def test_failed_turn_usage_is_still_counted(self):
+        session = self._session()
+        stdout = '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}'
+        with patch.object(session, "_handle_error"):
+            session._handle_response(stdout, "CLI 종료 코드 1")
+        self.assertEqual(session.usage_total.get("input_tokens"), 10)
+
+    def test_reference_image_keeps_review_even_when_diagnostics_clean(self):
+        session = self._session()
+        session.session_id = "thread-1"
+        session.ref_image = "ref.png"
+        self._with_mesh(session)
+        with (patch.object(SESSION.review_diag, "shell_boxes", return_value=[], create=True),
+              patch.object(SESSION.review_diag, "describe", return_value=[], create=True),
+              patch.object(session, "_render_sheet", return_value="review_2.png"),
+              patch.object(SESSION.prompts, "build_object_review_prompt",
+                           side_effect=REAL_PROMPTS.build_object_review_prompt, create=True),
+              patch.object(session, "_dispatch") as dispatch):
+            self.assertTrue(session._dispatch_review("x = 1"))
+        dispatch.assert_called_once()
+
+    def test_fix_turn_does_not_exceed_declared_turn_count(self):
+        self._session()
+        PREFS.current.object_review_turns = 1
+        session = SESSION.GenerationSession(scene_name="Scene", uid=7, request="crate", exe="codex")
+        session.session_id = "thread-1"
+        session.last_code = "x = 1"
+        session.iteration = 2   # 검토 턴에서 이미 올렸다
+        session._awaiting_verdict = True
+        with (patch.object(session, "_dispatch"),
+              patch.object(SESSION.prompts, "build_object_review_fix_prompt",
+                           side_effect=REAL_PROMPTS.build_object_review_fix_prompt, create=True)):
+            session._handle_reply("VERDICT: FIX\n- 결함")
+        self.assertEqual(session.iteration, 2)
+        self.assertLessEqual(session.iteration, session.max_iterations)

@@ -15,7 +15,12 @@ _PREF_KEYS = ("codex_path", "timeout", "ai_concurrency",
               "image_backend", "openrouter_api_key", "image_model", "image_quality",
               "character_compare_turns", "object_review_turns", "scene_asset_review_turns", "use_shapegen", "shapegen_url", "shapegen_token",
               "character_height", "shapegen_texture_size",
-              "scene_tri_budget", "scene_max_assets", "scene_timeout_scale")
+              "scene_tri_budget", "scene_max_assets", "scene_timeout_scale",
+              # 턴 역할별 모델 라우팅 · 검토 비용 설정
+              "generate_model", "generate_effort", "review_model", "review_effort",
+              "fix_model", "fix_effort", "plan_model", "plan_effort",
+              "review_mode", "review_resolution", "skip_clean_review",
+              "scene_asset_review_scope")
 # 제거된 모델·턴 설정은 복원하지 않아 구버전 파일도 현재 생성 정책을 따른다.
 _SCENE_KEYS = ("export_dir", "retopo_faces", "retopo_symmetry", "retopo_polish")
 

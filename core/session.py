@@ -11,7 +11,7 @@ _log = logging.getLogger(__name__)
 
 from .. import preferences
 from ..agents.codex_cli import CodexBackend
-from ..agents.parsing import parse_agent_reply
+from ..agents.parsing import parse_agent_reply, parse_verdict
 from . import (errors, executor, genmeta, jobs, library, models, multiview, naming,
                prompts, review_diag, runner, scheduler, shapegen, snapshots, styles, texgen)
 
@@ -53,14 +53,16 @@ def active_count() -> int:
 
 
 def start_job(scene_name, uid, variation_of=None, variation_count=3,
-              multiview_override=None):
+              multiview_override=None, review_override=None):
     """잡 항목 하나의 생성 세션을 시작한다. 오류 메시지 또는 None을 반환한다.
 
     프롬프트·참조 이미지는 씬이 아니라 잡 항목에서 읽는다 —
     여러 항목이 서로 다른 설정으로 동시에 돌 수 있어야 하기 때문이다.
 
     multiview_override를 주면 이 세션만 멀티뷰 사용 여부를 환경설정과 다르게 쓴다.
-    배경 모드의 에셋 자식 잡은 랜드마크만 멀티뷰를 쓰기 때문이다(시간·호출 절감)."""
+    배경 모드의 에셋 자식 잡은 랜드마크만 멀티뷰를 쓰기 때문이다(시간·호출 절감).
+    review_override=False면 시각 검토 턴을 돌지 않는다 — 배경 소품처럼 검토 비용이
+    아까운 에셋에 쓴다."""
     if uid in _sessions:
         return "이미 진행 중인 항목입니다"
     scene = bpy.data.scenes.get(scene_name)
@@ -97,6 +99,7 @@ def start_job(scene_name, uid, variation_of=None, variation_count=3,
         ref_image=ref_image,
         lane=job.lane,
         multiview_override=multiview_override,
+        review_override=review_override,
     )
     # 최상위 배경 잡만 배경 상태머신을 쓴다 — 자식 에셋 잡은 기존 오브젝트 경로다
     is_scene = (getattr(job, "creation_mode", 'OBJECT') == 'SCENE'
@@ -155,7 +158,7 @@ class GenerationSession:
 
     def __init__(self, scene_name, uid, request, exe,
                  variation_code=None, variation_count=3,
-                 ref_image=None, lane=0, multiview_override=None):
+                 ref_image=None, lane=0, multiview_override=None, review_override=None):
         self.scene_name = scene_name
         self.uid = uid
         self.lane = lane
@@ -180,8 +183,15 @@ class GenerationSession:
         self.last_images = []  # 마지막 캡처 (라이브러리 썸네일용)
         self.backend = CodexBackend(exe, self.workdir)
         self.prefs = preferences.get_prefs()
-        self.backend.model = models.ASTRA_ID
-        # 실행 중 환경설정이 바뀌어도 이 세션의 요청 모델은 바뀌지 않는다
+        # 턴 역할별 (모델, 추론 강도) — 생성만 Astra·high, 검토·수정·플랜은 하위 모델이 기본.
+        # 실행 중 환경설정이 바뀌어도 이 세션의 라우팅은 바뀌지 않는다
+        self.routing = models.routing_from_prefs(self.prefs)
+        self._turn_role = models.ROLE_GENERATE   # 직전에 보낸 턴의 역할 — 재요청은 같은 역할로
+        self._awaiting_verdict = False           # 2단계 검토의 판정 응답을 기다리는 중
+        self._review_defects = []                # 판정 턴이 찾은 결함 목록 (수정 턴 폴백에 다시 쓴다)
+        self.verdict_format_retries = 0          # 판정 형식 재요청 — 코드 형식 재요청과 따로 센다
+        self.usage_total = {}                    # 세션 누적 토큰 사용량
+        self.backend.model, self.backend.reasoning_effort = self.routing[models.ROLE_GENERATE]
         self.requested_model_id = self.backend.model
         self.requested_model_label = models.model_label('CODEX', self.requested_model_id)
         self.effective_model_label = self.requested_model_label
@@ -221,8 +231,10 @@ class GenerationSession:
         # 창틀 어긋남·떠 있는 파트·끊긴 몸통처럼 '보면 바로 아는' 결함을 알 수 없다.
         # 배경 에셋은 수가 많아 시간이 크게 늘므로 횟수를 따로 정한다. 변형은 원본을 따르므로 제외한다.
         review_key = "scene_asset_review_turns" if self.parent_uid else "object_review_turns"
-        self.review_turns_left = (int(getattr(self.prefs, review_key, 1) or 0)
+        self.review_turns_left = (int(getattr(self.prefs, review_key, 0) or 0)
                                   if (self.system_mode == 'OBJECT' and not variation_code) else 0)
+        if review_override is False:
+            self.review_turns_left = 0   # 배경 소품 등 검토 비용이 아까운 에셋
         self.review_turns_total = self.review_turns_left
         self.max_iterations += self.review_turns_left
         self.texture_path = None    # 개별 매핑 결과 PNG (보관 폴더)
@@ -231,6 +243,7 @@ class GenerationSession:
             job.requested_model = self.requested_model_label
             job.effective_model = self.effective_model_label
             job.model_fallback = False
+            job.model_routing = models.routing_summary(self.routing)
             job.texture_path = ""
         # 런타임 상태
         self.session_id = None
@@ -266,8 +279,9 @@ class GenerationSession:
     def _set_status(self, status: str, log: str = None, phase: str = None, hint: str = ""):
         job = self._job()
         if job:
-            job.status = status
-            job.status_hint = hint
+            if status is not None:
+                job.status = status
+                job.status_hint = hint
             if phase is not None:
                 job.phase = phase
             if log:
@@ -377,7 +391,8 @@ class GenerationSession:
             job.started_at = time.time()
             job.phase = ""
             job.status = "대기 중 (순서 기다리는 중)"
-        self._set_status("대기 중 (순서 기다리는 중)", self._model_log())
+        self._set_status("대기 중 (순서 기다리는 중)",
+                         self._model_log() + "\n턴 라우팅: " + models.routing_summary(self.routing))
         runner.add_keepalive(self.uid)
         self.backend.prepare_workdir(prompts.build_system_prompt(self.system_mode, self.style))
 
@@ -616,6 +631,9 @@ class GenerationSession:
                 genmeta.stamp(job, self.collection_name)
         # 상태줄은 한 줄뿐이라 원인을 다 담을 수 없다 — 상세는 로그 패널에 남긴다
         log_text = self._model_log(include_requested=False) + f"\n세션 종료: {status}"
+        if self.usage_total:
+            log_text += (f"\n토큰 합계 ({self.usage_total.get('turns', 0)}턴): "
+                         + models.format_usage(self.usage_total))
         if detail:
             log_text += "\n" + "\n".join(f"  · {line}" for line in detail)
         self._set_status(status, log_text, phase="", hint=hint)
@@ -745,7 +763,19 @@ class GenerationSession:
             return ""
 
     # ---------- 에이전트 왕복 ----------
-    def _dispatch(self, prompt: str, images=None):
+    def _route(self, role: str):
+        """역할에 맞는 (모델, 추론 강도). Astra 폴백이 일어났으면 Astra 역할은 모두 기본 모델로."""
+        model_id, effort = self.routing.get(role, self.routing[models.ROLE_GENERATE])
+        if self.model_fallback_used and model_id == models.ASTRA_ID:
+            model_id = ""
+        return model_id, effort
+
+    def _dispatch(self, prompt: str, images=None, role: str = None):
+        """에이전트 턴을 보낸다. role(생성/검토/수정/플랜)에 따라 모델·추론 강도가 달라진다."""
+        if role is None:
+            role = models.ROLE_GENERATE
+        self._turn_role = role
+        self.backend.model, self.backend.reasoning_effort = self._route(role)
         # fallback은 image hint가 붙기 전 원본 요청을 그대로 다시 보내야 한다
         self._pending_prompt = prompt
         self._pending_images = list(images or [])
@@ -791,6 +821,11 @@ class GenerationSession:
 
     def _handle_response(self, stdout, error):
         if error:
+            # 실패·시간 초과 턴도 토큰을 썼을 수 있다 — stdout에 turn.completed가 있으면 집계한다
+            try:
+                self._log_usage(self.backend.parse_usage(stdout) if stdout else None)
+            except Exception:
+                _log.exception("실패 턴 사용량 파싱 실패")
             self._handle_error(error)
             return
 
@@ -801,7 +836,18 @@ class GenerationSession:
             return
         if reply.session_id:
             self.session_id = reply.session_id
+        self._log_usage(getattr(reply, "usage", None))
         self._handle_reply(reply.text)
+
+    def _log_usage(self, usage):
+        """턴별 토큰 사용량을 로그에 남기고 누계한다 — 어느 역할이 비용을 쓰는지 보기 위해서."""
+        if not usage:
+            return
+        models.add_usage(self.usage_total, usage)
+        role = models.ROLE_LABELS.get(self._turn_role, self._turn_role)
+        self._set_status(None, f"토큰 [{role} · {self._model_label()} · "
+                               f"{self.backend.reasoning_effort or '기본'}] "
+                               + models.format_usage(usage))
 
     def _handle_error(self, error):
         """CLI 실패 처리 — 폴백·재시도 규칙은 제작 모드와 무관하게 같다."""
@@ -830,10 +876,28 @@ class GenerationSession:
 
         배경 모드는 턴마다 요구하는 출력 형식이 달라(플랜은 JSON, 배치는 python)
         이 문구를 그대로 쓸 수 없다 — SceneSession이 단계별로 갈아끼운다."""
-        self._dispatch("직전 지시를 계속 수행하라. 전체 코드를 다시 작성하라.")
+        if self._turn_role == models.ROLE_REVIEW and self.last_code:
+            # 검토·대조 턴은 렌더·시트가 기록에 있어야 의미가 있다 — 기록을 잃었으면 검토 없이 마무리
+            self._awaiting_verdict = False
+            self.review_turns_left = self.compare_turns_left = 0
+            self._set_status("검토 이어가기 실패 — 검토 없이 마무리",
+                             "검토 턴 세션 이어가기 실패: 직전 결과로 마무리")
+            self._finalize()
+            return
+        if self._turn_role == models.ROLE_FIX and self._review_defects:
+            # 수정 턴은 결함 목록만 있으면 기록 없이도 할 수 있다 — _dispatch가 현재 코드를 머리말로 붙인다
+            sheet = self.multiview if self.multiview and self.multiview != self.ref_image else None
+            self._dispatch(prompts.build_object_review_fix_prompt(
+                self._review_defects, None, multiview=os.path.basename(sheet) if sheet else None),
+                role=models.ROLE_FIX)
+            return
+        self._dispatch("직전 지시를 계속 수행하라. 전체 코드를 다시 작성하라.", role=self._turn_role)
 
     def _handle_reply(self, text: str):
         """성공 응답 처리 — 배경 모드는 플랜 턴에서 이 단계를 갈아끼운다."""
+        if self._awaiting_verdict:
+            self._handle_verdict(text)
+            return
         status, code = parse_agent_reply(text)
         if code is None:
             if self.format_retries < 1:
@@ -841,26 +905,70 @@ class GenerationSession:
                 self._set_status("형식 위반, 재요청...", "응답에 코드 블록 없음 — 형식 재요청", phase='GEN')
                 self._dispatch(
                     "출력 형식 위반이다. 첫 줄 `STATUS: REVISE` 또는 `STATUS: DONE`, "
-                    "이어서 모델 전체의 python 코드 블록 1개로 다시 답하라."
+                    "이어서 모델 전체의 python 코드 블록 1개로 다시 답하라.",
+                    role=self._turn_role,
                 )
+                return
+            if self.last_code and self._turn_role in (models.ROLE_REVIEW, models.ROLE_FIX):
+                # 검토·수정 턴의 형식 위반 — 컬렉션에는 직전 성공 결과가 그대로 있다
+                self._set_status("수정 응답 형식 위반 — 직전 결과로 마무리",
+                                 "검토·수정 턴 형식 위반 반복: 직전 성공 결과로 마무리")
+                self.review_turns_left = self.compare_turns_left = 0
+                self._finalize()
                 return
             self._finish("실패: 에이전트 응답 형식 위반", ok=False)
             return
 
         self._execute(code, status)
 
+    def _handle_verdict(self, text: str):
+        """2단계 검토의 판정 응답 — 결함이 없으면 마무리, 있으면 수정 모델에 목록을 넘긴다."""
+        self._awaiting_verdict = False
+        ok, defects = parse_verdict(text)
+        if ok is None:
+            if self.verdict_format_retries < 1 and self._history_available():
+                # stateless면 렌더가 기록에 없어 재요청해도 눈먼 판정이 된다 — 그때는 바로 마무리
+                self.verdict_format_retries += 1
+                self._awaiting_verdict = True
+                self._set_status("판정 형식 위반, 재요청...", "판정 응답에 VERDICT 줄 없음 — 형식 재요청",
+                                 phase='GEN')
+                self._dispatch("출력 형식 위반이다. 코드 없이 첫 줄 `VERDICT: OK` 또는 `VERDICT: FIX`, "
+                               "FIX이면 `- ` 결함 목록으로 다시 답하라.", role=models.ROLE_REVIEW)
+                return
+            self._set_status("판정 형식 위반 — 검토 없이 마무리", "판정 형식 위반 반복: 직전 결과로 마무리")
+            self._finalize()
+            return
+        if ok:
+            self._set_status("시각 검토: 결함 없음 — 마무리", "판정: 고칠 결함 없음 (수정 턴 생략)")
+            self._finalize()
+            return
+        self._review_defects = defects
+        self.format_retries = 0
+        self._set_status(f"검토 지적 {len(defects)}건 — {models.model_label('CODEX', self._route(models.ROLE_FIX)[0])} 수정 호출중...",
+                         "판정: 결함 " + str(len(defects)) + "건\n"
+                         + "\n".join(f"  · {d[:120]}" for d in defects[:8]), phase='GEN')
+        sheet = self.multiview if self.multiview and self.multiview != self.ref_image else None
+        self._dispatch(prompts.build_object_review_fix_prompt(
+            defects, self._code_for_prompt(self.last_code),
+            multiview=os.path.basename(sheet) if sheet else None), role=models.ROLE_FIX)
+
     def _try_model_fallback(self, error: str) -> bool:
-        """초기 Astra 가용성 오류를 Codex CLI 기본 모델로 한 번 재시도한다."""
+        """Astra 가용성 오류를 Codex CLI 기본 모델로 한 번 재시도한다.
+
+        초기 턴이면 새 세션으로 다시 시작한다. 역할 라우팅으로 후속(resume) 턴에서 처음 Astra를
+        만날 수도 있다(검토·수정을 Astra로 설정했거나 승격된 2차 수정) — 그때는 세션을 유지한 채
+        같은 턴을 기본 모델로 다시 보낸다."""
         terminal_kinds = (errors.AUTH, errors.QUOTA, errors.NETWORK,
                           errors.TIMEOUT, errors.MISSING)
         if (self.backend.name != "codex"
                 or self.model_fallback_used
                 or self.backend.model != models.ASTRA_ID
-                or not self._model_fallback_eligible
-                or self.session_id is not None
-                or getattr(self, "_was_resume", False)
                 or errors.classify(error) in terminal_kinds
                 or not models.is_model_unavailable(error, models.ASTRA_ID)):
+            return False
+        if getattr(self, "_was_resume", False):
+            return self._fallback_resume_turn(error)
+        if not self._model_fallback_eligible or self.session_id is not None:
             return False
 
         # 재호출이 pending 값을 갱신하기 전에 원본 요청을 지역 변수에 고정한다
@@ -888,7 +996,24 @@ class GenerationSession:
             "GPT-6 Astra 사용 불가 - Codex CLI 기본 모델로 재시도중...",
             "\n".join(log_lines),
         )
-        self._dispatch(prompt, images=images)
+        self._dispatch(prompt, images=images, role=self._turn_role)
+        return True
+
+    def _fallback_resume_turn(self, error: str) -> bool:
+        """후속 턴의 Astra 가용성 오류 — 세션은 그대로 두고 같은 턴을 기본 모델로 다시 보낸다."""
+        prompt = self._pending_prompt
+        images = list(self._pending_images)
+        self.model_fallback_used = True
+        self.effective_model_label = models.CODEX_DEFAULT_LABEL
+        job = self._job()
+        if job:
+            job.effective_model = self.effective_model_label
+            job.model_fallback = True
+        self._set_status(
+            "GPT-6 Astra 사용 불가 - 이번 턴부터 Codex CLI 기본 모델로 재시도중...",
+            "모델 fallback (후속 턴): GPT-6 Astra -> Codex CLI 기본 모델\n"
+            f"fallback 판정: {errors.describe(error, self.backend.name)}")
+        self._dispatch(prompt, images=images, role=self._turn_role)
         return True
 
     # ---------- 실행/마무리 ----------
@@ -905,10 +1030,13 @@ class GenerationSession:
         if not ok:
             if self.exec_retries < 2:
                 self.exec_retries += 1
-                self._set_status(f"실행 오류 — {self._model_label()} 자기수정 호출중...",
+                # 1차 수정은 저렴한 수정 모델, 그래도 실패하면 생성 모델로 승격한다
+                role = models.ROLE_FIX if self.exec_retries == 1 else models.ROLE_GENERATE
+                label = models.model_label('CODEX', self._route(role)[0])
+                self._set_status(f"실행 오류 — {label} 자기수정 호출중...",
                                  f"실행 오류(재시도 {self.exec_retries}/2): {error.splitlines()[-1]}",
                                  phase='GEN')
-                self._dispatch(prompts.build_error_prompt(error))
+                self._dispatch(prompts.build_error_prompt(error), role=role)
                 return
             # 검토·대조 턴의 수정본이 끝내 실패하면 실행 전에 비워진 컬렉션에 직전 성공 결과를 되살린다
             if self.last_code:
@@ -935,19 +1063,54 @@ class GenerationSession:
         self._finalize()
 
     def _render_sheet(self, tag: str):
-        """세션 컬렉션 메시를 6시점 렌더해 한 장으로 이은 경로를 돌려준다. 메시가 없으면 None."""
+        """세션 컬렉션 메시를 6시점 렌더해 한 장으로 이은 경로를 돌려준다. 메시가 없으면 None.
+
+        검토·대조용이라 텍스처 캡처보다 작게 렌더한다 — 이미지 토큰은 면적에 비례한다."""
         from ..texturing import capture as tex_capture
         coll = bpy.data.collections.get(self.collection_name)
         mesh_objs = [o for o in coll.objects if o.type == 'MESH'] if coll else []
         if not mesh_objs:
             return None
         out_dir = os.path.join(self.workdir, f"{tag}_{self.iteration}")
+        resolution = int(getattr(self.prefs, "review_resolution", 512) or 512)
         with _bake_context(self.scene_name) as ctx:
-            views = tex_capture.render_views(ctx, mesh_objs, out_dir)
+            views = tex_capture.render_views(ctx, mesh_objs, out_dir, resolution=resolution)
         return tex_capture.join_sheet(views, os.path.join(self.workdir, f"{tag}_{self.iteration}.png"))
 
+    def _history_available(self) -> bool:
+        """resume으로 이어지는 세션이면 첫 턴의 코드·이미지가 대화 기록에 남아 있다."""
+        return bool(self.session_id) and not self.stateless
+
+    def _code_for_prompt(self, code: str):
+        """검토·대조 프롬프트에 코드를 실을지 — 기록이 있으면 싣지 않는다(입력 토큰 절약).
+
+        stateless 폴백은 _dispatch가 직전 코드를 머리말로 붙이므로 여기서 또 싣지 않는다."""
+        return None if (self._history_available() or self.stateless) else code
+
     def _dispatch_review(self, code: str) -> bool:
-        """현재 모델을 6시점 렌더해 모델 스스로 결함을 찾아 고치는 턴을 보낸다. 실패하면 False."""
+        """현재 모델을 6시점 렌더해 검토 모델이 결함을 찾는 턴을 보낸다. 실패·생략이면 False.
+
+        환경설정에 따라 두 방식 중 하나다:
+        - 판정 후 수정(TWO_STAGE): 검토 모델이 결함 목록만 돌려주고, 결함이 있을 때만 수정 모델이
+          전체 코드를 고친다. 멀쩡한 결과에는 비싼 코드 재작성이 생기지 않는다.
+        - 즉시 수정(DIRECT): 검토 모델이 렌더를 보고 바로 전체 코드를 다시 쓴다."""
+        sheet = self.multiview if self.multiview and self.multiview != self.ref_image else None
+        coll = bpy.data.collections.get(self.collection_name)
+        mesh_objs = [o for o in coll.objects if o.type == 'MESH'] if coll else []
+        if not mesh_objs:
+            return False   # 검토할 메시가 없다
+        try:
+            diagnostics = review_diag.describe(review_diag.shell_boxes(mesh_objs))
+        except Exception:
+            _log.exception("시각 검토 자동 점검 실패")
+            diagnostics = []
+        # 자동 점검이 깨끗하고 대조할 시트도 없으면 검토 호출 자체를 아낀다
+        if (not diagnostics and not sheet and not self.ref_image
+                and bool(getattr(self.prefs, "skip_clean_review", True))):
+            self.review_turns_left = 0
+            self._set_status("자동 점검 이상 없음 — 시각 검토 생략",
+                             "자동 점검(짝 없는 파트·떠 있는 파트) 이상 없음, 대조할 시트·참조 없음: 검토 턴 생략")
+            return False
         try:
             render = self._render_sheet("review")
         except Exception as e:
@@ -956,28 +1119,36 @@ class GenerationSession:
             return False
         if not render:
             return False
-        try:
-            coll = bpy.data.collections.get(self.collection_name)
-            diagnostics = review_diag.describe(review_diag.shell_boxes(
-                [o for o in coll.objects if o.type == 'MESH'] if coll else []))
-        except Exception:
-            _log.exception("시각 검토 자동 점검 실패")
-            diagnostics = []
         turn = self.review_turns_total - self.review_turns_left + 1
         self.review_turns_left -= 1
         self.iteration += 1
+        self.format_retries = 0
+        two_stage = str(getattr(self.prefs, "review_mode", 'DIRECT') or 'DIRECT') == 'TWO_STAGE'
         summary = " / ".join(l for l in diagnostics if not l.startswith("  "))
-        self._set_status(f"시각 검토 {turn}/{self.review_turns_total} — {self._model_label()} 호출중...",
-                         f"시각 검토 턴 {turn}/{self.review_turns_total}: 렌더 보고 결함 수정 요청"
+        review_label = models.model_label('CODEX', self._route(models.ROLE_REVIEW)[0])
+        self._set_status(f"시각 검토 {turn}/{self.review_turns_total} — {review_label} 호출중...",
+                         f"시각 검토 턴 {turn}/{self.review_turns_total}: "
+                         + ("렌더 보고 결함 판정 요청" if two_stage else "렌더 보고 결함 수정 요청")
                          + (f" (자동 점검: {summary})" if summary else ""),
                          phase='GEN')
-        # 시트를 빼면 검토가 결함만 보고 시트와의 형태 차이는 못 잡는다
-        sheet = self.multiview if self.multiview and self.multiview != self.ref_image else None
-        images = [render] + [p for p in (sheet, self.ref_image) if p]
-        self._dispatch(prompts.build_object_review_prompt(
-            self.request, os.path.basename(render), code, turn, self.review_turns_total,
-            ref_image=self._ref_name(), diagnostics=diagnostics,
-            multiview=os.path.basename(sheet) if sheet else None), images=images)
+        # 시트·참조 이미지는 첫 턴에 보냈다 — 기록이 살아 있으면 다시 첨부하지 않는다(이미지 토큰 절약).
+        # 시트를 아예 빼면 검토가 결함만 보고 시트와의 형태 차이는 못 잡으므로 이름으로 가리킨다
+        attached = not self._history_available()
+        images = [render] + ([p for p in (sheet, self.ref_image) if p] if attached else [])
+        kwargs = dict(ref_image=self._ref_name(), diagnostics=diagnostics,
+                      multiview=os.path.basename(sheet) if sheet else None, attached=attached)
+        if two_stage:
+            self._awaiting_verdict = True
+            self._review_defects = []
+            self.verdict_format_retries = 0
+            self._dispatch(prompts.build_object_review_verdict_prompt(
+                self.request, os.path.basename(render), turn, self.review_turns_total, **kwargs),
+                images=images, role=models.ROLE_REVIEW)
+        else:
+            self._dispatch(prompts.build_object_review_prompt(
+                self.request, os.path.basename(render), self._code_for_prompt(code),
+                turn, self.review_turns_total, **kwargs),
+                images=images, role=models.ROLE_REVIEW)
         return True
 
     def _dispatch_compare(self, code: str) -> bool:
@@ -996,12 +1167,16 @@ class GenerationSession:
         turn = self.compare_turns_total - self.compare_turns_left + 1
         self.compare_turns_left -= 1
         self.iteration += 1
-        self._set_status(f"6면도 대조 {turn}/{self.compare_turns_total} — {self._model_label()} 호출중...",
+        self.format_retries = 0
+        review_label = models.model_label('CODEX', self._route(models.ROLE_REVIEW)[0])
+        self._set_status(f"6면도 대조 {turn}/{self.compare_turns_total} — {review_label} 호출중...",
                          f"6면도 대조 턴 {turn}/{self.compare_turns_total}: 시트 vs 렌더 비교 요청",
                          phase='GEN')
+        attached = not self._history_available()
         self._dispatch(prompts.build_character_compare_prompt(
-            self._mv_name(), os.path.basename(render), code, turn, self.compare_turns_total),
-            images=[self.multiview, render])
+            self._mv_name(), os.path.basename(render), self._code_for_prompt(code),
+            turn, self.compare_turns_total, sheet_attached=attached),
+            images=([self.multiview] if attached else []) + [render], role=models.ROLE_REVIEW)
         return True
 
     def _finalize(self):

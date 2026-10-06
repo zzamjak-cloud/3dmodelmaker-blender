@@ -157,6 +157,7 @@ class LP3DJobItem(bpy.types.PropertyGroup):
     requested_model: StringProperty(default="")           # 생성 요청 모델 snapshot
     effective_model: StringProperty(default="")           # 실제 생성 모델 snapshot
     model_fallback: BoolProperty(default=False)             # Astra fallback 여부
+    model_routing: StringProperty(default="")               # 턴 역할별 모델 요약 (생성/검토/수정/플랜)
 
 
 class LP3DSceneProps(bpy.types.PropertyGroup):

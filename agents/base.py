@@ -3,9 +3,10 @@ from abc import ABC, abstractmethod
 
 
 class AgentReply:
-    def __init__(self, text: str, session_id: str = None):
+    def __init__(self, text: str, session_id: str = None, usage: dict = None):
         self.text = text
         self.session_id = session_id
+        self.usage = usage          # 이 턴의 토큰 사용량 (백엔드가 알려주면)
 
 
 class AgentBackend(ABC):
@@ -28,7 +29,8 @@ class AgentBackend(ABC):
         self.exe = exe_path
         self.workdir = workdir
         # 세션이 환경설정에서 주입 — 비우면 CLI 기본 모델 사용
-        self.model = ""           # 초기 코드 생성용
+        self.model = ""           # 이번 턴의 모델 — 세션이 턴 역할에 따라 매번 바꾼다
+        self.reasoning_effort = ""  # 이번 턴의 추론 강도 — 비우면 백엔드 기본값
 
     @abstractmethod
     def prepare_workdir(self, system_prompt: str):

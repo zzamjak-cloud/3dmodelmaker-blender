@@ -20,7 +20,7 @@ FIELDS = (
     "prompt", "ref_image_path", "creation_mode", "front_image", "character_type", "scene_size",
     "style", "modeling_type", "status", "log", "collection_name", "code", "entry_id",
     "multiview_path", "texture_path", "image_backend", "lane",
-    "requested_model", "effective_model", "model_fallback",
+    "requested_model", "effective_model", "model_fallback", "model_routing",
 )
 
 

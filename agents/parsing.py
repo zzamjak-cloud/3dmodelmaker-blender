@@ -1,5 +1,6 @@
 # 에이전트 응답 파싱: STATUS 헤더 + 펜스 코드 블록 추출
-# (확장 검증기의 백슬래시 검사 때문에 정규식 대신 문자열 파싱 사용)
+# (확장 검증기의 백슬래시 검사 때문에 코드 블록은 정규식 대신 문자열 파싱 사용)
+import re
 
 _STATUS_VALUES = ("DONE", "REVISE", "PLAN")
 
@@ -39,3 +40,35 @@ def parse_agent_block(text: str, langs=("python", "py")):
 def parse_agent_reply(text: str):
     """(status, code) 반환. status는 'DONE'/'REVISE'/'PLAN'/None, code는 마지막 python 블록 또는 None."""
     return parse_agent_block(text)
+
+
+_VERDICT_RE = re.compile(r"^[\s*_`#>]*VERDICT\s*:\s*[*_`]*\s*(OK|FIX)\b[*_`]*\s*(.*)$",
+                         re.IGNORECASE)
+_LIST_MARK_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+
+
+def parse_verdict(text: str):
+    """검토 판정 턴 응답 → (ok, defects). ok는 True(이상 없음)/False(수정 필요)/None(형식 위반).
+
+    판정 턴은 코드를 쓰지 않고 `VERDICT: OK` 또는 `VERDICT: FIX` 한 줄과 결함 목록만 돌려준다 —
+    전체 코드 재작성이라는 가장 비싼 출력을 결함이 있을 때만 일으키기 위해서다.
+    모델이 헤더를 굵게·백틱으로 감싸거나 결함을 같은 줄에 적어도 받아들인다."""
+    ok = None
+    defects = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if ok is None:
+            m = _VERDICT_RE.match(stripped)
+            if not m:
+                continue
+            ok = m.group(1).upper() == "OK"
+            tail = m.group(2).strip(" -—:*_`")
+            if not ok and tail:
+                defects.append(tail)   # "VERDICT: FIX — 바퀴 떠 있음"
+            continue
+        if ok is False and _LIST_MARK_RE.match(stripped):
+            # "- 결함", "1. 결함", "1) 결함" — 목록 표식만 떼고 "0.2m 내려라" 같은 본문 숫자는 남긴다
+            body = _LIST_MARK_RE.sub("", stripped, count=1).strip()
+            if body:
+                defects.append(body)
+    return ok, defects

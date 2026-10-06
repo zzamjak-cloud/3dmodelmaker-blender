@@ -14,7 +14,7 @@ import os
 
 import bpy
 
-from . import (errors, jobs, library, multiview, prompts, runner, scene_kit, scene_plan,
+from . import (errors, jobs, library, models, multiview, prompts, runner, scene_kit, scene_plan,
                sceneview, scheduler, styles)
 from .session import GenerationSession, cancel_session, is_active
 
@@ -158,7 +158,7 @@ class SceneSession(GenerationSession):
                          f"배경 세션 시작: {self.request} (규모 {self.scene_size}, "
                          f"{budget_text}, 배치 총량 기준 "
                          f"{scene_plan.target_instances(self.scene_size)}개)", phase='PLAN')
-        self._dispatch(prompt, images=images)
+        self._dispatch(prompt, images=images, role=models.ROLE_PLAN)
 
     def _resume_fallback_dispatch(self):
         """resume이 깨졌을 때 — 배경은 턴마다 요구 형식이 달라 그 턴을 통째로 다시 보낸다.
@@ -197,7 +197,7 @@ class SceneSession(GenerationSession):
             return
         self.plan_retried = True
         self._set_status("플랜 형식 오류, 재요청...", f"플랜 검증 실패: {reason}", phase='PLAN')
-        self._dispatch(prompts.build_scene_plan_retry_prompt(reason))
+        self._dispatch(prompts.build_scene_plan_retry_prompt(reason), role=models.ROLE_PLAN)
 
     def _save_plan(self, plan: dict):
         """확정 플랜을 세션 작업 폴더에 남긴다 — 실패해도 진행을 막지 않는다."""
@@ -209,6 +209,15 @@ class SceneSession(GenerationSession):
             _log.exception("LP3D 씬 플랜 저장 실패")
 
     # ---------- ③ 에셋 키트 (자식 잡) ----------
+    def _asset_reviewed(self, asset: dict) -> bool:
+        """이 에셋에 시각 검토 턴을 돌릴지 — 기본은 랜드마크·대형(L)만.
+
+        소품은 수가 많고 작아 검토로 얻는 품질보다 검토 호출 비용이 크다."""
+        scope = str(getattr(self.prefs, "scene_asset_review_scope", 'LANDMARK') or 'LANDMARK')
+        if scope.upper() == 'ALL':
+            return True
+        return bool(asset.get("landmark")) or str(asset.get("size_class") or "").upper() == 'L'
+
     def _blender_start_kit(self):
         from . import session as session_mod
 
@@ -247,7 +256,8 @@ class SceneSession(GenerationSession):
                 return
             # 멀티뷰는 랜드마크만 쓴다 (시트 1장당 CLI 호출 1회 — 시간·비용 절감)
             error = session_mod.start_job(
-                self.scene_name, uid, multiview_override=bool(asset.get("landmark")))
+                self.scene_name, uid, multiview_override=bool(asset.get("landmark")),
+                review_override=self._asset_reviewed(asset))
             if not error:
                 continue
             job = props.job_by_uid(uid)
@@ -431,9 +441,10 @@ class SceneSession(GenerationSession):
             self.place_plan, self.kit_manifest, self.tri_budget,
             sceneview=self._sv_name(), scene_size=self.scene_size)
         images = [self.sceneview] if self.sceneview else None
-        self._set_status(f"배치 코드 생성 중 — {self._model_label()} 호출중...",
+        self._set_status(f"배치 코드 생성 중 — "
+                         f"{models.model_label('CODEX', self._route(models.ROLE_GENERATE)[0])} 호출중...",
                          "배치 턴 시작 (새 세션)", phase='PLACE')
-        self._dispatch(prompt, images=images)
+        self._dispatch(prompt, images=images, role=models.ROLE_GENERATE)
 
     def _execute(self, code: str, status):
         self._set_status("배치 실행 대기중...", phase='PLACE')
@@ -454,7 +465,9 @@ class SceneSession(GenerationSession):
                 self.exec_retries += 1
                 self._set_status(f"배치 오류 — 자기수정 {self.exec_retries}/2 호출중...",
                                  f"배치 실행 오류: {error.splitlines()[-1]}", phase='PLACE')
-                self._dispatch(prompts.build_error_prompt(error))
+                # 1차 수정은 저렴한 수정 모델, 그래도 실패하면 생성 모델로 승격한다
+                role = models.ROLE_FIX if self.exec_retries == 1 else models.ROLE_GENERATE
+                self._dispatch(prompts.build_error_prompt(error), role=role)
                 return
             self._finish("실패: 배치 코드 실행 오류 반복", ok=False)
             return
@@ -478,7 +491,7 @@ class SceneSession(GenerationSession):
                                  f"씬 트라이 {self.scene_tris} > 예산 {self.tri_budget}",
                                  phase='PLACE')
                 self._dispatch(prompts.build_scene_budget_prompt(
-                    self.scene_tris, self.tri_budget))
+                    self.scene_tris, self.tri_budget), role=models.ROLE_FIX)
                 return
             # 축소 재요청까지 썼으면 경고만 남기고 마감한다 — 무한 왕복은 더 나쁘다
             self._log_line(f"경고: 축소 후에도 {self.scene_tris} tris로 "

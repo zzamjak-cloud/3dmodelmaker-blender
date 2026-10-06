@@ -160,8 +160,24 @@ def character_type_note(character_type: str) -> str:
                                     _CHARACTER_TYPE_NOTE["AUTO"])
 
 
+def _previous_code_block(code) -> str:
+    """검토·대조 턴에 붙일 '이전 코드' 구간.
+
+    resume 세션에서는 직전 턴의 코드가 이미 대화 기록에 있다 — 다시 인라인하면 코드 길이만큼
+    입력 토큰을 매 턴 이중으로 낸다. code를 비우면 기록을 가리키는 한 줄로 대신한다."""
+    if code:
+        return f"이전 코드:\n```python\n{code}\n```\n\n"
+    return ("이전 코드: 직전 턴에 네가 작성해 실행한 코드(위에 '현재 코드'로 실렸거나 이 대화 기록에 있다)"
+            "를 기준으로 한다.\n\n")
+
+
+def _attached_note(attached: bool) -> str:
+    """첫 턴에 첨부한 시트·참조 이미지를 다시 보내지 않을 때 붙이는 안내."""
+    return "" if attached else " (첫 턴에 첨부 — 이 대화 기록에 있다)"
+
+
 def build_character_compare_prompt(sheet: str, render: str, code: str, turn: int,
-                                   total: int) -> str:
+                                   total: int, sheet_attached: bool = True) -> str:
     """6면도 시트와 현재 모델 렌더를 나란히 주고 차이를 고친 전체 코드를 요구한다.
 
     첫 생성은 시트를 '보고' 만들지만 결과가 시트와 얼마나 다른지는 알 수 없다.
@@ -169,7 +185,8 @@ def build_character_compare_prompt(sheet: str, render: str, code: str, turn: int
     떨어진 파트가 드러난다."""
     return (
         f"방금 실행한 코드의 결과를 시트와 같은 6시점으로 렌더했다 (대조 {turn}/{total}).\n\n"
-        f"- {sheet}: 목표 턴어라운드 시트 (윗줄 정면|뒷면|좌측면, 아랫줄 우측면|상면|3/4)\n"
+        f"- {sheet}: 목표 턴어라운드 시트 (윗줄 정면|뒷면|좌측면, 아랫줄 우측면|상면|3/4)"
+        f"{_attached_note(sheet_attached)}\n"
         f"- {render}: 현재 모델 렌더 (윗줄 FRONT|RIGHT|BACK, 아랫줄 LEFT|TOP|BOTTOM — 칸 순서가 시트와 다르니 라벨로 대조하라)\n\n"
         "두 이미지를 칸별로 대조해 다음을 찾아 **모두** 고쳐라:\n"
         "1. 시트에는 있는데 모델에 없는 요소 (귀·꼬리·장비·무늬·털 다발 등) — 추가\n"
@@ -177,41 +194,23 @@ def build_character_compare_prompt(sheet: str, render: str, code: str, turn: int
         "3. 몸에서 떨어져 떠 있는 파트, 관절에서 끊긴 파트 — 이웃 파트에 파묻고 관절 sphere로 이어라\n"
         "4. 실루엣 차이 — 측면·상면에서 시트와 다른 윤곽\n"
         "5. 색 배치 차이 — 어느 부위가 어떤 색인지\n\n"
-        "이전 코드:\n"
-        f"```python\n{code}\n```\n\n"
+        + _previous_code_block(code) +
         "차이를 고친 **전체 코드**를 다시 작성하라 (이전 생성물은 자동 삭제된다). 잘 맞는 부분은 "
         "그대로 두고, 트라이가 늘어도 좋으니 빠진 요소를 빼먹지 마라. "
         "출력 형식: 첫 줄 `STATUS: DONE` + python 코드 블록 1개."
     )
 
 
-def build_object_review_prompt(request: str, render: str, code: str, turn: int, total: int,
-                               ref_image: str = None, diagnostics=None, multiview: str = None) -> str:
-    """오브젝트 결과 렌더를 보여 주고 스스로 결함을 찾아 고친 전체 코드를 요구한다.
-
-    코드만 보고는 창틀이 표면과 어긋났는지, 파트가 떠 있는지, 생명체 몸이 끊겼는지 알 수
-    없다. 같은 모델을 6시점으로 렌더해 보여 주면 '보면 바로 아는' 결함이 잡힌다."""
-    ref = (f"- {ref_image}: 사용자가 준 참조 이미지 — 형태·비율·색을 이것과도 대조하라\n"
-           if ref_image else "")
-    sheet = (f"- {multiview}: 멀티뷰 참조 시트 (좌상=정면, 우상=측면, 좌하=상면, 우하=3/4뷰) — "
-             "형태·비율·색의 기준\n" if multiview else "")
-    diag = ("\n자동 점검 결과 (좌표는 월드 미터, 정면은 -y) — 렌더에서 해당 위치를 확인하고 고쳐라:\n"
-            + "\n".join(diagnostics) + "\n") if diagnostics else ""
+def _review_checklist(multiview: str, action: str) -> str:
+    """검토 턴의 결함 체크리스트. action은 '고쳐라'(즉시 수정) 또는 '찾아라'(판정)."""
     # 시트가 있으면 결함 수리보다 시트 일치가 먼저다 — 실루엣이 틀린 모델은 결함만 고쳐도 틀린 채로 남는다
     compare = ((f"0. **시트 대조** — 렌더 FRONT를 시트 정면, RIGHT를 측면, TOP을 상면과 나란히 놓고 "
                 "부위별 외곽 형상·높이 구간·폭·색을 비교하라. 다른 부위는 시트 기준으로 형태를 다시 "
                 "잡아라(머리·팔·다리·발 모양이 시트와 다르면 그 부위를 새로 설계해도 된다). "
                 "색은 시트에서 읽은 hex로 맞춰라\n")
                if multiview else "")
-    keep = ("시트와 맞는 부분은 그대로 두고, 시트와 다른 부위는 시트대로 다시 만들어라."
-            if multiview else
-            "잘 된 부분은 그대로 두고 결함만 고쳐라 — 형태를 처음부터 갈아엎지 마라.")
     return (
-        f"방금 실행한 코드의 결과를 6시점으로 렌더했다 (시각 검토 {turn}/{total}).\n\n"
-        f"- 요청: {request}\n"
-        f"- {render}: 현재 모델 렌더 (윗줄 FRONT|RIGHT|BACK, 아랫줄 LEFT|TOP|BOTTOM)\n"
-        f"{sheet}{ref}\n"
-        "렌더를 칸별로 꼼꼼히 보고 다음 결함을 찾아 **모두** 고쳐라:\n"
+        f"렌더를 칸별로 꼼꼼히 보고 다음 결함을 **모두** {action}:\n"
         f"{compare}"
         "1. 시그니처 요소 누락 — 이 대상을 그 대상으로 읽히게 하는 요소가 빠졌거나 너무 작아 안 보임\n"
         "2. 떠 있거나 너무 깊이 파묻혀 안 보이는 파트, 표면과 어긋난 부착물 — 표면에 바로 붙는 것은 "
@@ -222,9 +221,78 @@ def build_object_review_prompt(request: str, render: str, code: str, turn: int, 
         "5. 좌우 대칭이어야 하는데 한쪽만 다름 / 반대로 와이퍼처럼 같은 방향으로 나란해야 할 것이 "
         "거울상으로 마주 봄 / 비율이 어색함(머리·바퀴·지붕 과장 부족)\n"
         "6. 디테일이 빈약함 — 재질·부위별 색 구분과 형태 디테일 보강 (같은 재질에 명암 색을 칠하지 마라)\n"
-        f"{diag}\n"
-        "이전 코드:\n"
-        f"```python\n{code}\n```\n\n"
+    )
+
+
+def _review_header(request: str, render: str, turn: int, total: int, ref_image, diagnostics,
+                   multiview, attached: bool) -> str:
+    """검토 턴 머리말 — 이미지 목록과 자동 점검 결과."""
+    note = _attached_note(attached)
+    ref = (f"- {ref_image}: 사용자가 준 참조 이미지{note} — 형태·비율·색을 이것과도 대조하라\n"
+           if ref_image else "")
+    sheet = (f"- {multiview}: 멀티뷰 참조 시트{note} (좌상=정면, 우상=측면, 좌하=상면, 우하=3/4뷰) — "
+             "형태·비율·색의 기준\n" if multiview else "")
+    diag = ("\n자동 점검 결과 (좌표는 월드 미터, 정면은 -y) — 렌더에서 해당 위치를 확인하라:\n"
+            + "\n".join(diagnostics) + "\n") if diagnostics else ""
+    return (
+        f"방금 실행한 코드의 결과를 6시점으로 렌더했다 (시각 검토 {turn}/{total}).\n\n"
+        f"- 요청: {request}\n"
+        f"- {render}: 현재 모델 렌더 (윗줄 FRONT|RIGHT|BACK, 아랫줄 LEFT|TOP|BOTTOM)\n"
+        f"{sheet}{ref}{diag}\n"
+    )
+
+
+def _review_keep(multiview: str) -> str:
+    return ("시트와 맞는 부분은 그대로 두고, 시트와 다른 부위는 시트대로 다시 만들어라."
+            if multiview else
+            "잘 된 부분은 그대로 두고 결함만 고쳐라 — 형태를 처음부터 갈아엎지 마라.")
+
+
+def build_object_review_verdict_prompt(request: str, render: str, turn: int, total: int,
+                                       ref_image: str = None, diagnostics=None,
+                                       multiview: str = None, attached: bool = True) -> str:
+    """검토 1단계(판정): 렌더를 보고 결함 목록만 짧게 돌려받는다 — 코드는 쓰지 않는다.
+
+    전체 코드 재작성은 검토 턴에서 가장 비싼 출력이다. 하위 모델이 먼저 결함 유무만 판정하고,
+    결함이 있을 때만 수정 턴을 보내면 멀쩡한 결과에는 비싼 출력이 생기지 않는다."""
+    return (
+        _review_header(request, render, turn, total, ref_image, diagnostics, multiview, attached)
+        + _review_checklist(multiview, "찾아라")
+        + "\n코드를 쓰지 마라. 출력 형식: 첫 줄 `VERDICT: OK`(고칠 결함 없음) 또는 `VERDICT: FIX`. "
+        "FIX이면 그 아래에 결함을 `- ` 목록으로 최대 8줄, 한 줄에 하나씩 — 어느 칸(FRONT/RIGHT/...)의 "
+        "어느 부위가 어떻게 잘못됐고 어떻게 고칠지(헬퍼·좌표·색 hex)를 구체적으로 적어라. "
+        "사소한 취향 차이는 결함이 아니다."
+    )
+
+
+def build_object_review_fix_prompt(defects: list, code: str, multiview: str = None) -> str:
+    """검토 2단계(수정): 판정 턴이 적은 결함 목록을 그대로 고친 전체 코드를 요구한다."""
+    items = "\n".join(f"- {d}" for d in defects) if defects else "- (판정 턴의 결함 목록)"
+    return (
+        "직전 판정에서 찾은 결함을 고쳐라:\n"
+        f"{items}\n\n"
+        + _previous_code_block(code) +
+        "결함을 고친 **전체 코드**를 다시 작성하라 (이전 생성물은 자동 삭제된다). "
+        f"{_review_keep(multiview)} 요청에 트라이 상한이 있으면 보강 후에도 지켜라 "
+        "(디테일을 늘리면 그만큼 다른 곳 세그먼트를 줄여라). `assert`로 자기검사하지 마라. "
+        "출력 형식: 첫 줄 `STATUS: DONE` + python 코드 블록 1개."
+    )
+
+
+def build_object_review_prompt(request: str, render: str, code: str, turn: int, total: int,
+                               ref_image: str = None, diagnostics=None, multiview: str = None,
+                               attached: bool = True) -> str:
+    """오브젝트 결과 렌더를 보여 주고 스스로 결함을 찾아 고친 전체 코드를 요구한다 (즉시 수정형).
+
+    코드만 보고는 창틀이 표면과 어긋났는지, 파트가 떠 있는지, 생명체 몸이 끊겼는지 알 수
+    없다. 같은 모델을 6시점으로 렌더해 보여 주면 '보면 바로 아는' 결함이 잡힌다.
+    code가 비어 있으면 resume 기록의 코드를 가리키고, attached가 False면 시트·참조 이미지를
+    첫 턴 첨부본으로 가리킨다 — 둘 다 입력 토큰을 줄이기 위한 것이다."""
+    keep = _review_keep(multiview)
+    return (
+        _review_header(request, render, turn, total, ref_image, diagnostics, multiview, attached)
+        + _review_checklist(multiview, "고쳐라")
+        + "\n" + _previous_code_block(code) +
         "결함을 고친 **전체 코드**를 다시 작성하라 (이전 생성물은 자동 삭제된다). "
         f"{keep} 요청에 트라이 상한이 있으면 보강 후에도 지켜라 "
         "(디테일을 늘리면 그만큼 다른 곳 세그먼트를 줄여라). `assert`로 자기검사하지 마라. "

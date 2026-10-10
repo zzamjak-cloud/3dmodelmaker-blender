@@ -254,6 +254,9 @@ def _apply_saved(scene=None):
 def _on_load_post(_filepath):
     # 새 파일/기존 파일을 열 때마다 사용자 설정을 이어받는다
     _apply_saved()
+    # 결과 .blend(스튜디오 포함)를 열면 뷰포트를 스튜디오 보기로 바꾼다
+    from .core import studio
+    studio.on_load_post()
 
 
 def _restore_deferred():

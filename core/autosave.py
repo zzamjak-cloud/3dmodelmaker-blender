@@ -158,13 +158,15 @@ def _window_override():
     return bpy.context.temp_override(window=window) if window is not None else None
 
 
-def write_blend(folder: str, name: str, collections=None, hidden=None) -> str:
+def write_blend(folder: str, name: str, collections=None, hidden=None, studio_kind=None) -> str:
     """결과 .blend를 쓴다. 경로 또는 실패 시 빈 문자열.
 
     collections(컬렉션 이름 목록)를 주면 그 결과만 담은 임시 씬을 만들어 그 씬만 쓴다 — 큐에서 함께
     만든 다른 결과가 섞이지 않게. 없으면 현재 파일 전체를 사본으로 저장한다(`copy=True`: 편집 중인
     파일 경로는 그대로다). hidden 컬렉션은 함께 담되 뷰 레이어에서 제외한다(배경 키트 원본).
     씬에서 빈자리로 옮겨 둔 결과는 파일 안에서는 원점으로 되돌려 쓴다.
+    studio_kind('CHARACTER'/'OBJECT')를 주면 그 임시 씬에만 스튜디오(조명·배경·카메라·렌더 설정)를 세워 함께
+    쓴다 — 작업 중인 파일에는 남지 않는다.
     실패는 로그만 남긴다 — 저장 실패가 생성 결과를 잃게 하면 안 된다."""
     import bpy
     from .jobs import PLACE_MARK
@@ -175,7 +177,7 @@ def write_blend(folder: str, name: str, collections=None, hidden=None) -> str:
     try:
         if colls:
             temp = bpy.data.scenes.new(name or "model")
-            shifted = []
+            shifted, staged = [], []
             try:
                 for coll in colls + [c for c in hide if c not in colls]:
                     temp.collection.children.link(coll)
@@ -198,8 +200,17 @@ def write_blend(folder: str, name: str, collections=None, hidden=None) -> str:
                             obj.location.x -= offset[0]
                             obj.location.y -= offset[1]
                             shifted.append((obj, offset[0], offset[1]))
+                if studio_kind:
+                    from . import studio
+                    try:
+                        staged = studio.build(temp, [o for c in colls for o in c.all_objects], studio_kind)
+                    except Exception:   # 스튜디오 실패가 결과 저장을 막으면 안 된다 — 모델만 쓴다
+                        log.exception("스튜디오 구성 실패")
                 bpy.data.libraries.write(blend, {temp}, path_remap='ABSOLUTE', compress=True)
             finally:
+                if staged:
+                    from . import studio
+                    studio.remove(staged)
                 for obj, dx, dy in shifted:
                     obj.location.x += dx
                     obj.location.y += dy

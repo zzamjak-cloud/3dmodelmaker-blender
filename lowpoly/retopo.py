@@ -128,6 +128,91 @@ def weld_seams(obj, dist: float = 1e-5) -> int:
     return before - len(obj.data.vertices)
 
 
+HOLE_MAX_PERIMETER = 0.3   # 키 대비 열린 루프 둘레 상한 — 이보다 큰 구멍은 메우지 않는다
+
+
+def fill_small_holes(obj, max_ratio: float = HOLE_MAX_PERIMETER) -> int:
+    """용접 뒤에도 남은 열린 루프를 메운다. 메운 루프 수를 돌려준다.
+
+    서버(v0.42.0~)는 속을 채운 닫힌 한 겹을 보내므로 열린 루프는 전부 결함이다. 서버의 cumesh fill_holes 는
+    둘레 제한 안이어도 가지가 있는 복잡한 루프를 남긴다(실측 2026-10-10, 소녀 피규어: 부츠 옆면 둘레 0.16
+    짜리 73엣지 루프 → 바닥에서 올려다보면 구멍). bmesh.ops.holes_fill 은 같은 메시에서 단순 루프를 남기고 비매니폴드
+    엣지를 만들어 쓰지 않는다 — 루프마다 면을 직접 만들고, 코너 UV 는 옆 면에서 옮겨 온다.
+    용접 전에 돌리면 UV 심이 전부 경계라 메우면 안 되는 곳까지 막는다 — weld_seams 뒤에 부른다."""
+    zs = [v.co.z for v in obj.data.vertices]
+    limit = (max(zs) - min(zs)) * max_ratio if zs else 0.0
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    # 두 루프가 정점 하나에서 맞닿은 8자 루프(실측: 경계 차수 4·6 정점 43개)는 따라가는 길이 갈린다 —
+    # 그런 정점을 면 부채꼴마다 쪼개 단순 루프로 만든 뒤 메운다.
+    for vert in [v for v in bm.verts if sum(1 for e in v.link_edges if e.is_boundary) > 2]:
+        bmesh.utils.vert_separate(vert, [e for e in vert.link_edges if e.is_boundary])
+    uv_layer = bm.loops.layers.uv.active
+    # 서버 메시는 면 방향이 군데군데 섞여 있어(실측: 남은 루프 7개 모두 옆 면 방향이 한 곳 이상 반대) 방향을 따라
+    # 걷지 않는다. 경계 차수 2 인 정점끼리 방향 없이 고리를 돌고, 면 방향은 옆 면들의 다수결로 정한다.
+    links = {}
+    for edge in bm.edges:
+        if edge.is_boundary:
+            for vert in edge.verts:
+                links.setdefault(vert, []).append(edge)
+    filled = 0
+    seen = set()
+    for first in list(links):
+        if first in seen or len(links[first]) != 2:
+            continue
+        ring, edges, vert, edge = [first], [], first, links[first][0]
+        seen.add(first)
+        closed = False
+        while True:
+            edges.append(edge)
+            vert = edge.other_vert(vert)
+            if vert is first:
+                closed = True
+                break
+            if vert in seen or len(links.get(vert, ())) != 2:
+                break                              # 가지가 남은 경계는 건드리지 않는다
+            seen.add(vert)
+            ring.append(vert)
+            edge = links[vert][0] if links[vert][1] is edge else links[vert][1]
+        if not closed or len(ring) < 3:
+            continue
+        perimeter = sum(e.calc_length() for e in edges)
+        if perimeter > limit:
+            continue
+        # 옆 면이 a→b 로 돌면 메울 면은 b→a — ring 순서(ring[i]→ring[i+1])와 같은 방향인 옆 면이 많으면 뒤집는다
+        index = {v: i for i, v in enumerate(ring)}
+        same = 0
+        for e in edges:
+            corner = e.link_loops[0]
+            a, b = index[corner.vert], index[corner.link_loop_next.vert]
+            same += 1 if (b - a) % len(ring) == 1 else -1
+        if same > 0:
+            ring.reverse()
+        corners = {}
+        for e in edges:
+            for corner in (e.link_loops[0], e.link_loops[0].link_loop_next):
+                corners.setdefault(corner.vert, corner)
+        try:
+            face = bm.faces.new(ring)
+        except ValueError:                         # 같은 정점의 면이 이미 있다
+            continue
+        face.material_index = edges[0].link_faces[0].material_index
+        face.smooth = True
+        if uv_layer is not None:
+            for corner in face.loops:
+                corner[uv_layer].uv = corners[corner.vert][uv_layer].uv
+        if len(ring) > 3:
+            # triangulate 의 대각선이 고리 건너편과 이미 이어진 엣지와 겹치면 면 3장짜리 엣지가 된다(실측 20개) —
+            # 가운데 정점 부채꼴은 고리 정점끼리 새 엣지를 만들지 않는다. 가운데 UV 는 코너 평균으로 보간된다
+            bmesh.ops.poke(bm, faces=[face])
+        filled += 1
+    if filled:
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    bm.free()
+    return filled
+
+
 def import_textured(path: str, name: str, collection, height: float = 1.8) -> dict:
     """서버가 PBR 텍스처까지 구워 준 GLB 를 그대로 가져온다 — 재질을 지우지 않고 키·위치만 맞춘다.
 
@@ -153,6 +238,7 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
     obj.name = safe_id_name(name)
     obj.data.name = obj.name
     welded = weld_seams(obj)
+    holes = fill_small_holes(obj)
     slabs = remove_ground_slabs(obj)
     normalize(obj, height)
     for polygon in obj.data.polygons:
@@ -162,4 +248,4 @@ def import_textured(path: str, name: str, collection, height: float = 1.8) -> di
               for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image}
     return {"obj": obj, "faces": len(obj.data.polygons), "tris": len(obj.data.loop_triangles),
             "materials": len([m for m in obj.data.materials if m]), "images": sorted(images),
-            "ground_slabs": slabs, "welded": welded}
+            "ground_slabs": slabs, "welded": welded, "holes": holes}

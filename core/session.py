@@ -147,6 +147,21 @@ def shutdown():
     return len(targets)
 
 
+def _show_textures():
+    """솔리드 뷰포트가 머티리얼 단색으로 그리면 PBR 텍스처가 보이지 않는다 — 텍스처 표시로 바꾼다."""
+    wm = bpy.context.window_manager
+    try:
+        for window in (wm.windows if wm else []):
+            for area in (window.screen.areas if window.screen else []):
+                if area.type != 'VIEW_3D':
+                    continue
+                for space in area.spaces:
+                    if space.type == 'VIEW_3D' and space.shading.type == 'SOLID':
+                        space.shading.color_type = 'TEXTURE'
+    except (AttributeError, RuntimeError, TypeError):
+        _log.exception("뷰포트 텍스처 표시 전환 실패")
+
+
 def _end_session(uid):
     _sessions.pop(uid, None)
     scheduler.cancel_job(uid)
@@ -522,6 +537,7 @@ class GenerationSession:
         except Exception:
             _log.exception("턴어라운드 자세 검사 실패")   # 검사 실패로 생성을 막지는 않는다
         self.shape_path = os.path.join(self.workdir, "shape.glb")
+        self.shape_front = views.get("front")     # PBR 색 보정 기준 — 서버에 넣은 바로 그 정면
         if mismatch:
             # 셰이프는 정면 1장으로 만들므로 형상에는 영향이 없다 — 매핑의 색 참조 품질에만 걸린다
             self._set_status("턴어라운드 자세 불일치",
@@ -571,10 +587,32 @@ class GenerationSession:
         self.last_code = ""
         self.compare_turns_left = 0
         weld = f", 심 중복 정점 {info['welded']:,}개 용접" if info.get('welded') else ""
+        weld += f", 열린 구멍 {info['holes']}개 메움" if info.get('holes') else ""
         self._final_note = f"{info['tris']} tris, PBR 텍스처 {len(info['images'])}장{weld}"
+        self._match_pbr_color(info['obj'])
+        _show_textures()
+        self._set_status(None, self._final_note)
         self._apply_lane()
         self._finish(f"완료 — {info['obj'].name} ({info['faces']:,}면, PBR 재질 {info['materials']}개)", ok=True)
         self._autosave()
+
+    def _match_pbr_color(self, obj):
+        """TRELLIS 베이스컬러의 색조 이동을 정면 원화 기준으로 바로잡는다 — 실패해도 결과는 그대로 둔다."""
+        front = getattr(self, "shape_front", None)
+        if not getattr(self.prefs, "character_color_match", True) or not front or not os.path.isfile(front):
+            return
+        from ..lowpoly import color_match
+        try:
+            stats = color_match.apply_to_object(obj, front)
+        except Exception as e:
+            _log.exception("PBR 색 보정 실패")
+            self._set_status(None, f"PBR 색 보정 실패: {e}")
+            return
+        if stats.get("applied"):
+            self._set_status(None, f"PBR 색 보정: 원화 대비 오차 {stats['before']:.1f} → {stats['after']:.1f}"
+                                   f" (샘플 {stats['samples']:,})")
+        else:
+            self._set_status(None, f"PBR 색 보정 생략: {stats.get('reason', '')}")
 
     def _start_generation(self):
         fewshot = []
@@ -698,7 +736,8 @@ class GenerationSession:
             job.log = "\n".join((job.log + f"\n결과 저장: {folder}").strip().splitlines()[-30:])
             # 재료를 옮긴 뒤의 경로로 다시 새긴다 — 이 .blend 를 열면 이 정보로 큐 항목이 되살아난다
             genmeta.stamp(job, self.collection_name)
-        autosave.write_blend(folder, self.collection_name, visible, hidden)
+        studio_kind = self.system_mode if self.system_mode in ('CHARACTER', 'OBJECT') else None
+        autosave.write_blend(folder, self.collection_name, visible, hidden, studio_kind=studio_kind)
 
     def _relocate(self, moved: dict):
         """옮긴 재료를 가리키던 잡 경로·이미지 경로를 새 자리로 바꾼다 (다음 실행·.blend가 깨지지 않게)."""

@@ -138,6 +138,12 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=2048, min=512, max=4096, step=512,
         update=_persist_cb,
     )
+    character_color_match: BoolProperty(
+        name="PBR 색을 원화에 맞추기",
+        description="이미지→3D 텍스처의 색조 이동(노랑→주황 등)을 서버에 넣은 정면 원화 기준으로 보정한다",
+        default=True,
+        update=_persist_cb,
+    )
     character_height: FloatProperty(
         name="캐릭터 기본 키(m)",
         description="이미지→3D 셰이프의 크기 기준. 발바닥 z=0에서 머리끝까지",
@@ -350,6 +356,7 @@ class LP3DPreferences(bpy.types.AddonPreferences):
             box.prop(self, "shapegen_token")
             box.prop(self, "shapegen_texture_size")
             box.prop(self, "character_height")
+            box.prop(self, "character_color_match")
         else:
             box.label(text="서버 없이 코드 모델링으로 만듭니다 (품질 낮음)", icon='INFO')
 
@@ -431,6 +438,7 @@ class _Defaults:
     shapegen_token = ""
     shapegen_texture_size = 2048
     character_height = 1.8
+    character_color_match = True
     scene_tri_budget = 0
     scene_max_assets = 0
     scene_timeout_scale = 2.0

@@ -12,7 +12,8 @@
 따라 자연스럽게 막힌다(큰 찢김일수록 캡이 안쪽으로 움푹하다).
 
 표면 격자는 공식 경로처럼 거칠게 시작해 표면 근처(중심 UDF < 0.87칸)와 **꼭짓점 부호가 섞인** 복셀만 8분할해 내려간다 —
-찢김 캡은 표면에서 멀어도 부호가 바뀌는 자리라 격자에 들어온다. 최종 격자 꼭짓점의 값은 (속이면 -, 밖이면 +) × UDF 다.
+찢김 캡은 표면에서 멀어도 부호가 바뀌는 자리라 격자에 들어온다. 최종 격자 꼭짓점의 값은 min(부호 있는 거리, UDF - 한 칸)
+이다 — 한 칸보다 얇은 판(모자 챙·옷 끝단)은 광선으로는 속인 꼭짓점이 없어 사라지므로 표면 둘레 한 칸을 속에 더한다.
 
 텍스처는 공식 경로와 같이 UV 공간 래스터 → 3D 위치 → 속성 볼륨 삼중선형 샘플이지만, 위치를 **원본 등위면**의 가장
 가까운 점으로 되돌린 뒤 샘플한다(공식 경로는 to_glb 입력 메시 기준). 찢김 캡은 가장 가까운 찢김 가장자리 색을 받는다.
@@ -28,6 +29,9 @@ NEAR_CELL = 0.87         # 복셀 중심 UDF 가 이 × 칸 크기 미만이면 
 MIN_COMPONENT_AREA = 2e-4  # 이보다 작은 조각(도메인 한 변 1.0 기준 1.4cm² 안팎)은 지운다 — 광선 판정이 흔들린 격자 꼭짓점 하나가
                            # 만드는 몸속 방울(실측 2026-10-02: 데시메이트 뒤 조각 6,378개)은 수 mm 크기다
 SMOOTH_ROUNDS = 2          # 안/밖 판정의 6 이웃 다수결 반복 횟수 — 광선이 틈을 스치는 자리의 점 단위 흔들림을 지운다
+THIN_BAND = 1.0          # 표면에서 이 × 칸 크기 안의 꼭짓점도 속으로 친다 — 모자 챙·옷 끝단처럼 한 칸보다 얇은 판은 광선 판정으로는
+                         # 속인 꼭짓점이 하나도 없어 통째로 사라졌다(실측 2026-10-11: 공식 경로엔 있는 모자 챙이 속 채움에선 전멸,
+                         # 소매·바짓단 톱니). 얇은 판은 ±1칸 두께의 판(공식 band=1 과 같은 폭)으로, 두꺼운 곳은 그대로 속이 찬다
 HOLE_PERIMETER = 0.30    # 데시메이트·비매니폴드 복구가 낸 구멍을 메우는 둘레 상한(도메인 한 변 1.0 기준, 키 1m 캐릭터에서 30cm).
                          # 속이 찬 한 겹에는 옷과 몸 사이 공동 입구 같은 '메우면 안 되는 구멍'이 없다 — 눈·입은 오목한 면이지 구멍이 아니다
 
@@ -94,8 +98,10 @@ def lookup_flags(keys_sorted: torch.Tensor, flags_sorted: torch.Tensor, query_ke
 class SignCache:
     """한 해상도의 격자 꼭짓점 안/밖 판정 캐시 — 처음 보는 꼭짓점만 광선을 쏜다."""
 
-    def __init__(self, bvh, resolution: int, scale: float, center: torch.Tensor, min_escapes: int, device):
+    def __init__(self, bvh, resolution: int, scale: float, center: torch.Tensor, min_escapes: int, device,
+                 band: float = THIN_BAND):
         self.bvh, self.resolution, self.scale, self.center, self.min_escapes = bvh, resolution, scale, center, min_escapes
+        self.band = band * scale / resolution       # 절대 거리 — 해상도마다 한 칸 크기가 다르다
         self.keys = torch.empty(0, dtype=torch.int64, device=device)
         self.flags = torch.empty(0, dtype=torch.bool, device=device)
         self.queries = 0
@@ -116,7 +122,7 @@ class SignCache:
         missing = uniq[~known]
         if missing.shape[0]:
             pts = (self._coords(missing).float() / self.resolution - 0.5) * self.scale + self.center
-            new_flags = inside_mask(self.bvh, pts, self.min_escapes)
+            new_flags = inside_mask(self.bvh, pts, self.min_escapes) | (self.bvh.unsigned_distance(pts)[0] < self.band)
             self.queries += int(missing.shape[0])
             self.keys = torch.cat([self.keys, missing])
             self.flags = torch.cat([self.flags, new_flags])
@@ -248,9 +254,10 @@ def remesh_solid_dc(vertices: torch.Tensor, faces: torch.Tensor, center: torch.T
     pts_vert = (grid_verts.float() / resolution - 0.5) * scale + center
     udf = bvh.unsigned_distance(pts_vert)[0]
     inside_vert = cache.flags_for(grid_verts)
-    values = torch.where(inside_vert, -udf, udf)
-    # 0 에 정확히 걸린 값은 부호가 없어 교차 판정이 흔들린다 — 아주 작은 양수로 민다
-    values = torch.where(values == 0, torch.full_like(values, 1e-7), values)
+    # 장은 min(부호 있는 거리, UDF - 띠) — 두꺼운 곳의 속은 -UDF, 얇은 판 둘레는 UDF - 띠 로 판 양쪽에 면이 선다.
+    # 다수결로 뒤집힌 꼭짓점도 부호는 판정을 따르도록 크기만 쓰고, 0 에 걸리지 않게 아주 작은 값으로 민다
+    band = cache.band
+    values = torch.where(inside_vert, torch.minimum(-udf, udf - band).clamp(max=-1e-7), (udf - band).clamp(min=1e-7))
 
     hashmap_vert = _init_hashmap(resolution + 1, 2 * n_vert, device)
     _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vert, torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1),

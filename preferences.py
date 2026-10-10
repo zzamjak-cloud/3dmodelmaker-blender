@@ -144,13 +144,6 @@ class LP3DPreferences(bpy.types.AddonPreferences):
         default=True,
         update=_persist_cb,
     )
-    character_front_detail: BoolProperty(
-        name="정면 원화 디테일 투영",
-        description="눈·입·프린트처럼 이미지→3D 텍스처가 뭉갠 디테일을 정면 원화에서 정면을 향한 면에 직접 입힌다. "
-                    "머리카락·피부가 번들거리지 않게 러프니스 하한도 올린다",
-        default=True,
-        update=_persist_cb,
-    )
     character_height: FloatProperty(
         name="캐릭터 기본 키(m)",
         description="이미지→3D 셰이프의 크기 기준. 발바닥 z=0에서 머리끝까지",
@@ -364,7 +357,6 @@ class LP3DPreferences(bpy.types.AddonPreferences):
             box.prop(self, "shapegen_texture_size")
             box.prop(self, "character_height")
             box.prop(self, "character_color_match")
-            box.prop(self, "character_front_detail")
         else:
             box.label(text="서버 없이 코드 모델링으로 만듭니다 (품질 낮음)", icon='INFO')
 
@@ -447,7 +439,6 @@ class _Defaults:
     shapegen_texture_size = 2048
     character_height = 1.8
     character_color_match = True
-    character_front_detail = True
     scene_tri_budget = 0
     scene_max_assets = 0
     scene_timeout_scale = 2.0

@@ -18,6 +18,7 @@ FLAT_TOL = 0.04                    # 주변과 이만큼 이상 다르면 경계
 MIN_SAMPLES = 1500                 # 이보다 적으면 맞추지 않는다
 MIN_GAIN = 0.15                    # 오차가 이 비율 이상 줄 때만 적용한다
 RIDGE = 0.02                       # 항등 변환 쪽으로 당기는 정칙화 — 적은 색 범위에 과적합하지 않게
+ROUGHNESS_FLOOR = 0.45             # 러프니스 하한 — TRELLIS 가 머리카락·피부에 낮은 값을 줘 녹은 플라스틱처럼 번들거렸다
 
 
 def figure_bbox(rgb: np.ndarray):
@@ -210,3 +211,30 @@ def apply_to_object(obj, reference_path: str) -> dict:
         image.pack()                                  # 고친 픽셀을 .blend 에 다시 담는다
     stats["applied"] = True
     return stats
+
+
+def floor_roughness(obj, floor: float = ROUGHNESS_FLOOR) -> int:
+    """metallicRoughness(G=러프니스) 이미지의 하한을 올린다. 바꾼 이미지 수."""
+    changed = 0
+    for mat in obj.data.materials:
+        if not (mat and mat.use_nodes):
+            continue
+        bsdf = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        if bsdf is None or not bsdf.inputs["Roughness"].links:
+            continue
+        node = bsdf.inputs["Roughness"].links[0].from_node
+        while node is not None and node.type != 'TEX_IMAGE':      # glTF 임포트: 이미지 → 색 분리 → 러프니스
+            links = [l for i in node.inputs for l in i.links]
+            node = links[0].from_node if links else None
+        if node is None or node.image is None:
+            continue
+        px = _image_rgb(node.image)
+        if px[..., 1].min() >= floor:
+            continue
+        px[..., 1] = np.maximum(px[..., 1], floor)
+        node.image.pixels.foreach_set(px[::-1].ravel())
+        node.image.update()
+        if node.image.packed_file is not None:
+            node.image.pack()
+        changed += 1
+    return changed

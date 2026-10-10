@@ -14,7 +14,7 @@ _PREF_KEYS = ("codex_path", "timeout", "ai_concurrency",
               "asset_library_path", "texture_resolution", "texture_per_view",
               "image_backend", "openrouter_api_key", "image_model", "image_quality",
               "character_compare_turns", "object_review_turns", "scene_asset_review_turns", "use_shapegen", "shapegen_url", "shapegen_token",
-              "character_height", "shapegen_texture_size", "character_color_match", "character_front_detail",
+              "character_height", "shapegen_texture_size", "character_color_match",
               "scene_tri_budget", "scene_max_assets", "scene_timeout_scale",
               # 턴 역할별 모델 라우팅 · 검토 비용 설정
               "generate_model", "generate_effort", "review_model", "review_effort",

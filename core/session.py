@@ -590,7 +590,7 @@ class GenerationSession:
         weld += f", 열린 구멍 {info['holes']}개 메움" if info.get('holes') else ""
         self._final_note = f"{info['tris']} tris, PBR 텍스처 {len(info['images'])}장{weld}"
         self._match_pbr_color(info['obj'])
-        self._project_front_detail(info['obj'])
+        self._floor_roughness(info['obj'])
         _show_textures()
         self._set_status(None, self._final_note)
         self._apply_lane()
@@ -615,22 +615,14 @@ class GenerationSession:
         else:
             self._set_status(None, f"PBR 색 보정 생략: {stats.get('reason', '')}")
 
-    def _project_front_detail(self, obj):
-        """정면 원화의 디테일(눈·입·프린트)을 PBR 베이스컬러에 투영하고 러프니스 하한을 올린다 — 실패해도 결과는 그대로."""
-        front = getattr(self, "shape_front", None)
-        if not getattr(self.prefs, "character_front_detail", True) or not front or not os.path.isfile(front):
-            return
-        from ..lowpoly import front_project
+    def _floor_roughness(self, obj):
+        """TRELLIS 러프니스가 낮아 머리카락·피부가 번들거린다 — 하한을 올린다. 실패해도 결과는 그대로."""
+        from ..lowpoly import color_match
         try:
-            stats = front_project.apply_to_object(obj, front)
+            color_match.floor_roughness(obj)
         except Exception as e:
-            _log.exception("정면 디테일 투영 실패")
-            self._set_status(None, f"정면 디테일 투영 실패: {e}")
-            return
-        if stats.get("applied"):
-            self._set_status(None, f"정면 디테일 투영: 텍셀 {stats['texels']:,}개 (실루엣 일치 {stats['iou']:.2f})")
-        else:
-            self._set_status(None, f"정면 디테일 투영 생략: {stats.get('reason', '')}")
+            _log.exception("러프니스 하한 적용 실패")
+            self._set_status(None, f"러프니스 하한 적용 실패: {e}")
 
     def _start_generation(self):
         fewshot = []

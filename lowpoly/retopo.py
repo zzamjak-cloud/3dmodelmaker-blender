@@ -137,10 +137,14 @@ def fill_small_holes(obj, max_ratio: float = HOLE_MAX_PERIMETER) -> int:
     서버(v0.42.0~)는 속을 채운 닫힌 한 겹을 보내므로 열린 루프는 전부 결함이다. 서버의 cumesh fill_holes 는
     둘레 제한 안이어도 가지가 있는 복잡한 루프를 남긴다(실측 2026-10-10, 소녀 피규어: 부츠 옆면 둘레 0.16
     짜리 73엣지 루프 → 바닥에서 올려다보면 구멍). bmesh.ops.holes_fill 은 같은 메시에서 단순 루프를 남기고 비매니폴드
-    엣지를 만들어 쓰지 않는다 — 루프마다 면을 직접 만들고, 코너 UV 는 옆 면에서 옮겨 온다.
+    엣지를 만들어 쓰지 않는다 — 루프마다 면을 직접 만들고, 옆 면 한 코너의 색(UV 한 점)으로 칠한다.
     용접 전에 돌리면 UV 심이 전부 경계라 메우면 안 되는 곳까지 막는다 — weld_seams 뒤에 부른다."""
     zs = [v.co.z for v in obj.data.vertices]
     limit = (max(zs) - min(zs)) * max_ratio if zs else 0.0
+    # 서버는 모델을 격자 끝까지 채워 내보내 격자 바닥에 닿은 납작한 발바닥이 통째로 열린다(실측 2026-10-11: 운동화 바닥
+    # 둘레 키의 39%) — 맨 아래에 수평으로 놓인 루프는 둘레와 상관없이 메운다. 이 판정의 높이 허용치
+    sole_tol = (max(zs) - min(zs)) * 0.01 if zs else 0.0
+    floor_z = min(zs) if zs else 0.0
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     # 두 루프가 정점 하나에서 맞닿은 8자 루프(실측: 경계 차수 4·6 정점 43개)는 따라가는 길이 갈린다 —
@@ -177,7 +181,8 @@ def fill_small_holes(obj, max_ratio: float = HOLE_MAX_PERIMETER) -> int:
         if not closed or len(ring) < 3:
             continue
         perimeter = sum(e.calc_length() for e in edges)
-        if perimeter > limit:
+        on_floor = all(v.co.z - floor_z <= sole_tol for v in ring)
+        if perimeter > limit and not on_floor:
             continue
         # 옆 면이 a→b 로 돌면 메울 면은 b→a — ring 순서(ring[i]→ring[i+1])와 같은 방향인 옆 면이 많으면 뒤집는다
         index = {v: i for i, v in enumerate(ring)}
@@ -188,10 +193,6 @@ def fill_small_holes(obj, max_ratio: float = HOLE_MAX_PERIMETER) -> int:
             same += 1 if (b - a) % len(ring) == 1 else -1
         if same > 0:
             ring.reverse()
-        corners = {}
-        for e in edges:
-            for corner in (e.link_loops[0], e.link_loops[0].link_loop_next):
-                corners.setdefault(corner.vert, corner)
         try:
             face = bm.faces.new(ring)
         except ValueError:                         # 같은 정점의 면이 이미 있다
@@ -199,11 +200,15 @@ def fill_small_holes(obj, max_ratio: float = HOLE_MAX_PERIMETER) -> int:
         face.material_index = edges[0].link_faces[0].material_index
         face.smooth = True
         if uv_layer is not None:
+            # 모든 코너에 옆 면 코너 하나의 UV 를 준다(단색). 코너마다 옆 면 UV 를 따로 옮기면 고리가 UV 섬 경계를 지날 때
+            # 서로 다른 섬의 UV 가 한 면에 섞여 아틀라스를 가로지르는 거대한 삼각형이 됐다(실측: 아틀라스 46% 가 겹침 —
+            # 메운 자리에 텍스처가 줄무늬로 늘어나고, 정면 투영이 그 텍셀을 엉뚱한 면에 칠했다)
+            uv = edges[0].link_loops[0][uv_layer].uv.copy()
             for corner in face.loops:
-                corner[uv_layer].uv = corners[corner.vert][uv_layer].uv
+                corner[uv_layer].uv = uv
         if len(ring) > 3:
             # triangulate 의 대각선이 고리 건너편과 이미 이어진 엣지와 겹치면 면 3장짜리 엣지가 된다(실측 20개) —
-            # 가운데 정점 부채꼴은 고리 정점끼리 새 엣지를 만들지 않는다. 가운데 UV 는 코너 평균으로 보간된다
+            # 가운데 정점 부채꼴은 고리 정점끼리 새 엣지를 만들지 않는다
             bmesh.ops.poke(bm, faces=[face])
         filled += 1
     if filled:

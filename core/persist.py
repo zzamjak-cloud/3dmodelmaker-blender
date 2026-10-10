@@ -22,7 +22,8 @@ _PREF_KEYS = ("codex_path", "timeout", "ai_concurrency",
               "review_mode", "review_resolution", "skip_clean_review",
               "scene_asset_review_scope")
 # 제거된 모델·턴 설정은 복원하지 않아 구버전 파일도 현재 생성 정책을 따른다.
-_SCENE_KEYS = ("export_dir", "retopo_faces", "retopo_symmetry", "retopo_polish")
+_SCENE_KEYS = ("export_dir", "retopo_faces", "retopo_symmetry", "retopo_polish",
+               "game_export", "game_height", "game_footprint")
 
 _suspended = False  # 복원 중 update 콜백의 재저장 방지
 

@@ -1,12 +1,16 @@
 # 단일 껍질(hull) 헬퍼 — 박스를 쌓지 않고 본체를 한 메시로 정의한다
+import logging
 import math
 
 import bmesh
 import bpy
 from mathutils import Matrix, Vector
 
+from . import boolean_check
 from .palette import set_color
 from .primitives import _boolean_mesh, _is_closed_mesh, _new_object, prism
+
+log = logging.getLogger(__name__)
 
 
 def _cleanup_coplanar(mesh):
@@ -244,10 +248,48 @@ def _first_uv(obj):
     return tuple(layer.data[0].uv)
 
 
+class _BooleanRejected(RuntimeError):
+    """불리언 결과가 불변식(boolean_check)을 어겨 대상을 바꾸지 않고 건너뛴다."""
+
+
+def _measure(mesh, matrix=None):
+    """(표면적, 부피) — 닫힌 메시가 아니면 부피는 None. matrix를 주면 그 변환을 적용해 잰다."""
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    if matrix is not None:
+        bm.transform(matrix)
+    area = sum(f.calc_area() for f in bm.faces)
+    closed = bool(bm.faces) and all(len(e.link_faces) == 2 for e in bm.edges)
+    volume = abs(bm.calc_volume(signed=True)) if closed else None
+    bm.free()
+    return area, volume
+
+
+def _cutter_measure(obj, cutter):
+    """obj 로컬 공간에서 잰 cutter의 (표면적, 부피) — 불리언 결과(world=False)와 같은 공간."""
+    return _measure(cutter.data, obj.matrix_world.inverted() @ cutter.matrix_world)
+
+
+def _difference_ok(before, mesh, cutter_size) -> bool:
+    after = _measure(mesh)
+    return boolean_check.difference_ok(before[0], after[0], cutter_size[0], before[1], after[1], cutter_size[1])
+
+
 def _difference(obj, cutter):
-    mesh = _boolean_mesh(obj, [cutter], 'DIFFERENCE', world=False)
-    _cleanup_coplanar(mesh)
-    _replace_mesh(obj, mesh)
+    before = _measure(obj.data)
+    cutter_size = _cutter_measure(obj, cutter)
+    for use_self in (False, True):
+        # 자기 교차 처리는 느리므로 빠른 경로 결과가 불변식을 어길 때만 다시 굽는다
+        try:
+            mesh = _boolean_mesh(obj, [cutter], 'DIFFERENCE', world=False, use_self=use_self)
+        except RuntimeError:
+            continue
+        if _difference_ok(before, mesh, cutter_size):
+            _cleanup_coplanar(mesh)
+            _replace_mesh(obj, mesh)
+            return
+        bpy.data.meshes.remove(mesh)
+    raise _BooleanRejected(f"{obj.name} - {cutter.name} 차집합 결과가 비정상(대상 소실·면적 급변)")
 
 
 # 새김 표식은 별도 UV 레이어에 둔다 — 색(UVMap)을 지우지 않아야 돋을새김 안쪽이 원래 색을 지킨다
@@ -280,16 +322,33 @@ def _imprint(obj, cutter):
     outer_src = _with_mark(obj, _SURFACE)
     plug_src = _with_mark(obj, _REGION)
     marked = _with_mark(cutter, _WALL)
+    outside = plug = None
     try:
         bpy.context.view_layer.update()
-        outside = _boolean_mesh(outer_src, [marked], 'DIFFERENCE', world=False)
-        try:
-            plug = _boolean_mesh(plug_src, [marked], 'INTERSECT', world=False)
-        except RuntimeError:
-            plug = None  # cutter가 표면에 닿지 않음
+        before = _measure(obj.data)
+        cutter_size = _cutter_measure(obj, cutter)
+        for use_self in (False, True):
+            # 앞선 cut·emboss가 남긴 자기 교차를 use_self 없이 받으면 대상이 사라지거나 표면 전체가
+            # cutter 안으로 분류된다. 느린 자기 교차 경로는 빠른 경로가 불변식을 어길 때만 쓴다
+            try:
+                outside = _boolean_mesh(outer_src, [marked], 'DIFFERENCE', world=False, use_self=use_self)
+            except RuntimeError:
+                continue
+            try:
+                plug = _boolean_mesh(plug_src, [marked], 'INTERSECT', world=False, use_self=use_self)
+            except RuntimeError:
+                plug = None  # cutter가 표면에 닿지 않음
+            if _difference_ok(before, outside, cutter_size) and _plug_ok(plug, cutter_size[0]):
+                break
+            for mesh in (outside, plug):
+                if mesh is not None:
+                    bpy.data.meshes.remove(mesh)
+            outside = plug = None
     finally:
         for temp in (outer_src, plug_src, marked):
             _remove_object(temp)
+    if outside is None:
+        raise _BooleanRejected(f"{obj.name}에 {cutter.name} 윤곽을 새긴 결과가 비정상(대상 소실·표면 전체가 영역)")
     bm = bmesh.new()
     bm.from_mesh(outside)
     bpy.data.meshes.remove(outside)
@@ -301,6 +360,17 @@ def _imprint(obj, cutter):
     bmesh.ops.delete(bm, geom=[f for f in bm.faces if _mark_of(f, mark) == _WALL], context='FACES')
     bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-5)
     return bm, color, mark
+
+
+def _plug_ok(plug, cutter_area) -> bool:
+    """교집합 중 대상 표면(표식 _REGION) 면적이 cutter 표면적을 넘지 않는지 본다."""
+    if plug is None:
+        return True
+    layer = plug.uv_layers.get(_MARK_LAYER)
+    if layer is None:
+        return True
+    region = sum(p.area for p in plug.polygons if round(layer.data[p.loop_start].uv[0]) == _REGION)
+    return boolean_check.region_ok(region, cutter_area)
 
 
 def _mark_of(face, mark):
@@ -468,6 +538,9 @@ def cut(obj, cutter, depth=None, frame=0.0, frame_color=None, keep_cutter=False)
                 set_color(cutter, frame_color)
                 wall_uv = _first_uv(cutter)
             _recess(obj, cutter, depth, frame or 0.0, inner_uv, wall_uv)
+    except _BooleanRejected as error:
+        # 대상을 망가뜨리느니 이 cut 하나를 건너뛴다 — 나머지 모델은 그대로 완성된다
+        log.warning("lp.cut 건너뜀: %s", error)
     finally:
         if not keep_cutter:
             _remove_object(cutter)
@@ -502,6 +575,8 @@ def emboss(obj, cutter, height=0.03, ring=0.0, color=None) -> bpy.types.Object:
             raised = _region_inset(bm, region, 0.0, height) + region
             _paint_faces(raised, layer, raised_uv)
         _write_imprint(obj, bm, mark)
+    except _BooleanRejected as error:
+        log.warning("lp.emboss 건너뜀: %s", error)
     finally:
         _remove_object(cutter)
     return obj

@@ -449,7 +449,12 @@ class LP3D_OT_export(bpy.types.Operator):
         out_dir = bpy.path.abspath(props.export_dir)
         os.makedirs(out_dir, exist_ok=True)
         try:
-            path = export.export_collection(coll, out_dir, self.format)
+            if self.format == 'GLTF' and props.game_export:
+                path = os.path.join(out_dir, f"{export._safe_name(coll.name)}.glb")
+                export.export_game_glb(coll, path, height=props.game_height or None,
+                                       footprint=props.game_footprint or None)
+            else:
+                path = export.export_collection(coll, out_dir, self.format)
         except Exception as e:
             self.report({'ERROR'}, f"익스포트 실패: {e}")
             return {'CANCELLED'}

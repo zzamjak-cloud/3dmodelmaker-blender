@@ -192,6 +192,26 @@ class LP3DSceneProps(bpy.types.PropertyGroup):
         default=0.5, min=0.0, max=1.0, subtype='FACTOR',
         update=_persist_cb,
     )
+    # 게임용 glTF — 팔레트 텍스처 대신 셀 색 단색 머티리얼(머티리얼 albedo만 읽는 엔진 셰이더용)
+    game_export: BoolProperty(
+        name="게임용 단색 머티리얼",
+        description=("glTF 익스포트를 팔레트 텍스처 대신 색마다 단색 머티리얼(C_<hex>)로 내보낸다 — UV·텍스처 없이 "
+                     "한 메시로 합치고 원점을 바닥 중앙에 둔다. 머티리얼 albedo로 색을 바꾸는 엔진(Godot 등)용"),
+        default=False,
+        update=_persist_cb,
+    )
+    game_height: FloatProperty(
+        name="목표 높이",
+        description="게임용 glTF를 이 높이(m)에 맞춰 균일 배율로 정규화한다. 0이면 원래 크기",
+        default=0.0, min=0.0, soft_max=10.0, unit='LENGTH',
+        update=_persist_cb,
+    )
+    game_footprint: FloatProperty(
+        name="최대 발판",
+        description="게임용 glTF의 가로·세로 중 큰 쪽이 이 값(m)을 넘지 않게 한다. 0이면 제한 없음",
+        default=0.0, min=0.0, soft_max=10.0, unit='LENGTH',
+        update=_persist_cb,
+    )
     multiview_preview_open: BoolProperty(
         name="멀티뷰 미리보기",
         description="패널에 멀티뷰(3면도) 시트 썸네일을 펼쳐 보여준다",

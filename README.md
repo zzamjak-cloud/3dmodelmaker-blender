@@ -40,6 +40,27 @@ Codex CLI의 GPT-6 Astra로 게임용 3D 모델(프랍·건물·자연물)을 �
 
 생성 턴은 `GPT-6 Astra`를 요청하고 1턴으로 완료한다. 대기 중에는 `예정 모델`이, 실행·완료 후에는 실제 사용한 모델이 상태에 표시된다. Astra가 지원되지 않거나 서버가 혼잡할 때(`at capacity`)는 초기 모델 가용성 오류에 한해서만 `Codex CLI 기본 모델 (Astra 사용 불가)`로 한 번 재시도한다. 네트워크 차단이나 로그인 만료 같은 오류에는 폴백하지 않는다. 코드 실행 실패나 응답 형식 오류의 복구 재시도는 유지하며, 성공한 결과에는 후속 AI 호출을 하지 않는다. 이전 버전의 에이전트·턴 수·모델 선택 저장값은 새 생성에 적용하지 않는다.
 
+### 헤드리스 CLI (동기 실행)
+
+패널의 [＋] → [전체 실행] → 익스포트를 명령 한 줄로 돌린다. 같은 세션 상태머신(멀티뷰 → 생성 → 실행 오류 자기수정 → 시각 검토 → 은면·동일평면·게임레디 정리)을 그대로 쓰고, 헤드리스에서 돌지 않는 `bpy.app.timers` 대신 `core.runner.drive`가 펌프를 직접 돌린다.
+
+```bash
+./scripts/dev_run.sh --background --python scripts/lp3d_cli.py -- \
+    --prompt "낡은 나무 배럴, 금속 밴드 2개" --ref ref.png --out out/barrel.glb \
+    [--style LOWPOLY] [--mode OBJECT] [--review 1] [--no-multiview] \
+    [--game] [--height 0.85] [--footprint 0.96] [--preview out/barrel.png]
+```
+
+- `--review N`: 시각 검토 턴 수(0~2). UI 기본은 0이지만 CLI 기본은 1 — 사람이 결과를 보지 않으므로 한 번은 렌더를 보고 고치게 한다
+- `--game`: 아래 **게임용 glTF**로 내보낸다. `--height`·`--footprint`(m)는 목표 높이·최대 발판(가로·세로 중 큰 쪽)에 맞춘 균일 배율 — 둘 다 주면 작은 배율
+- `--preview`: 내보낸 glb를 다시 가져와 Eevee(흰 월드 + 태양, Standard 뷰 변환)로 쿼터뷰 렌더
+- 단계별 소요 시간, 턴별 토큰, 트라이 수를 출력한다. 검토 횟수·멀티뷰 값은 이 실행 동안만 바꾸고 설정 JSON에는 쓰지 않는다
+- 결과 `.blend`·재료는 UI와 같이 보관 폴더에도 자동 저장된다
+
+### 게임용 glTF (셀별 단색 머티리얼)
+
+결과물 패널의 **게임용 단색 머티리얼**을 켜고 glTF로 내보내면(CLI는 `--game`) 공유 팔레트 텍스처 대신 면이 쓰던 팔레트 셀 색을 albedo로 가진 Principled 머티리얼(`C_<hex>`, 같은 색은 하나로 합침)로 바꾼다. UV·텍스처를 빼고 한 메시로 합치며 원점은 바닥 중앙, 정면 -Y 그대로, glTF y-up. 머티리얼 albedo로 색을 바꾸는 엔진 셰이더(머티리얼별로 다시 칠하는 Godot 게임 등)용이다. 셀 sRGB 값은 Base Color/`baseColorFactor`(선형)에 한 번만 변환해 넣으므로 엔진 임포터가 되돌린 albedo가 팔레트 PNG와 같은 색이다. 개별 매핑 머티리얼은 그대로 두고 UV도 남긴다.
+
 ### 비용 최적화 (턴 역할별 모델)
 
 Astra는 토큰 소모가 빨라 모든 턴에 쓰면 비용이 급증한다. 한 잡의 AI 턴을 네 역할로 나누고 환경설정 [고급] **턴 역할별 모델**에서 역할마다 모델과 추론 강도(reasoning effort)를 고른다. 기본값은 형태를 처음 잡는 **생성 턴만 Astra·high**, 나머지는 `Codex CLI 기본 모델`(`~/.codex/config.toml`의 `model`, 예: gpt-5.5)·medium 이다.
@@ -393,6 +414,8 @@ blender --background --factory-startup --python tests/verify_voxel_in_blender.py
 blender --background --factory-startup --python tests/verify_sceneprops_in_blender.py # 실내 방(room)·울타리(fence_run) 구조
 blender --background --factory-startup --python tests/verify_organic_in_blender.py    # 비정형 지형(outline)·meander·place_cluster·place_along 지터
 blender --background --factory-startup --python tests/verify_hull_in_blender.py       # 단일 껍질 헬퍼(silhouette·loft·cut·emboss·attach·closed tube)·mirror_x 이음새·유니온
+blender --background --factory-startup --python tests/verify_cut_in_blender.py        # cut 회귀: 띠·틀 문 위 얇은 홈이 몸통을 지우거나 벽을 홈 색으로 칠하지 않음, 비정상 결과는 건너뜀
+./scripts/dev_run.sh --background --python tests/verify_game_export_in_blender.py    # 게임용 glTF: 셀별 단색 머티리얼·선형 색·UV 제거·한 메시·바닥 중앙·정규화
 ```
 
 ## 라이선스

@@ -251,10 +251,11 @@ def _union_solids(solids) -> bpy.types.Mesh:
     return _boolean_mesh(solids[0], solids[1:], 'UNION')
 
 
-def _boolean_mesh(base, others, operation, world=True) -> bpy.types.Mesh:
+def _boolean_mesh(base, others, operation, world=True, use_self=None) -> bpy.types.Mesh:
     """base에 others를 차례로 불리언(EXACT) 적용한 메시를 반환. world=False면 base 로컬 공간.
 
-    bpy.ops 없이 모디파이어 + depsgraph 평가로 굽는다. 결과가 비면 예외."""
+    bpy.ops 없이 모디파이어 + depsgraph 평가로 굽는다. 결과가 비면 예외.
+    use_self=None이면 유니온에만 자기 교차 처리를 켠다(아래 주석)."""
     mods = []
     try:
         for other in others:
@@ -263,7 +264,7 @@ def _boolean_mesh(base, others, operation, world=True) -> bpy.types.Mesh:
             mod.solver = 'EXACT'
             # 미러·fast join으로 겹친 셸을 여러 개 품은 피연산자는 자기 교차 처리가 없으면 몸통이 통째로 사라진다.
             # 차집합·교집합에는 켜지 않는다 — 느린 판정 경로로 빠져 수 분씩 멈춘다
-            mod.use_self = operation == 'UNION'
+            mod.use_self = operation == 'UNION' if use_self is None else use_self
             mod.object = other
             mods.append(mod)
         depsgraph = bpy.context.evaluated_depsgraph_get()

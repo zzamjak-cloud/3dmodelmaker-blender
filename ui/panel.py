@@ -305,9 +305,14 @@ class LP3D_PT_output(bpy.types.Panel):
 
         col = layout.column()
         col.prop(props, "export_dir")
+        col.prop(props, "game_export")
+        if props.game_export:
+            row = col.row(align=True)
+            row.prop(props, "game_height")
+            row.prop(props, "game_footprint")
         row = col.row(align=True)
         row.operator("lp3d.export", text="FBX").format = 'FBX'
-        row.operator("lp3d.export", text="glTF").format = 'GLTF'
+        row.operator("lp3d.export", text="glTF (게임용)" if props.game_export else "glTF").format = 'GLTF'
         row = col.row(align=True)
         row.operator("lp3d.mark_asset", icon='ASSET_MANAGER')
         row.operator("lp3d.variation", icon='DUPLICATE')

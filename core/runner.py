@@ -177,6 +177,15 @@ def _ensure_pump():
         bpy.app.timers.register(_pump, first_interval=_PUMP_INTERVAL)
 
 
+def drive(done, interval: float = None):
+    """bpy.app.timers가 돌지 않는 헤드리스 스크립트(blender -b --python)에서 펌프를 직접 돌린다.
+
+    done()이 참이 될 때까지 막는다 — UI와 같은 세션 상태머신을 그대로 동기 실행하기 위한 것이다."""
+    while not done():
+        _pump()
+        time.sleep(_PUMP_INTERVAL if interval is None else interval)
+
+
 def _pump():
     finished = []
     for job in _jobs:

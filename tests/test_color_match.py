@@ -73,6 +73,24 @@ class TestColorMatch(unittest.TestCase):
         self.assertIsNone(m)
         self.assertEqual(stats["reason"], "개선 미미")
 
+    def test_background_mask_keeps_white_inside_figure(self):
+        img = np.ones((30, 30, 3))
+        img[5:25, 5:25] = 0.3
+        img[10:20, 10:20] = 1.0          # 피사체 안의 흰 티셔츠
+        bg = cm.background_mask(img)
+        self.assertTrue(bg[0, 0])
+        self.assertFalse(bg[15, 15])
+
+    def test_white_garment_stays_white(self):
+        # 흰 블록이 들어간 원화 — 흰색도 맞춤에 들어가 보정 뒤에도 흰색으로 남아야 한다
+        ref = blocks()
+        ref[16:48, 16:48] = 1.0
+        rendered = ref * 0.85 + 0.02
+        m, _stats = cm.solve(rendered, np.ones(ref.shape[:2], bool), ref)
+        self.assertIsNotNone(m)
+        white = cm.apply_affine(np.array([[0.87, 0.87, 0.87]], np.float32), m)[0]
+        self.assertGreater(white.min(), 0.95)
+
     def test_too_few_samples(self):
         ref = blocks(16, 16)
         m, stats = cm.solve(ref * 0.5, np.ones(ref.shape[:2], bool), ref)

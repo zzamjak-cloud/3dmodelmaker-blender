@@ -50,6 +50,24 @@ def box_blur(img: np.ndarray, radius: int = 2) -> np.ndarray:
     return s / (k * k)
 
 
+def background_mask(rgb: np.ndarray) -> np.ndarray:
+    """가장자리에서 이어진 흰 픽셀만 배경. 흰색 임계만 쓰면 흰 티셔츠·눈 흰자처럼 피사체 안의 흰색까지 빠져
+    변환이 흰색 쪽을 외삽으로 정하게 된다(실측: 흰 티셔츠 (1,1,1) → (0.82,0.88,0.96) 하늘색)."""
+    white = rgb[..., :3].min(axis=-1) >= WHITE_LEVEL
+    bg = np.zeros_like(white)
+    bg[0, :], bg[-1, :], bg[:, 0], bg[:, -1] = white[0, :], white[-1, :], white[:, 0], white[:, -1]
+    while True:
+        grown = bg.copy()
+        grown[1:] |= bg[:-1]
+        grown[:-1] |= bg[1:]
+        grown[:, 1:] |= bg[:, :-1]
+        grown[:, :-1] |= bg[:, 1:]
+        grown &= white
+        if np.array_equal(grown, bg):
+            return bg
+        bg = grown
+
+
 def flat_mask(img: np.ndarray) -> np.ndarray:
     """주변과 색이 거의 같은(평탄한) 픽셀 — 경계에서는 두 이미지의 작은 정렬 오차가 큰 색 오차가 된다."""
     return np.abs(box_blur(img) - img).max(axis=-1) < FLAT_TOL
@@ -75,7 +93,7 @@ def solve(rendered: np.ndarray, covered: np.ndarray, reference: np.ndarray):
     """정면 렌더(텍스처 색)와 같은 격자로 맞춘 원화를 비교해 변환을 구한다.
 
     rendered/reference: (H, W, 3) 0~1, covered: (H, W) 메시가 맞은 칸. 반환 (M 또는 None, 통계 dict)."""
-    use = covered & (reference.min(axis=-1) < WHITE_LEVEL) & flat_mask(reference) & flat_mask(rendered)
+    use = covered & ~background_mask(reference) & flat_mask(reference) & flat_mask(rendered)
     stats = {"samples": int(use.sum())}
     if stats["samples"] < MIN_SAMPLES:
         stats["reason"] = "샘플 부족"

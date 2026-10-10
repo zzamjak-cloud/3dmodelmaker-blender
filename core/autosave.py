@@ -202,6 +202,9 @@ def write_blend(folder: str, name: str, collections=None, hidden=None, studio_ki
                             shifted.append((obj, offset[0], offset[1]))
                 if studio_kind:
                     from . import studio
+                    # 위에서 옮긴 location 은 depsgraph 갱신 전까지 matrix_world 에 반영되지 않는다 — 스튜디오가
+                    # 경계를 matrix_world 로 재므로 먼저 갱신해야 카메라가 옮기기 전 자리를 겨누지 않는다
+                    view_layer.update()
                     try:
                         staged = studio.build(temp, [o for c in colls for o in c.all_objects], studio_kind)
                     except Exception:   # 스튜디오 실패가 결과 저장을 막으면 안 된다 — 모델만 쓴다

@@ -25,6 +25,12 @@ for obj in list(bpy.context.selected_objects):
     coll.objects.link(obj)
 imported = {name: set(getattr(bpy.data, name).keys()) for name in before}
 
+# 큐 결과처럼 씬의 빈자리로 옮겨 둔 상태 — 파일 안에서는 원점으로 되돌아가고 카메라도 그 자리를 겨눠야 한다
+jobs = __import__(f"{MODULE}.core.jobs", fromlist=["x"])
+for obj in coll.objects:
+    obj.location.x += 7.0
+coll[jobs.PLACE_MARK] = (7.0, 0.0)
+bpy.context.view_layer.update()
 blend = autosave.write_blend(out, "StudioVerify", ["StudioVerify"], [], studio_kind='CHARACTER')
 assert blend and os.path.isfile(blend), blend
 # 작업 파일에 스튜디오 데이터블록이 남지 않아야 한다
@@ -43,6 +49,15 @@ assert scene.world is not None and any(n.type == 'TEX_ENVIRONMENT' and n.image a
                                        for n in scene.world.node_tree.nodes), "HDRI 가 담기지 않음"
 print(f"[verify] 열린 파일: 엔진 {scene.render.engine}, 색 {scene.view_settings.view_transform}, "
       f"조명 {lights}, {scene.render.resolution_x}x{scene.render.resolution_y}")
+# 카메라가 모델을 보는지 — 모델 경계 중심이 카메라 화면 안쪽에 들어와야 한다
+from bpy_extras.object_utils import world_to_camera_view
+from mathutils import Vector
+meshes = [o for o in scene.objects if o.type == 'MESH' and not o.name.startswith("Studio")]
+pts = [o.matrix_world @ Vector(c) for o in meshes for c in o.bound_box]
+center = sum(pts, Vector()) / len(pts)
+ndc = world_to_camera_view(scene, scene.camera, center)
+assert 0.3 < ndc.x < 0.7 and 0.3 < ndc.y < 0.7 and ndc.z > 0, f"모델이 화면 밖: {ndc}"
+print(f"[verify] 모델 중심 화면 좌표 {ndc.x:.2f}, {ndc.y:.2f}")
 scene.render.filepath = os.path.join(out, "studio_render.png")
 bpy.ops.render.render(write_still=True)
 print("[verify] OK")

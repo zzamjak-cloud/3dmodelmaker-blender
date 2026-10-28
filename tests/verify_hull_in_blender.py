@@ -204,7 +204,7 @@ sock = cell_uv(snap_cell((0.1, 0.08, 0.08)))
 uv = leg.data.uv_layers.active.data
 painted = [p for p in leg.data.polygons
            if abs(uv[p.loop_indices[0]].uv[0] - sock[0]) < 1e-4 and abs(uv[p.loop_indices[0]].uv[1] - sock[1]) < 1e-4]
-check("범위 칠하기: 아래 링+바닥캡만", len(painted), 6 + 1)
+check("범위 칠하기: 아래 링+바닥캡(쿼드 2장)만", len(painted), 6 + 2)
 
 # --- union: 겹친 셸을 품은(mirror된) 피연산자도 한 셸로 ---
 def shells(obj):
@@ -235,6 +235,38 @@ closed, volume, tris, bx, by, bz = stats(animal)
 check("유기체 union 단일 셸", shells(animal), 1)
 check("유기체 union 수밀", closed, True)
 check("유기체 union 몸통 보존(상단 높이)", round(bz[1], 3), 0.9, "approx")
+
+# --- 쿼드 위상: 구·캡이 쿼드라 edge loop가 이어진다 ---
+def sides(obj):
+    return {len(p.vertices) for p in obj.data.polygons}
+
+
+new_scene()
+for sub, quads in ((1, 24), (2, 96), (3, 384)):
+    ball = lp.sphere(f"Q{sub}", radius=0.5, subdivisions=sub)
+    closed, volume, tris, bx, by, bz = stats(ball)
+    check(f"sphere({sub}) 전부 쿼드", sides(ball), {4})
+    check(f"sphere({sub}) 쿼드 수", len(ball.data.polygons), quads)
+    check(f"sphere({sub}) 수밀·바깥 노멀", closed and volume > 0, True)
+    check(f"sphere({sub}) 모든 꼭짓점이 구 위", max(abs(v.co.length - 0.5) for v in ball.data.vertices), 1e-5, "le")
+for seg in (6, 8, 16):
+    for obj in (lp.cylinder(f"C{seg}", segments=seg), lp.lathe(f"L{seg}", segments=seg),
+                lp.loft(f"F{seg}", segments=seg),
+                lp.loft(f"S{seg}", segments=seg, smooth=2, sections=[(0, 0.3, 0.2), (0.5, 0.4, 0.3), (1, 0.2, 0.2)],
+                        spine=[(0, 0, 0), (0.2, 0, 0.5), (0.6, 0, 0.8)])):
+        closed, volume, tris, *_ = stats(obj)
+        check(f"{obj.name} 캡 포함 전부 쿼드", sides(obj), {4})
+        check(f"{obj.name} 수밀·바깥 노멀", closed and volume > 0, True)
+odd = lp.cylinder("Odd", segments=7)
+check("홀수 고리는 n각형 캡으로 폴백", sorted(sides(odd)), [4, 7])
+ell = [(0, 0), (1, 0), (1, 0.3), (0.3, 0.3), (0.3, 1), (0, 1)]       # L자 오목 윤곽(6점)
+ell_loft = lp.loft("Ell", sections=[(0, ell), (1, ell)])
+closed, volume, *_ = stats(ell_loft)
+check("오목 윤곽은 접힌 쿼드 대신 n각형 캡으로 폴백", 6 in sides(ell_loft) and closed and volume > 0, True)
+bottom = [p for p in ell_loft.data.polygons if p.center.z < 1e-6]
+check("오목 윤곽 캡 노멀이 바깥(-Z)", all(p.normal.z < 0 for p in bottom), True)
+cone = lp.cone("Tip", segments=8)
+check("원뿔 끝은 극점 부채, 바닥은 쿼드", sorted(sides(cone)), [3, 4])
 
 # --- emboss: 띠·둘레 ---
 new_scene()

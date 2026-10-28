@@ -8,7 +8,7 @@ from mathutils import Matrix, Vector
 
 from . import boolean_check
 from .palette import set_color
-from .primitives import _boolean_mesh, _is_closed_mesh, _new_object, prism
+from .primitives import _boolean_mesh, _bridge_rings, _is_closed_mesh, _new_object, prism
 
 log = logging.getLogger(__name__)
 
@@ -222,20 +222,7 @@ def loft(name="Loft", sections=((0.0, 0.6, 0.4), (0.5, 0.8, 0.5), (1.0, 0.3, 0.3
             rings.append(bm.verts.new(place(index, row[1], row[2])))
             continue
         rings.append([bm.verts.new(place(index, row[1 + 2 * i], row[2 + 2 * i])) for i in range(count)])
-    for lower, upper in zip(rings, rings[1:]):
-        if isinstance(lower, list) and isinstance(upper, list):
-            for i in range(count):
-                bm.faces.new((lower[i], lower[(i + 1) % count], upper[(i + 1) % count], upper[i]))
-        elif isinstance(lower, list):
-            for i in range(count):
-                bm.faces.new((lower[i], lower[(i + 1) % count], upper))
-        elif isinstance(upper, list):
-            for i in range(count):
-                bm.faces.new((lower, upper[(i + 1) % count], upper[i]))
-    if isinstance(rings[0], list):
-        bm.faces.new(tuple(reversed(rings[0])))
-    if isinstance(rings[-1], list):
-        bm.faces.new(tuple(rings[-1]))
+    _bridge_rings(bm, rings, count)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     return _new_object(name, bm, location, rotation, (1, 1, 1))
 
@@ -508,20 +495,20 @@ def _recess(obj, cutter, depth, frame, inner_uv, wall_uv):
 def cut(obj, cutter, depth=None, frame=0.0, frame_color=None, keep_cutter=False) -> bpy.types.Object:
     """cutter 모양만큼 obj를 파낸다(불리언 차집합). obj를 반환하고 cutter는 삭제된다.
 
-    판을 덧붙이는 대신 파서 만들어라: 창문·문 홈, 휠 아치, 손잡이 구멍, 칼집 홈,
-    계단식 파단면, 상자 뚜껑 틈. cutter는 lp.box/prism/cylinder 등 닫힌 메시로 만들어
+    실제로 뚫리거나 패인 형태에만 써라: 휠 아치, 손잡이 구멍, 칼집 홈, 계단식 파단면, 상자 뚜껑 틈.
+    불리언이라 잘린 면이 n각형·삼각형 조각이 되어 쿼드 흐름이 끊긴다 — 창·문은 파지 말고 틀 판과
+    유리·문짝 판을 lp.attach(align=True)로 덧붙여라. 생명체의 몸에는 쓰지 마라. cutter는 lp.box/prism/cylinder 등 닫힌 메시로 만들어
     obj 표면을 넉넉히 관통하게 배치한다. cutter에 미리 set_color 하면 파인 안쪽 면이 그 색이 된다
-    (어두운 홈·유리창 표현) — 그러려면 obj 색을 cut 전에 입혀라.
+    (어두운 홈 표현) — 그러려면 obj 색을 cut 전에 입혀라.
     depth=None(기본): cutter 부피 전체를 파낸다(구멍·아치·관통 홈).
     depth=0.02~0.06: cutter가 덮는 영역의 표면을 그 깊이만큼만 판다 — 홈 바닥이 표면을 따라
-      기울므로 경사진 차창·곡면 선체·기울어진 벽에서도 유리면이 표면과 나란하다.
-      창·문·패널은 이것을 써라. cutter는 표면 앞뒤로 충분히 길게(관통하게) 만들면 된다.
+      기울므로 경사진 곡면 선체·기울어진 벽에서도 홈 바닥이 표면과 나란하다.
+      cutter는 표면 앞뒤로 충분히 길게(관통하게) 만들면 된다.
     frame=0.03~0.06: 창틀. 파인 영역 둘레에 이 폭의 띠를 frame_color로 얕게(depth의 40%) 남기고
-      안쪽만 depth까지 판다 — 틀과 유리가 같은 윤곽에서 나오므로 서로 어긋나지 않는다.
-      창틀을 box로 따로 둘러 붙이지 마라. frame만 주면 depth는 0.05로 잡는다.
+      안쪽만 depth까지 판다. frame만 주면 depth는 0.05로 잡는다.
     예: 휠 아치 = lp.cut(body, lp.cylinder("Arch", radius=0.42, depth=2.0, segments=10,
                           location=(0, 1.2, 0.3), rotation=(0, 1.5708, 0)))
-        틀 있는 옆창 = lp.cut(body, glass_prism, depth=0.04, frame=0.04, frame_color=(0.1, 0.1, 0.1))"""
+        틀 있는 홈 = lp.cut(hull_body, slot_box, depth=0.04, frame=0.04, frame_color=(0.1, 0.1, 0.1))"""
     if not _is_closed_mesh(cutter.data):
         raise ValueError(f"cut의 cutter는 닫힌 메시여야 한다: {cutter.name} (plane 등 열린 면 불가)")
     if frame and depth is None:
@@ -553,8 +540,10 @@ def emboss(obj, cutter, height=0.03, ring=0.0, color=None) -> bpy.types.Object:
     표면을 따라 올리므로 곡면·경사면에서도 몰딩이 표면에 딱 붙는다. box를 덧대지 말고 이것을 써라:
       띠(trim): 본체를 가로지르는 얇은 판 cutter(예: box size=(3, 5, 0.06))로 차체 몰딩·배 측면
         보호대·통의 금속 띠·벨트를 한 바퀴 두른다.
-      패널: 문짝·해치·명판·근육 덩어리를 cutter 모양 그대로 올린다.
-      ring=0.02~0.05: 영역 전체가 아니라 둘레 띠만 올린다 — 도드라진 창틀·액자·테두리.
+      패널: 해치·명판을 cutter 모양 그대로 올린다.
+      ring=0.02~0.05: 영역 전체가 아니라 둘레 띠만 올린다 — 도드라진 액자·테두리.
+    불리언으로 윤곽을 새기므로 표면이 조각난다 — 창·문은 이것 대신 판을 lp.attach로 덧붙이고,
+    생명체의 몸(근육 등)은 loft·sphere를 겹쳐 만들어라.
     color(없으면 cutter 색, cutter도 무색이면 obj 색)가 올라온 면의 색이 된다. height 0.01~0.06 권장.
     예: 배 측면 보호대 = lp.emboss(hull, lp.box("Rail", size=(3, 6, 0.08), location=(0, 0, 0.9)),
                                height=0.05, color=(0.2, 0.3, 0.7))"""

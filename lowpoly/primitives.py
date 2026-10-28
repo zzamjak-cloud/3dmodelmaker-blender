@@ -32,32 +32,131 @@ def box(name="Box", size=(1, 1, 1), location=(0, 0, 0), rotation=(0, 0, 0)) -> b
 
 def cylinder(name="Cylinder", radius=0.5, depth=1.0, segments=8,
              location=(0, 0, 0), rotation=(0, 0, 0)) -> bpy.types.Object:
-    """원기둥. 로우폴리는 segments 6~12 권장. depth는 Z축 높이, 원점은 중심."""
+    """원기둥. 로우폴리는 segments 6~12 권장. depth는 Z축 높이, 원점은 중심. 짝수 segments면 캡이 쿼드 격자다."""
     bm = bmesh.new()
-    bmesh.ops.create_cone(
-        bm, cap_ends=True, cap_tris=False, segments=segments,
-        radius1=radius, radius2=radius, depth=depth,
-    )
+    _frustum(bm, radius, radius, depth, segments)
     return _new_object(name, bm, location, rotation, (1, 1, 1))
 
 
 def cone(name="Cone", radius_bottom=0.5, radius_top=0.0, depth=1.0, segments=8,
          location=(0, 0, 0), rotation=(0, 0, 0)) -> bpy.types.Object:
-    """원뿔/절두체. radius_top>0이면 절두체(테이퍼 기둥)가 된다."""
+    """원뿔/절두체. radius_top>0이면 절두체(테이퍼 기둥)가 된다. 짝수 segments면 캡이 쿼드 격자다."""
     bm = bmesh.new()
-    bmesh.ops.create_cone(
-        bm, cap_ends=True, cap_tris=False, segments=segments,
-        radius1=radius_bottom, radius2=radius_top, depth=depth,
-    )
+    _frustum(bm, radius_bottom, radius_top, depth, segments)
     return _new_object(name, bm, location, rotation, (1, 1, 1))
+
+
+def _frustum(bm, radius_bottom, radius_top, depth, segments) -> None:
+    """Z축 원뿔대를 bm에 만든다. 반지름 0인 끝은 극점(삼각형 부채), 나머지 끝은 _cap으로 막는다."""
+    segments = max(3, int(segments))
+    half = depth / 2
+
+    def ring(r, z):
+        if r <= 1e-6:
+            return bm.verts.new((0.0, 0.0, z))
+        return [bm.verts.new((r * math.cos(math.tau * i / segments), r * math.sin(math.tau * i / segments), z))
+                for i in range(segments)]
+
+    _bridge_rings(bm, [ring(radius_bottom, -half), ring(radius_top, half)], segments)
+
+
+def _sphere_grid(subdivisions) -> int:
+    """subdivisions → 큐브 한 면의 격자 분할 수(2^n). 면 수가 예전 아이코스피어와 비슷하고, 짝수라
+    X=0·Y=0·Z=0에 edge loop가 지나가 mirror_x 이음새가 깔끔하다."""
+    return 2 ** max(1, int(subdivisions))
 
 
 def sphere(name="Sphere", radius=0.5, subdivisions=1,
            location=(0, 0, 0), rotation=(0, 0, 0)) -> bpy.types.Object:
-    """아이코스피어. 로우폴리는 subdivisions 1~2만 사용할 것 (1=80트라이)."""
+    """쿼드 스피어(큐브 격자를 구로 투영). 면이 전부 사각형이라 edge loop가 이어진다.
+
+    subdivisions 1=24쿼드(48트라이), 2=96쿼드(192트라이), 3=384쿼드(768트라이), 4=1536쿼드.
+    로우폴리는 1~2, 캐릭터 머리·관절은 2~3."""
+    grid = _sphere_grid(subdivisions)
     bm = bmesh.new()
-    bmesh.ops.create_icosphere(bm, subdivisions=subdivisions, radius=radius)
+    bmesh.ops.create_cube(bm, size=2.0)
+    bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=grid - 1, use_grid_fill=True)
+    for v in bm.verts:
+        # 등각 큐브맵: 격자 간격을 tan으로 펴서 면 모서리 쪽 쿼드가 찌그러지지 않게 한 뒤 구로 투영
+        p = Vector(tuple(math.tan(c * math.pi / 4) for c in v.co))
+        v.co = p.normalized() * radius
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     return _new_object(name, bm, location, rotation, (1, 1, 1))
+
+
+def _cap_grid(ring):
+    """닫힌 고리(짝수 개 꼭짓점)를 쿼드 격자로 채울 좌표를 계산한다 — 실패하면 None.
+
+    고리를 a, b, a, b 개 변으로 나눈 네 변으로 보고 Coons 패치로 내부 점을 보간한다.
+    반환: (a, b, points) — points[i][j]는 Vector 또는 고리 인덱스(int)."""
+    n = len(ring)
+    if n < 4 or n % 2:
+        return None
+    a = n // 4
+    b = n // 2 - a
+    co = [Vector(v.co) for v in ring]
+
+    def edge(i, j):
+        # 경계 격자점 → 고리 인덱스
+        if j == 0:
+            return i
+        if i == a:
+            return a + j
+        if j == b:
+            return 2 * a + b - i
+        return (n - j) % n
+
+    p00, pa0, p0b, pab = co[edge(0, 0)], co[edge(a, 0)], co[edge(0, b)], co[edge(a, b)]
+    points = []
+    for i in range(a + 1):
+        row = []
+        for j in range(b + 1):
+            if i in (0, a) or j in (0, b):
+                row.append(edge(i, j))
+                continue
+            u, v = i / a, j / b
+            row.append((1 - v) * co[edge(i, 0)] + v * co[edge(i, b)]
+                       + (1 - u) * co[edge(0, j)] + u * co[edge(a, j)]
+                       - ((1 - u) * (1 - v) * p00 + u * (1 - v) * pa0 + (1 - u) * v * p0b + u * v * pab))
+        points.append(row)
+
+    # 고리 감기 방향 노멀(Newell)과 어긋나는 쿼드가 있으면(오목한 윤곽) 격자가 접힌 것이다
+    normal = Vector()
+    for k in range(n):
+        c, d = co[k], co[(k + 1) % n]
+        normal += Vector(((c.y - d.y) * (c.z + d.z), (c.z - d.z) * (c.x + d.x), (c.x - d.x) * (c.y + d.y)))
+    if normal.length < 1e-12:
+        return None
+
+    def at(i, j):
+        p = points[i][j]
+        return co[p] if isinstance(p, int) else p
+
+    for i in range(a):
+        for j in range(b):
+            quad = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1))
+            # 네 모서리가 모두 같은 쪽으로 꺾여야(볼록) 접히거나 화살촉 모양 쿼드가 아니다
+            for k in range(4):
+                turn = (quad[k] - quad[k - 1]).cross(quad[(k + 1) % 4] - quad[k])
+                if turn.dot(normal) <= 0:
+                    return None
+    return a, b, points
+
+
+def _cap(bm, ring, flip=False) -> None:
+    """닫힌 고리를 막는다. 짝수 고리는 쿼드 격자로(edge loop가 캡을 가로질러 이어진다), 안 되면 n각형 하나로.
+
+    flip=False면 고리 순서대로 감긴 면(고리 순서가 바깥에서 볼 때 반시계)을 만든다."""
+    grid = _cap_grid(ring)
+    if grid is None:
+        bm.faces.new(tuple(reversed(ring)) if flip else tuple(ring))
+        return
+    a, b, points = grid
+    verts = [[ring[p] if isinstance(p, int) else bm.verts.new(p) for p in row] for row in points]
+    for i in range(a):
+        for j in range(b):
+            quad = (verts[i][j], verts[i + 1][j], verts[i + 1][j + 1], verts[i][j + 1])
+            bm.faces.new(tuple(reversed(quad)) if flip else quad)
 
 
 def plane(name="Plane", size=(1, 1), location=(0, 0, 0), rotation=(0, 0, 0)) -> bpy.types.Object:
@@ -85,6 +184,26 @@ def _smooth_profile(profile, subdiv):
     return out
 
 
+def _bridge_rings(bm, rings, count) -> None:
+    """축 순서의 고리(꼭짓점 리스트) 또는 극점(단일 꼭짓점)들을 옆면으로 잇고 양 끝을 막는다.
+
+    고리끼리는 쿼드, 극점과는 삼각형 부채, 극점이 아닌 끝은 _cap(짝수 고리면 쿼드 격자)."""
+    for lower, upper in zip(rings, rings[1:]):
+        if isinstance(lower, list) and isinstance(upper, list):
+            for i in range(count):
+                bm.faces.new((lower[i], lower[(i + 1) % count], upper[(i + 1) % count], upper[i]))
+        elif isinstance(lower, list):  # 위가 극점
+            for i in range(count):
+                bm.faces.new((lower[i], lower[(i + 1) % count], upper))
+        elif isinstance(upper, list):  # 아래가 극점
+            for i in range(count):
+                bm.faces.new((lower, upper[(i + 1) % count], upper[i]))
+    if isinstance(rings[0], list):
+        _cap(bm, rings[0], flip=True)
+    if isinstance(rings[-1], list):
+        _cap(bm, rings[-1])
+
+
 def lathe(name="Lathe", profile=((0.3, 0.0), (0.4, 0.5), (0.3, 1.0)), segments=8,
           ellipse=(1.0, 1.0), smooth=0,
           location=(0, 0, 0), rotation=(0, 0, 0)) -> bpy.types.Object:
@@ -110,22 +229,7 @@ def lathe(name="Lathe", profile=((0.3, 0.0), (0.4, 0.5), (0.3, 1.0)), segments=8
             angle = math.tau * i / segments
             ring.append(bm.verts.new((r * math.cos(angle) * sx, r * math.sin(angle) * sy, z)))
         rings.append(ring)
-    for lower, upper in zip(rings, rings[1:]):
-        if isinstance(lower, list) and isinstance(upper, list):
-            for i in range(segments):
-                bm.faces.new((lower[i], lower[(i + 1) % segments],
-                              upper[(i + 1) % segments], upper[i]))
-        elif isinstance(lower, list):  # 위가 극점
-            for i in range(segments):
-                bm.faces.new((lower[i], lower[(i + 1) % segments], upper))
-        elif isinstance(upper, list):  # 아래가 극점
-            for i in range(segments):
-                bm.faces.new((lower, upper[(i + 1) % segments], upper[i]))
-    # 끝이 극점이 아니면 n각형으로 캡
-    if isinstance(rings[0], list):
-        bm.faces.new(tuple(reversed(rings[0])))
-    if isinstance(rings[-1], list):
-        bm.faces.new(tuple(rings[-1]))
+    _bridge_rings(bm, rings, segments)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     return _new_object(name, bm, location, rotation, (1, 1, 1))
 
@@ -290,8 +394,10 @@ def join(objects, name="Joined", mode='fast') -> bpy.types.Object:
     보존되어 후편집이 쉽다. 파트가 겹쳐 완전히 가려진 면은 시스템이 마무리
     단계에서 자동 삭제하므로 자신 있게 겹쳐 파묻어라. 면을 같은 평면에 딱 맞댄 곳도
     겹친 영역을 잘라 한 면만 남긴다(Z-fighting 방지).
-    mode='union': 닫힌 메시들을 불리언 유니온으로 병합(교차선에서 면이 잘려
-    면 수가 늘 수 있음 — 수밀 단일 셸이 꼭 필요한 경우에만)."""
+    생명체도 fast로 합친다 — 파트를 이웃에 파묻어 두면 이어진 한 몸으로 보이고 각 파트의 쿼드
+    흐름(edge loop)이 그대로 남아 후편집이 쉽다.
+    mode='union': 닫힌 메시들을 불리언 유니온으로 병합. 교차선을 따라 면이 삼각형·n각형 조각으로
+    잘려 쿼드 흐름이 끊기고 트라이가 는다 — 3D 프린트처럼 수밀 단일 셸이 꼭 필요한 경우에만 써라."""
     objects = list(objects)
     # 방금 설정한 location/rotation이 matrix_world에 반영되도록 depsgraph 갱신
     bpy.context.view_layer.update()

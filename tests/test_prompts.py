@@ -177,8 +177,9 @@ class TestObjectReviewPrompt(unittest.TestCase):
         # 실제로 나온 결함(떠 있는 부착물·창틀 어긋남·끊긴 생명체)을 짚어야 모델이 찾는다
         p = prompts.build_object_review_prompt("여우", "r.png", "", 1, 1)
         self.assertIn("lp.attach", p)
-        self.assertIn("frame=", p)
-        self.assertIn("union", p)
+        self.assertIn("덧대라", p)
+        self.assertIn("파묻어", p)
+        self.assertIn("union", p)   # union 불리언을 쓰지 말라는 지시
 
     def test_ref_image_only_when_given(self):
         self.assertNotIn("참조 이미지", prompts.build_object_review_prompt("a", "r.png", "", 1, 1))

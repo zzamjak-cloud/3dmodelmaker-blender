@@ -34,6 +34,40 @@ def bevel(obj, width=0.02, segments=1, angle_limit=60.0):
     return obj
 
 
+def _asymmetric_geom(bm, mw, tol):
+    """X=0 기준으로 이미 대칭이 아닌 연결 덩어리의 꼭짓점·엣지·면 목록 (mirror_x가 복제할 대상)."""
+    from mathutils.kdtree import KDTree
+
+    bm.verts.index_update()
+    seen, geom = set(), []
+    for start in bm.verts:
+        if start.index in seen:
+            continue
+        part, stack = [], [start]
+        seen.add(start.index)
+        while stack:
+            v = stack.pop()
+            part.append(v)
+            for e in v.link_edges:
+                o = e.other_vert(v)
+                if o.index not in seen:
+                    seen.add(o.index)
+                    stack.append(o)
+        world = [mw @ v.co for v in part]
+        tree = KDTree(len(world))
+        for i, p in enumerate(world):
+            tree.insert(p, i)
+        tree.balance()
+        if all(tree.find(Vector((-p.x, p.y, p.z)))[2] <= tol for p in world):
+            continue  # 스스로 대칭인 덩어리
+        edges = {e for v in part for e in v.link_edges}
+        faces = {f for v in part for f in v.link_faces}
+        geom.extend(part)
+        geom.extend(edges)
+        geom.extend(faces)
+    return geom
+
+
 def mirror_x(obj, merge_threshold=0.001):
     """월드 X=0 평면 기준으로 대칭 복제해 메시에 굽는다. 좌우 대칭 모델에 사용.
 
@@ -44,7 +78,12 @@ def mirror_x(obj, merge_threshold=0.001):
     bpy.context.view_layer.update()  # location 변경을 matrix_world에 반영
     mw = obj.matrix_world.copy()
     bm = _edit_bmesh(obj)
-    geom = bm.verts[:] + bm.edges[:] + bm.faces[:]
+    # 이미 X=0 기준 좌우 대칭인 덩어리(가운데 몸통·머리)는 복제하지 않는다 — 복제본이 제자리에 겹쳐
+    # 대칭이 다른 위상(캡 격자 방향 등)과 엇갈려 붙으면 non-manifold 엣지·뒤집힌 면이 생긴다
+    geom = _asymmetric_geom(bm, mw, merge_threshold)
+    if not geom:
+        bm.free()
+        return obj
     dup = bmesh.ops.duplicate(bm, geom=geom)
     verts = [e for e in dup["geom"] if isinstance(e, bmesh.types.BMVert)]
     # 로컬 → 월드 → X 반전 → 로컬 (오브젝트 트랜스폼을 존중한 월드 기준 미러)

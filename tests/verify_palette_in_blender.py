@@ -45,6 +45,9 @@ off = (y * 256 + x) * 4
 
 
 def lin_to_srgb(v):
+    # 8비트 이미지의 pixels는 sRGB 인코딩 그대로다 — float 이미지만 선형이라 변환한다
+    if not img.is_float:
+        return v
     return 12.92 * v if v <= 0.0031308 else 1.055 * (max(v, 0.0) ** (1 / 2.4)) - 0.055
 
 
@@ -64,6 +67,13 @@ out = palette.save_palette_png(d)
 h1 = hashlib.sha256(open(out, "rb").read()).hexdigest()
 h2 = hashlib.sha256(open(palette._PNG_PATH, "rb").read()).hexdigest()
 check("익스포트 PNG 바이트 동일", h1 == h2, h1[:16])
+
+# 4-1) 두 번째 호출이 멀쩡한 팔레트를 낡았다고 보고 덮어써 색이 어두워지면 안 된다
+check("정상 팔레트는 stale 아님", not palette._is_stale(img))
+palette._get_image()
+again = tuple(round(lin_to_srgb(img.pixels[off + i]) * 255) for i in range(3))
+check("재호출 후에도 텍셀 == 스냅색", all(abs(a - b) <= 1 for a, b in zip(again, expected)),
+      "sampled=%s expected=%s" % (again, expected))
 
 # 6) 구버전 이미지 업그레이드 경로 — 시나리오 13
 img["lp3d_colors"] = "{}"

@@ -89,6 +89,10 @@ def _voxel_api_names() -> list:
     return names or list(_VOXEL_API_FALLBACK)
 
 
+# 폴리 캐릭터 프롬프트에서 뺄 헬퍼 — 불리언(silhouette·cut·emboss)과 조각을 하나로 합치는 join
+_POLY_EXCLUDED = ("silhouette", "cut", "emboss", "join")
+
+
 def build_system_prompt(mode: str = "OBJECT", style: str = None) -> str:
     """모드·스타일별 시스템 프롬프트.
 
@@ -104,6 +108,12 @@ def build_system_prompt(mode: str = "OBJECT", style: str = None) -> str:
         names = names + [n for n in _voxel_api_names() if n not in names]
 
     mode_key = str(mode or "").strip().upper()
+    if mode_key == "POLY_CHARACTER":
+        # 종이접기 캐릭터는 지침 자체가 화풍이다 — 스타일 지침을 붙이지 않고, 덩어리를 녹이는
+        # 불리언 헬퍼는 어휘에서 빼 분리된 조각으로만 조립하게 한다
+        names = [n for n in names if n not in _POLY_EXCLUDED and n not in _voxel_api_names()]
+        return (_read("system_poly_character.md")
+                + "\n\n## lp 헬퍼 API 레퍼런스\n\n" + _api_reference(names))
     if mode_key == "SCENE":
         base = _read("system_scene.md")
     elif mode_key == "CHARACTER":
@@ -123,7 +133,7 @@ def _ref_note(ref_image: str) -> str:
 
 
 def _multiview_note(multiview: str, mode: str = "OBJECT") -> str:
-    if str(mode or "").strip().upper() == "CHARACTER":
+    if str(mode or "").strip().upper() in ("CHARACTER", "POLY_CHARACTER"):
         return (
             f"\n\n{multiview} 는 이 캐릭터의 턴어라운드 시트(3x2)다 "
             "(윗줄: 정면 | 뒷면 | 좌측면, 아랫줄: 우측면 | 상면 | 3/4뷰). "
@@ -177,7 +187,8 @@ def _attached_note(attached: bool) -> str:
 
 
 def build_character_compare_prompt(sheet: str, render: str, code: str, turn: int,
-                                   total: int, sheet_attached: bool = True) -> str:
+                                   total: int, sheet_attached: bool = True,
+                                   color_render: str = None) -> str:
     """6면도 시트와 현재 모델 렌더를 나란히 주고 차이를 고친 전체 코드를 요구한다.
 
     첫 생성은 시트를 '보고' 만들지만 결과가 시트와 얼마나 다른지는 알 수 없다.
@@ -187,13 +198,17 @@ def build_character_compare_prompt(sheet: str, render: str, code: str, turn: int
         f"방금 실행한 코드의 결과를 시트와 같은 6시점으로 렌더했다 (대조 {turn}/{total}).\n\n"
         f"- {sheet}: 목표 턴어라운드 시트 (윗줄 정면|뒷면|좌측면, 아랫줄 우측면|상면|3/4)"
         f"{_attached_note(sheet_attached)}\n"
-        f"- {render}: 현재 모델 렌더 (윗줄 FRONT|RIGHT|BACK, 아랫줄 LEFT|TOP|BOTTOM — 칸 순서가 시트와 다르니 라벨로 대조하라)\n\n"
-        "두 이미지를 칸별로 대조해 다음을 찾아 **모두** 고쳐라:\n"
+        f"- {render}: 현재 모델 렌더 (윗줄 FRONT|RIGHT|BACK, 아랫줄 LEFT|TOP|BOTTOM — 칸 순서가 시트와 다르니 라벨로 대조하라)\n"
+        + (f"- {color_render}: 같은 6시점의 조명 없는 색 렌더 — 위 렌더는 조명 때문에 색이 절반 가까이 어둡게 "
+           "보이므로 **색은 반드시 이 렌더로** 시트와 비교하라\n" if color_render else "")
+        + "\n"
+        "시트와 렌더를 칸별로 대조해 다음을 찾아 **모두** 고쳐라:\n"
         "1. 시트에는 있는데 모델에 없는 요소 (귀·꼬리·장비·무늬·털 다발 등) — 추가\n"
         "2. 비율 차이 — 머리 크기·어깨 폭·팔다리 길이·몸통 두께를 시트 기준으로 수정\n"
         "3. 몸에서 떨어져 떠 있는 파트, 관절에서 끊긴 파트 — 이웃 파트에 파묻고 관절 sphere로 이어라\n"
-        "4. 실루엣 차이 — 측면·상면에서 시트와 다른 윤곽\n"
-        "5. 색 배치 차이 — 어느 부위가 어떤 색인지\n\n"
+        "4. 실루엣 차이 — 측면(LEFT/RIGHT)·상면에서 시트와 다른 윤곽. 머리·주둥이·몸통의 위치·크기·기울기를 "
+        "시트 옆면에서 다시 재서(전체 높이 1 기준) 수치로 고쳐라\n"
+        "5. 색 차이 — 어느 부위가 어떤 색인지, 그리고 색 자체가 시트와 같은지. 시트에서 읽은 hex로 맞춰라\n\n"
         + _previous_code_block(code) +
         "차이를 고친 **전체 코드**를 다시 작성하라 (이전 생성물은 자동 삭제된다). 잘 맞는 부분은 "
         "그대로 두고, 트라이가 늘어도 좋으니 빠진 요소를 빼먹지 마라. "
@@ -316,7 +331,15 @@ def _fewshot_note(examples: list) -> str:
 def build_initial_prompt(user_request: str, ref_image: str = None, multiview: str = None,
                          fewshot: list = None, mode: str = "OBJECT",
                          character_type: str = "AUTO") -> str:
-    if str(mode or "").strip().upper() == "CHARACTER":
+    if str(mode or "").strip().upper() == "POLY_CHARACTER":
+        head = (
+            f"다음 캐주얼 폴리 캐릭터를 종이접기 느낌의 쿼드 로우폴리로 만들어라: {user_request}\n"
+            f"{character_type_note(character_type)}\n\n"
+            "덩어리마다 분리된 오브젝트(join·불리언 금지), 시트 옆면에서 잰 수치대로 만든 둥근 쿼드 조각(삼각화·데시메이트 금지), "
+            "시트에서 읽은 hex 색, 정면 -Y, 발바닥 z=0, 반쪽 조각 + lp.mirror_x를 반드시 지켜라. "
+            "시스템 지침의 출력 형식(STATUS 헤더 + python 코드 블록 1개)을 반드시 지켜라."
+        )
+    elif str(mode or "").strip().upper() == "CHARACTER":
         head = (
             f"다음 게임 캐릭터를 만들어라: {user_request}\n"
             f"{character_type_note(character_type)}\n\n"

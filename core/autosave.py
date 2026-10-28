@@ -10,7 +10,7 @@ import shutil
 
 log = logging.getLogger(__name__)
 
-MODE_DIRS = {'CHARACTER': 'character', 'SCENE': 'scene', 'OBJECT': 'object'}
+MODE_DIRS = {'CHARACTER': 'character', 'POLY_CHARACTER': 'poly_character', 'SCENE': 'scene', 'OBJECT': 'object'}
 
 
 def result_dir(system_mode: str = 'OBJECT') -> str:

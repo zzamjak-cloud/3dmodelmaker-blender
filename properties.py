@@ -69,6 +69,9 @@ class LP3DJobItem(bpy.types.PropertyGroup):
              "여러 에셋으로 구성된 배경 공간 생성 (플랜 → 에셋 키트 → 배치) — 머티리얼은 컬러 스와치 고정"),
             ('CHARACTER', "캐릭터",
              "게임 캐릭터 생성 — 정면 원화를 셰이프 서버에 넣어 셰이프와 PBR 텍스처를 한 번에 받는다"),
+            # 순번이 .blend에 저장되므로 새 모드는 항상 끝에 붙인다
+            ('POLY_CHARACTER', "폴리 캐릭터",
+             "종이접기 로우폴리 캐주얼 캐릭터 — 턴어라운드 시트를 보고 Astra가 분리된 조각 오브젝트로 조립한다"),
         ],
         default='OBJECT',
         update=_mode_changed_cb,

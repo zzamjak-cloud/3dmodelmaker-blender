@@ -40,7 +40,7 @@ def _retopo_source(context):
 class LP3D_OT_job_add(bpy.types.Operator):
     bl_idname = "lp3d.job_add"
     bl_label = "항목 추가"
-    bl_description = ("생성 큐에 새 항목을 추가한다 — 무엇을 만들지(오브젝트/캐릭터/배경)를 먼저 고르면 "
+    bl_description = ("생성 큐에 새 항목을 추가한다 — 무엇을 만들지(오브젝트/캐릭터/폴리 캐릭터/배경)를 먼저 고르면 "
                       "나머지 옵션은 그 모드의 기본값으로 맞춰지고, OS 네이티브 입력 창이 열린다")
 
     mode: EnumProperty(
@@ -48,6 +48,7 @@ class LP3D_OT_job_add(bpy.types.Operator):
         items=[
             ('OBJECT', "오브젝트", "단일 오브젝트"),
             ('CHARACTER', "캐릭터", "정면 원화 → 셰이프 서버"),
+            ('POLY_CHARACTER', "폴리 캐릭터", "턴어라운드 → Astra 종이접기 로우폴리 조각 조립"),
             ('SCENE', "배경 공간", "플랜 → 에셋 키트 → 배치"),
         ],
         default='OBJECT',

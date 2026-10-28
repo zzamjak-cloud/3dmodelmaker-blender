@@ -26,13 +26,30 @@ _LEGACY_PROPS = ("lp3d_colors", "lp3d_grid")
 
 # ---------- 이미지 ----------
 
-def _expected_pixels() -> list:
-    """고정 팔레트의 픽셀 버퍼(선형 float RGBA 평면 리스트)를 만든다.
+def _encode(img):
+    """팔레트 sRGB 0~1 값 → 이 이미지의 pixels 버퍼 값 변환 함수.
 
-    구버전 팔레트가 남아 있는 이미지 데이터블록을 제거하지 않고 덮어쓰기 위해
-    쓴다. Blender의 이미지 픽셀은 선형이므로 sRGB 정수값을 선형으로 변환해
-    채운다(이미지 컬러스페이스는 sRGB로 설정되어 있다)."""
+    8비트 이미지의 pixels는 저장된 값 그대로(컬러스페이스 sRGB면 sRGB 인코딩)라 변환하지 않는다.
+    float 이미지만 선형으로 저장된다. 예전에는 8비트에도 선형 값을 써서, 두 번째 set_color부터
+    모든 색이 감마가 한 번 더 걸려 어둡고 진해졌다(실측 (236,194,127) → (214,138,54))."""
     from .colorsnap import _srgb_to_linear
+    if img is not None and getattr(img, "is_float", False):
+        return _srgb_to_linear
+    return lambda value: value
+
+
+def _decode(img):
+    """_encode의 역 — pixels 버퍼 값 → sRGB 0~1."""
+    if img is not None and getattr(img, "is_float", False):
+        return _linear_to_srgb
+    return lambda value: value
+
+
+def _expected_pixels(img=None) -> list:
+    """고정 팔레트의 픽셀 버퍼(RGBA 평면 리스트)를 이미지 저장 형식(_encode)에 맞춰 만든다.
+
+    구버전 팔레트가 남아 있는 이미지 데이터블록을 제거하지 않고 덮어쓰기 위해 쓴다."""
+    _srgb_to_linear = _encode(img)
     buffer = [0.0] * (SIZE * SIZE * 4)
     for py in range(SIZE):
         cell_y = py // CELL_H
@@ -53,6 +70,7 @@ def _is_stale(img) -> bool:
         return True
     buffer = [0.0] * len(img.pixels)
     img.pixels.foreach_get(buffer)
+    decode = _decode(img)
     # 대표 셀 몇 개만 대조한다 (전체 대조는 불필요하게 비싸다)
     for cell in (0, COLS + 5, len(CELLS) // 2 + 20, len(CELLS) - 1):
         col, row = cell % COLS, cell // COLS
@@ -60,7 +78,7 @@ def _is_stale(img) -> bool:
         offset = (y * SIZE + x) * 4
         expected = CELLS[cell]
         for channel in range(3):
-            actual = round(_linear_to_srgb(buffer[offset + channel]) * 255)
+            actual = round(decode(buffer[offset + channel]) * 255)
             if abs(actual - expected[channel]) > 1:   # 8비트 왕복 오차 1 허용
                 return True
     return False
@@ -92,7 +110,7 @@ def _get_image() -> bpy.types.Image:
         if tuple(img.size) != (SIZE, SIZE):
             img.scale(SIZE, SIZE)
         img.colorspace_settings.name = 'sRGB'
-        img.pixels.foreach_set(_expected_pixels())
+        img.pixels.foreach_set(_expected_pixels(img))
         img.update()
         img.pack()
     return img

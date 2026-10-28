@@ -112,6 +112,13 @@ class TestCharacterDuplicate(unittest.TestCase):
         plain = jobs.add_job(props, "나무 상자")
         self.assertEqual(plain.creation_mode, 'OBJECT')
 
+    def test_add_poly_character_job(self):
+        props = _props()
+        job = jobs.add_job(props, "카피바라", mode='POLY_CHARACTER')
+        self.assertEqual((job.creation_mode, job.character_type, job.modeling_type),
+                         ('POLY_CHARACTER', 'AUTO', 'PALETTE'))
+        self.assertIn('POLY_CHARACTER', jobs.CHARACTER_MODES)
+
     def test_apply_mode_defaults_resets_only_mode_keys(self):
         props = _props()
         job = jobs.add_job(props, "오크 전사", mode='CHARACTER')

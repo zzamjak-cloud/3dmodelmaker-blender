@@ -14,6 +14,7 @@ from ..agents.codex_cli import CodexBackend
 from ..agents.parsing import parse_agent_reply, parse_verdict
 from . import (errors, executor, genmeta, jobs, library, models, multiview, naming,
                prompts, review_diag, runner, scheduler, shapegen, snapshots, styles, texgen)
+from .jobs import CHARACTER_MODES
 
 _sessions = {}  # uid -> GenerationSession. 여러 세션이 동시에 진행될 수 있다
 
@@ -168,6 +169,12 @@ def _end_session(uid):
     runner.remove_keepalive(uid)
 
 
+def _quad_share(objs) -> float:
+    """조각들의 면 중 사각형 비율 — 폴리 캐릭터가 편집 가능한 쿼드 위주인지 마무리 문구로 보인다."""
+    sides = [len(p.vertices) for o in objs for p in o.data.polygons]
+    return sum(1 for n in sides if n == 4) / len(sides) if sides else 0.0
+
+
 class GenerationSession:
     system_mode = 'OBJECT'  # prompts.build_system_prompt에 넘길 제작 모드
 
@@ -224,8 +231,8 @@ class GenerationSession:
         # 클래스 속성으로 따로 정하므로 여기서는 CHARACTER만 본다. 변형(variation)은
         # 원본 코드를 따르므로 모드를 바꾸지 않는다.
         mode = str(getattr(job, "creation_mode", 'OBJECT') or 'OBJECT') if job else 'OBJECT'
-        if mode == 'CHARACTER' and not variation_code:
-            self.system_mode = 'CHARACTER'
+        if mode in CHARACTER_MODES and not variation_code:
+            self.system_mode = mode
         self.character_type = (str(getattr(job, "character_type", 'AUTO') or 'AUTO')
                                if job else 'AUTO')
         # 정면 이미지 마련 방식(정면 원화 생성 / 원화 그대로)도 시작 시점에 고정한다
@@ -236,7 +243,10 @@ class GenerationSession:
         # 첫 생성은 시트를 '보고' 만들지만 결과가 얼마나 다른지는 모른다 — 나란히
         # 놓고 비교시켜야 빠진 요소·비율 오차·떨어진 파트가 잡힌다.
         self.compare_turns_left = (int(getattr(self.prefs, "character_compare_turns", 1) or 0)
-                                   if self.system_mode == 'CHARACTER' else 0)
+                                   if self._is_character() else 0)
+        if self.system_mode == 'POLY_CHARACTER' and self.compare_turns_left:
+            # 조각을 좌표로 쌓는 모드라 첫 결과의 옆면 실루엣이 시트와 크게 다르다 — 대조를 한 번 더 준다
+            self.compare_turns_left = max(self.compare_turns_left, 2)
         self.compare_turns_total = self.compare_turns_left
         if self.compare_turns_left:
             self.max_iterations = 1 + self.compare_turns_left
@@ -440,7 +450,9 @@ class GenerationSession:
             return
         # 신규 생성: 멀티뷰 참조 시트를 먼저 생성 (codex image_gen — 없으면 스킵).
         # 캐릭터의 셰이프 서버 경로는 정면 이미지가 곧 입력이라 '참조 시트 생성' 설정과 무관하게 만든다
-        needs_front = self.system_mode == 'CHARACTER' and self._shape_ready()
+        # 폴리 캐릭터는 턴어라운드 시트가 모델링·대조의 기준이라 설정과 무관하게 만든다
+        needs_front = ((self.system_mode == 'CHARACTER' and self._shape_ready())
+                       or self.system_mode == 'POLY_CHARACTER')
         if (self._use_multiview() or needs_front) and multiview.is_available():
             backend = multiview.backend_label()
             job = self._job()
@@ -454,8 +466,16 @@ class GenerationSession:
             return
         self._start_generation()
 
+    def _is_character(self) -> bool:
+        """캐릭터 계열 모드(셰이프 서버 캐릭터·폴리 캐릭터) — 턴어라운드 시트와 시트 대조 턴을 쓴다."""
+        return self.system_mode in CHARACTER_MODES
+
     def _shape_ready(self) -> bool:
-        """셰이프 서버 사용 가능 여부 (세션당 한 번만 확인 — /status 왕복을 아낀다)."""
+        """셰이프 서버 사용 가능 여부 (세션당 한 번만 확인 — /status 왕복을 아낀다).
+
+        폴리 캐릭터는 Astra가 코드로 조립하는 모드라 서버가 있어도 쓰지 않는다."""
+        if self.system_mode == 'POLY_CHARACTER':
+            return False
         if self._shape_server is None:
             self._shape_server = bool(shapegen.is_available())
         return self._shape_server
@@ -465,7 +485,7 @@ class GenerationSession:
 
         TRELLIS.2 는 이미지 1장만 받으므로 시트를 만들어 정면 칸만 잘라 쓰는 것은 해상도 낭비다.
         코드 모델링 대체 경로는 여러 각도가 필요해 시트를 그대로 쓴다."""
-        if self.system_mode != 'CHARACTER':
+        if not self._is_character():
             return 'MULTIVIEW'
         if not self._shape_ready():
             return 'TURNAROUND'
@@ -474,9 +494,16 @@ class GenerationSession:
     def _run_multiview(self):
         multiview.generate(self.request, self.workdir, self.prefs.timeout,
                            self._on_multiview, ref_image=self.ref_image,
-                           style_note=(styles.CHARACTER_IMAGE_NOTE if self.system_mode == 'CHARACTER'
-                                       else styles.image_note(self.style)),
+                           style_note=self._image_note(),
                            job_key=self.uid, sheet=self._sheet_kind())
+
+    def _image_note(self) -> str:
+        """참조 시트 화풍 — 셰이프 서버 캐릭터는 디테일 원화, 폴리 캐릭터는 종이접기 로우폴리 렌더."""
+        if self.system_mode == 'CHARACTER':
+            return styles.CHARACTER_IMAGE_NOTE
+        if self.system_mode == 'POLY_CHARACTER':
+            return styles.POLY_CHARACTER_IMAGE_NOTE
+        return styles.image_note(self.style)
 
     def _on_multiview(self, path, error=None):
         if self._stale() or getattr(self, '_cancel_requested', False):
@@ -693,7 +720,7 @@ class GenerationSession:
             return '컨셉시트'
         if self._sheet_kind() == 'FRONT':
             return '정면원화'
-        return '턴어라운드' if self.system_mode == 'CHARACTER' else '멀티뷰'
+        return '턴어라운드' if self._is_character() else '멀티뷰'
 
     def _save_collections(self):
         """개별 .blend에 담을 (보이는 컬렉션, 숨길 컬렉션) 이름 — 큐의 다른 결과는 섞지 않는다."""
@@ -723,7 +750,7 @@ class GenerationSession:
         folder = self._result_folder or autosave.group_dir(self.collection_name, self.system_mode)
         if not folder:
             return
-        ref_label = '원화' if self.system_mode == 'CHARACTER' else '참조'
+        ref_label = '원화' if self._is_character() else '참조'
         # 보관본(job.multiview_path)을 우선한다 — 작업 폴더 원본을 쓰면 보관본이 최상단에 따로 남는다
         sheet = (getattr(job, 'multiview_path', "") if job else "") or self.multiview
         files, move = {'셰이프': getattr(self, 'shape_path', "")}, {}
@@ -746,7 +773,8 @@ class GenerationSession:
             job.log = "\n".join((job.log + f"\n결과 저장: {folder}").strip().splitlines()[-30:])
             # 재료를 옮긴 뒤의 경로로 다시 새긴다 — 이 .blend 를 열면 이 정보로 큐 항목이 되살아난다
             genmeta.stamp(job, self.collection_name)
-        studio_kind = self.system_mode if self.system_mode in ('CHARACTER', 'OBJECT') else None
+        studio_kind = ('CHARACTER' if self._is_character()
+                       else 'OBJECT' if self.system_mode == 'OBJECT' else None)
         autosave.write_blend(folder, self.collection_name, visible, hidden, studio_kind=studio_kind)
 
     def _relocate(self, moved: dict):
@@ -1076,6 +1104,11 @@ class GenerationSession:
                          phase='EXEC')
         ok, error = executor.execute(code, self.collection_name,
                                      seed=self.iteration, workdir=self.workdir)
+        if ok and not self._mesh_count():
+            # 대조 턴에서 모델이 깨진 응답(주석 한 줄짜리 코드 블록 + 추론 메모)을 낸 적이 있다 — 그대로 받으면
+            # 직전 턴의 모델이 지워지고 빈 결과가 '완료'로 끝난다. 실행 오류로 보고 전체 코드를 다시 받는다
+            ok, error = False, ("RuntimeError: 코드가 메시 오브젝트를 하나도 만들지 않았다 — 코드 블록이 비었거나 "
+                                "잘렸다. 모델 전체를 처음부터 만드는 전체 코드를 다시 작성하라.")
         if not ok:
             if self.exec_retries < 2:
                 self.exec_retries += 1
@@ -1111,7 +1144,11 @@ class GenerationSession:
                 return
         self._finalize()
 
-    def _render_sheet(self, tag: str):
+    def _mesh_count(self) -> int:
+        coll = bpy.data.collections.get(self.collection_name)
+        return sum(1 for o in coll.objects if o.type == 'MESH') if coll else 0
+
+    def _render_sheet(self, tag: str, light: str = 'STUDIO'):
         """세션 컬렉션 메시를 6시점 렌더해 한 장으로 이은 경로를 돌려준다. 메시가 없으면 None.
 
         검토·대조용이라 텍스처 캡처보다 작게 렌더한다 — 이미지 토큰은 면적에 비례한다."""
@@ -1123,7 +1160,7 @@ class GenerationSession:
         out_dir = os.path.join(self.workdir, f"{tag}_{self.iteration}")
         resolution = int(getattr(self.prefs, "review_resolution", 512) or 512)
         with _bake_context(self.scene_name) as ctx:
-            views = tex_capture.render_views(ctx, mesh_objs, out_dir, resolution=resolution)
+            views = tex_capture.render_views(ctx, mesh_objs, out_dir, resolution=resolution, light=light)
         return tex_capture.join_sheet(views, os.path.join(self.workdir, f"{tag}_{self.iteration}.png"))
 
     def _history_available(self) -> bool:
@@ -1209,6 +1246,8 @@ class GenerationSession:
             render = self._render_sheet("compare")
             if not render:
                 return False
+            # 스튜디오 조명 렌더는 색을 절반 가까이 어둡게 보여 색 대조가 안 된다 — 조명 없는 색 렌더를 함께 준다
+            color = self._render_sheet("compare_color", light='FLAT')
         except Exception as e:
             _log.exception("6면도 대조 렌더 실패")
             self._set_status("6면도 대조 렌더 실패 — 대조 없이 마무리", f"대조 렌더 실패: {e}")
@@ -1224,8 +1263,10 @@ class GenerationSession:
         attached = not self._history_available()
         self._dispatch(prompts.build_character_compare_prompt(
             self._mv_name(), os.path.basename(render), self._code_for_prompt(code),
-            turn, self.compare_turns_total, sheet_attached=attached),
-            images=([self.multiview] if attached else []) + [render], role=models.ROLE_REVIEW)
+            turn, self.compare_turns_total, sheet_attached=attached,
+            color_render=os.path.basename(color) if color else None),
+            images=([self.multiview] if attached else []) + [render] + ([color] if color else []),
+            role=models.ROLE_REVIEW)
         return True
 
     def _finalize(self):
@@ -1239,7 +1280,12 @@ class GenerationSession:
         coll = bpy.data.collections.get(self.collection_name)
         if coll:
             mesh_objs = [o for o in coll.objects if o.type == 'MESH']
-            removed = cull_hidden_faces(mesh_objs)
+            if not mesh_objs:
+                self._finish("실패: 생성된 오브젝트 없음", ok=False)   # 빈 컬렉션을 '완료'로 끝내지 않는다
+                return
+            poly = self.system_mode == 'POLY_CHARACTER'
+            # 폴리 캐릭터는 조각마다 닫힌 덩어리로 남겨 따로 옮기고 고칠 수 있어야 한다 — 파묻힌 면을 지우면 구멍이 난다
+            removed = 0 if poly else cull_hidden_faces(mesh_objs)
             # 은면 판정은 파트 위치 기준이므로, 파트를 미세하게 옮기는 동일평면 띄우기는 그 뒤에 한다
             try:
                 coplanar = resolve_coplanar_faces(mesh_objs)
@@ -1252,7 +1298,8 @@ class GenerationSession:
             # 배치 실행 결과가 원점에 겹치지 않도록 레인만큼 옆으로 민다 (텍스처 대기 중에도)
             self._apply_lane()
             note = (f", 은면 {removed}개 제거" if removed else "") + \
-                   (f", 겹친 파트 {coplanar}개 띄움" if coplanar else "")
+                   (f", 겹친 파트 {coplanar}개 띄움" if coplanar else "") + \
+                   (f", 조각 {len(mesh_objs)}개·쿼드 {_quad_share(mesh_objs):.0%}" if poly else "")
             self._final_note = f"{tris} tris{note}"
             if self.modeling_type == 'TEXTURE' and mesh_objs:
                 if not texgen.is_available():
@@ -1353,7 +1400,7 @@ class GenerationSession:
                              f"텍스처 가이드 시트 생성 완료 → AI 채색 [{backend}]", phase='TEX')
             # 캐릭터는 턴어라운드를 색 원본으로 함께 넘기고 시점별 고해상(1:1 x 6)으로 받는다 —
             # 회색 가이드 한 장(칸당 512px)만 주면 색을 지어내고 얼굴이 비며 텍스처가 뿌옇다
-            is_character = self.system_mode == 'CHARACTER'
+            is_character = self._is_character()
             per_view = bool(getattr(self.prefs, "texture_per_view", False)) or is_character
             reference = self.multiview if is_character else None
             self._submit_ai_texture(lambda: texgen.generate(
@@ -1389,7 +1436,7 @@ class GenerationSession:
             if not mesh_objs:
                 raise RuntimeError("생성된 오브젝트 없음")
             resolution = int(getattr(self.prefs, "texture_resolution", "1024"))
-            if self.system_mode == 'CHARACTER':
+            if self._is_character():
                 resolution = max(resolution, 2048)  # 얼굴·의상 디테일 — 시점별 1024px 소스를 살린다
             name = tex_apply.texture_name(self.collection_name, mesh_objs)
             self._set_status(f"텍스처 베이크중 ({resolution}px, CPU)...", phase='TEX')

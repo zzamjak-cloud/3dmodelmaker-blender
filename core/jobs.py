@@ -28,7 +28,11 @@ MODE_DEFAULTS = {
     'OBJECT': {"modeling_type": 'PALETTE'},
     'SCENE': {"modeling_type": 'PALETTE', "scene_size": 'M'},
     'CHARACTER': {"modeling_type": 'PALETTE', "character_type": 'AUTO', "front_image": 'GENERATE'},
+    'POLY_CHARACTER': {"modeling_type": 'PALETTE', "character_type": 'AUTO'},
 }
+
+# 캐릭터 계열 제작 모드 — 턴어라운드 시트·시트 대조 턴·캐릭터 스튜디오를 쓴다
+CHARACTER_MODES = ('CHARACTER', 'POLY_CHARACTER')
 
 
 def apply_mode_defaults(job) -> None:
@@ -40,7 +44,7 @@ def apply_mode_defaults(job) -> None:
 
 
 def add_job(props, prompt: str = "", mode: str = 'OBJECT'):
-    """새 잡 항목을 만들어 리스트 끝에 붙이고 선택 상태로 만든다. mode 는 제작 모드(OBJECT/SCENE/CHARACTER)."""
+    """새 잡 항목을 만들어 리스트 끝에 붙이고 선택 상태로 만든다. mode 는 제작 모드(OBJECT/SCENE/CHARACTER/POLY_CHARACTER)."""
     job = props.jobs.add()
     job.uid = props.next_uid
     props.next_uid += 1

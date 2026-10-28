@@ -408,6 +408,7 @@ class TestSingleGeneration(unittest.TestCase):
                 session = self._session()
                 with (patch.object(SESSION.executor, "execute",
                                    return_value=(True, None), create=True),
+                      patch.object(session, "_mesh_count", return_value=3),
                       patch.object(session, "_finalize") as finalize,
                       patch.object(session, "_dispatch") as dispatch):
                     session._blender_execute("model_code", status)
@@ -415,6 +416,21 @@ class TestSingleGeneration(unittest.TestCase):
                 dispatch.assert_not_called()
                 self.assertEqual(session.iteration, 1)
                 self.assertEqual(session.last_code, "model_code")
+
+    def test_code_that_builds_nothing_is_retried_not_finalized(self):
+        # 대조 턴의 깨진 응답(주석 한 줄 코드)이 빈 결과를 '완료'로 끝내던 문제 — 실행 오류로 재요청한다
+        session = self._session()
+        with (patch.object(SESSION.executor, "execute", return_value=(True, None), create=True),
+              patch.object(session, "_mesh_count", return_value=0),
+              patch.object(SESSION.prompts, "build_error_prompt",
+                           side_effect=lambda error: error, create=True),
+              patch.object(session, "_finalize") as finalize,
+              patch.object(session, "_dispatch") as dispatch):
+            session._blender_execute("# 시그니처...", "DONE")
+        finalize.assert_not_called()
+        dispatch.assert_called_once()
+        self.assertIn("메시 오브젝트를 하나도", dispatch.call_args.args[0])
+        self.assertNotEqual(session.last_code, "# 시그니처...")
 
     def test_done_without_code_requires_code_and_never_finalizes(self):
         session = self._session()

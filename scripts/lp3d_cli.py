@@ -39,7 +39,7 @@ def _parse(argv):
     parser.add_argument("--ref", help="참조 이미지 (PNG/JPG/WEBP)")
     parser.add_argument("--out", required=True, help="출력 .glb 경로")
     parser.add_argument("--style", default="LOWPOLY", help="아트 스타일 id (core/styles.py)")
-    parser.add_argument("--mode", default="OBJECT", choices=("OBJECT", "SCENE", "CHARACTER"))
+    parser.add_argument("--mode", default="OBJECT", choices=("OBJECT", "SCENE", "CHARACTER", "POLY_CHARACTER"))
     parser.add_argument("--review", type=int, default=1, help="시각 검토 턴 수 0~2 (UI 기본 0, CLI 기본 1)")
     parser.add_argument("--no-multiview", action="store_true", help="멀티뷰 참조 시트 생성을 건너뛴다")
     parser.add_argument("--game", action="store_true", help="팔레트 → 셀별 단색 머티리얼 게임용 glb")
@@ -197,7 +197,10 @@ def main():
 
     persist = mods["core.persist"]
     prefs = mods["preferences"].get_prefs()
-    overrides = {"object_review_turns": max(0, min(2, args.review))}
+    # 저장된 환경설정은 bpy.app.timers로 복원되는데 헤드리스에서는 타이머가 돌지 않는다 — 직접 복원한다
+    # (안 하면 이미지 백엔드 키·턴 라우팅이 기본값으로 돌아 참조 시트 생성이 실패한다)
+    persist.apply_prefs(prefs)
+    overrides ={"object_review_turns": max(0, min(2, args.review))}
     if args.no_multiview:
         overrides["use_multiview"] = False
     saved = {key: getattr(prefs, key) for key in overrides}

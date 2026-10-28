@@ -73,6 +73,24 @@ class TestSystemPromptModes(unittest.TestCase):
         # 스타일을 지정하지 않으면 예전과 같은 로우폴리 캐주얼 지침이 붙는다
         self.assertIn("스타일 지침 — 로우폴리 캐주얼", prompts.build_system_prompt())
 
+    def test_poly_character_uses_papercraft_guide_without_boolean_helpers(self):
+        p = prompts.build_system_prompt("POLY_CHARACTER", "REALISTIC")
+        self.assertIn("종이접기", p)
+        self.assertIn("조각마다 따로 남긴다", p)
+        self.assertIn("둥근 쿼드 조각으로 만든다", p)   # 편집 가능한 쿼드 위상 — 삼각화·데시메이트 금지
+        self.assertNotIn("lp.facet", p)
+        self.assertNotIn("스타일 지침", p)           # 화풍이 지침에 고정돼 스타일 지침을 붙이지 않는다
+        # 불리언·합치기 헬퍼는 어휘에서 뺀다 (bpy 없는 환경이라 레퍼런스 본문 대신 제외 목록을 본다)
+        self.assertEqual(set(prompts._POLY_EXCLUDED), {"silhouette", "cut", "emboss", "join"})
+        self.assertIn("lp.mirror_x", p)
+
+    def test_poly_character_initial_prompt_reads_turnaround(self):
+        p = prompts.build_initial_prompt("기사", multiview="sheet.png", mode="POLY_CHARACTER",
+                                         character_type="HUMANOID")
+        self.assertIn("종이접기", p)
+        self.assertIn("턴어라운드 시트(3x2)", p)
+        self.assertIn("인간형", p)
+
     def test_scene_api_falls_back_when_lowpoly_unavailable(self):
         # bpy가 없는 환경에서도 씬 어휘 목록은 비어서는 안 된다
         names = prompts._scene_api_names()

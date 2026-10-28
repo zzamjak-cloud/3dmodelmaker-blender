@@ -72,8 +72,10 @@ class LP3D_UL_jobs(bpy.types.UIList):
             row.label(text="완료")
 
 
-_MODE_ICONS = {'OBJECT': 'MESH_CUBE', 'CHARACTER': 'ARMATURE_DATA', 'SCENE': 'WORLD'}
-_MODE_LABELS = {'OBJECT': "오브젝트", 'CHARACTER': "캐릭터", 'SCENE': "배경 공간"}
+_MODE_ICONS = {'OBJECT': 'MESH_CUBE', 'CHARACTER': 'ARMATURE_DATA', 'POLY_CHARACTER': 'MESH_ICOSPHERE',
+               'SCENE': 'WORLD'}
+_MODE_LABELS = {'OBJECT': "오브젝트", 'CHARACTER': "캐릭터", 'POLY_CHARACTER': "폴리 캐릭터",
+                'SCENE': "배경 공간"}
 
 
 class LP3D_PT_main(bpy.types.Panel):
@@ -87,10 +89,13 @@ class LP3D_PT_main(bpy.types.Panel):
         props = context.scene.lp3d
 
         # --- 새 항목: 무엇을 만들지 먼저 고른다 — 나머지 옵션은 모드 기본값으로 맞춰진다 ---
-        add = layout.row(align=True)
+        # 모드 4개를 한 줄에 두면 사이드바 폭에서 라벨이 잘린다 — 2x2로 놓는다
+        add = layout.column(align=True)
         add.scale_y = 1.3
-        for mode in ('OBJECT', 'CHARACTER', 'SCENE'):
-            add.operator("lp3d.job_add", text=_MODE_LABELS[mode], icon=_MODE_ICONS[mode]).mode = mode
+        for pair in (('OBJECT', 'SCENE'), ('CHARACTER', 'POLY_CHARACTER')):
+            row = add.row(align=True)
+            for mode in pair:
+                row.operator("lp3d.job_add", text=_MODE_LABELS[mode], icon=_MODE_ICONS[mode]).mode = mode
 
         # --- 생성 큐 리스트 ---
         row = layout.row()
@@ -153,8 +158,8 @@ class LP3D_PT_main(bpy.types.Panel):
         if getattr(job, "parent_uid", ""):
             return
         col = layout.column(align=True)
-        if job.creation_mode != 'CHARACTER':
-            # 캐릭터는 셰이프 서버가 항상 최고 품질로 만든다 — 스타일은 결과에 영향을 주지 않는다
+        if job.creation_mode not in ('CHARACTER', 'POLY_CHARACTER'):
+            # 캐릭터는 셰이프 서버가 항상 최고 품질로 만들고, 폴리 캐릭터는 종이접기 화풍이 고정이다
             col.prop(job, "style", text="스타일")
         if job.creation_mode == 'SCENE':
             col.prop(job, "scene_size", text="규모")
@@ -164,6 +169,9 @@ class LP3D_PT_main(bpy.types.Panel):
                 col.prop(job, "front_image", text="정면")
             else:
                 col.label(text="원화를 넣으면 그 캐릭터의 정면 원화를 만듭니다", icon='INFO')
+        elif job.creation_mode == 'POLY_CHARACTER':
+            col.prop(job, "character_type", text="유형")
+            col.prop(job, "modeling_type", text="재질")
         else:
             col.prop(job, "modeling_type", text="재질")
 

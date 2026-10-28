@@ -44,12 +44,14 @@ def projection(context, objects) -> dict:
 
 
 def render_views(context, objects, out_dir: str, resolution: int = CAPTURE_RESOLUTION,
-                 views=LAYOUT.views) -> dict:
+                 views=LAYOUT.views, light: str = 'STUDIO') -> dict:
     """모델을 임시 직교 카메라로 시점별 렌더한다. 반환은 시점 이름(대문자) → PNG 경로.
 
     Workbench + Standard 뷰 트랜스폼: AgX는 흰 배경을 회색으로 눌러 실루엣 대비를
     깎으므로 색 변환 없이 저장한다. 스튜디오 조명은 AI가 입체를 읽도록 남기고,
-    색은 현재 머티리얼(팔레트) 텍스처를 그대로 쓴다."""
+    색은 현재 머티리얼(팔레트) 텍스처를 그대로 쓴다.
+    light='FLAT'이면 조명 없이 텍스처 색 그대로 찍는다 — 스튜디오 조명은 정면 면도 절반 가까이
+    어둡게 눌러(실측 시트 (238,193,132) → 렌더 (127,79,37)) 색 대조에는 쓸 수 없다."""
     scene = context.scene
     proj = projection(context, objects)
     center, extent = proj["center"], proj["extent"]
@@ -89,7 +91,7 @@ def render_views(context, objects, out_dir: str, resolution: int = CAPTURE_RESOL
         vs.look = 'None'
         vs.exposure = 0.0
         vs.gamma = 1.0
-        shading.light = 'STUDIO'
+        shading.light = light
         shading.color_type = 'TEXTURE'
         shading.show_object_outline = False
         shading.background_type = 'VIEWPORT'
